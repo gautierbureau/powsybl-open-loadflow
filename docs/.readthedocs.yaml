@@ -4,6 +4,10 @@ build:
   os: ubuntu-24.04
   tools:
     python: "3.12"
+  apt_packages:
+    # libcairo2 backs CairoSVG, used to convert SVG figures to PDF for the
+    # LaTeX/PDF (formats: pdf) build.
+    - libcairo2
 
 sphinx:
   configuration: docs/conf.py

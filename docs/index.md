@@ -1,7 +1,7 @@
 ![PowSyBl Logo](_static/logos/logo_lfe_powsybl.svg)
 # Powsybl Open Load Flow
 
-## PowSyBl vs PowSyBl Open Load Flow
+**PowSyBl vs PowSyBl Open Load Flow**
 
 PowSyBl Open Load Flow provides:
 - An open-source implementation of the [LoadFlow API from PowSyBl Core](inv:powsyblcore:*:*#simulation/loadflow/index), supporting DC and AC calculations.
@@ -12,7 +12,7 @@ Most of the code is written in Java. It only relies on native code for the [KLU]
 Linux, Windows and MacOS are supported. KLU is distributed with license LGPL-2.1+.
 
 
-### Common features
+**Common features**
 
 The AC calculations are based on full Newton-Raphson algorithm. The DC calculations are based on direct current linear approximation. Open Load Flow relies on:
 - Fast and robust convergence, based on [KLU](http://faculty.cse.tamu.edu/davis/suitesparse.html) sparse solver.
@@ -27,7 +27,7 @@ and topology changes involved in contingencies or in remedial actions.
 - Support of asymmetrical calculations.
 - Implementation of three methods to update the state vector in the Newton-Raphson algorithm: classic, rescaling under maximum voltage change and linear search rescaling.
 
-### About controls
+**About controls**
 
 Open Load Flow supports:
 - Generator and static var compensator voltage remote control through PQV bus modeling. It supports any kind of shared voltage control between controllers that can be generators, static var compensators, or VSC converter stations.

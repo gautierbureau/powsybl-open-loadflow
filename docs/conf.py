@@ -71,7 +71,10 @@ extensions = ['sphinx.ext.autodoc',
               'sphinx_tabs.tabs',
               'myst_parser',
               # Extension used to add a "copy" button on code blocks
-              'sphinx_copybutton']
+              'sphinx_copybutton',
+              # Converts SVG figures to PDF for the LaTeX/PDF builder (pure-Python
+              # CairoSVG backend, so no system binary is required on Read the Docs).
+              'sphinxcontrib.cairosvgconverter']
 myst_enable_extensions = [
     "amsmath",
     "colon_fence",
@@ -79,6 +82,101 @@ myst_enable_extensions = [
     "attrs_inline"
 ]
 myst_heading_anchors = 6
+myst_dmath_double_inline = True
+numfig = True
+
+# Single source of truth for the math macros of the "Modeling and equations"
+# reference. Each entry is either "name": "definition" (no arguments) or
+# "name": ["definition", nargs]. This dict feeds BOTH the HTML renderer (MathJax,
+# via mathjax3_config) AND the PDF renderer (the Sphinx LaTeX builder, via the
+# generated latex_elements preamble below), so the two can never drift.
+_MATH_MACROS = {
+    "bm": [r"\boldsymbol{#1}", 1],
+    "code": [r"\texttt{#1}", 1],
+    # nicefrac is a LaTeX package command, not a MathJax built-in;
+    # emulate its slanted small fraction a/b so converted math renders.
+    "nicefrac": [r"{}^{#1}\!/\!_{#2}", 2],
+    "jj": r"\mathrm{j}",
+    "e": r"\mathrm{e}",
+    "Re": r"\operatorname{Re}",
+    "Im": r"\operatorname{Im}",
+    "conj": [r"\overline{#1}", 1],
+    "dd": r"\mathrm{d}",
+    "pdv": [r"\frac{\partial #1}{\partial #2}", 2],
+    "abs": [r"\left\lvert #1 \right\rvert", 1],
+    "norm": [r"\left\lVert #1 \right\rVert", 1],
+    "T": r"^{\mathsf{T}}",
+    "Vc": r"\underline{V}",
+    "Ic": r"\underline{I}",
+    "Sc": r"\underline{S}",
+    "Yc": r"\underline{Y}",
+    "vv": r"\boldsymbol{v}",
+    "xx": r"\boldsymbol{x}",
+    "ff": r"\boldsymbol{f}",
+    "gv": r"\boldsymbol{g}",
+    "bv": r"\boldsymbol{b}",
+    "Jmat": r"\boldsymbol{J}",
+    "Ymat": r"\boldsymbol{Y}",
+    "Amat": r"\boldsymbol{A}",
+    "Lmat": r"\boldsymbol{L}",
+    "Umat": r"\boldsymbol{U}",
+    "Pmat": r"\boldsymbol{P}",
+    "real": r"\mathbb{R}",
+    "pu": r"\,\text{p.u.}",
+    "SB": r"S_{\mathrm{B}}",
+    "PTDF": r"\mathrm{PTDF}",
+    "smat": r"\boldsymbol{S}",
+    "rhsv": r"\boldsymbol{r}",
+}
+
+# HTML: feed the macros to MathJax. The textmacros extension makes escaped
+# characters such as \_ render correctly inside \texttt{...} (e.g. ZERO_V).
+mathjax3_config = {
+    "loader": {"load": ["[tex]/textmacros"]},
+    "tex": {
+        "packages": {"[+]": ["textmacros"]},
+        "macros": _MATH_MACROS,
+    }
+}
+
+# PDF: the Sphinx LaTeX builder passes math to real LaTeX, so the same macros
+# must be \newcommand'd in the preamble. \Re and \Im already exist in LaTeX, so
+# they are \renewcommand'd. The macros are emitted from _MATH_MACROS above.
+_LATEX_PREDEFINED = {"Re", "Im"}
+def _latex_macro_defs(macros):
+    lines = []
+    for name, val in macros.items():
+        body, nargs = (val[0], val[1]) if isinstance(val, list) else (val, 0)
+        cmd = "renewcommand" if name in _LATEX_PREDEFINED else "newcommand"
+        argspec = f"[{nargs}]" if nargs else ""
+        lines.append(rf"\{cmd}{{\{name}}}{argspec}{{{body}}}")
+    return "\n".join(lines)
+
+latex_engine = "xelatex"  # native Unicode (π, thin spaces) used in the docs
+# Map the top toctree level (the loadflow/security/sensitivity sections) to LaTeX
+# \part, so their chapters become \chapter and the in-chapter headings \section/
+# \subsection -- otherwise the deep nesting pushes content down to \paragraph and
+# the PDF table of contents collapses.
+latex_toplevel_sectioning = "part"
+latex_elements = {
+    # Show parts, chapters and sections in the PDF ToC (Sphinx otherwise emits
+    # \setcounter{tocdepth}{1}); injected just before the ToC is typeset.
+    "tableofcontents": r"\setcounter{tocdepth}{1}\sphinxtableofcontents",
+    "preamble": r"""
+\usepackage{amssymb,mathtools}
+""" + _latex_macro_defs(_MATH_MACROS) + r"""
+% Make the math macros degrade to plain text inside PDF bookmarks, so headings
+% that contain math (e.g. "Why $\Jmat$ is factorised transposed") do not crash
+% hyperref. Disabling the building blocks is enough: the named macros expand
+% through them to readable text.
+\pdfstringdefDisableCommands{%
+  \def\boldsymbol#1{#1}\def\mathrm#1{#1}\def\mathsf#1{#1}\def\mathbb#1{#1}%
+  \def\mathtt#1{#1}\def\texttt#1{#1}\def\operatorname#1{#1}\def\text#1{#1}%
+  \def\underline#1{#1}\def\overline#1{#1}\def\frac#1#2{#1/#2}%
+  \def\left{}\def\right{}\def\lvert{|}\def\rvert{|}\def\lVert{\|}\def\rVert{\|}%
+}
+""",
+}
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
@@ -86,7 +184,7 @@ templates_path = ['_templates']
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', 'README.md']
+exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', 'README.md', '**/README.md']
 
 # Reference sections generation
 autosectionlabel_prefix_document = True
