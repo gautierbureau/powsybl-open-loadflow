@@ -37,7 +37,7 @@ public class DcLoadFlowParameters extends AbstractLoadFlowParameters<DcLoadFlowP
 
     private double areaInterchangePMaxMismatch = OpenLoadFlowParameters.AREA_INTERCHANGE_P_MAX_MISMATCH_DEFAULT_VALUE;
 
-    static boolean vectorizedDefaultValue = false; // package-private value for test purpose (TODO: to remove)
+    static boolean vectorizedDefaultValue = true; // package-private value for test purpose (TODO: to remove)
 
     private boolean vectorized = vectorizedDefaultValue;
 
