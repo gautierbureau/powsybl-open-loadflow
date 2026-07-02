@@ -7,12 +7,11 @@
  */
 package com.powsybl.openloadflow.dc.fastdc;
 
-import com.powsybl.openloadflow.dc.equations.ClosedBranchSide1DcFlowEquationTerm;
+import com.powsybl.openloadflow.dc.equations.DcEquationSystemCreationParameters;
 import com.powsybl.openloadflow.dc.equations.DcEquationType;
 import com.powsybl.openloadflow.dc.equations.DcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.graph.GraphConnectivity;
-import com.powsybl.openloadflow.network.ElementType;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.TapPositionChange;
@@ -24,8 +23,9 @@ public final class ComputedTapPositionChangeElement extends AbstractComputedElem
 
     private final TapPositionChange tapPositionChange;
 
-    public ComputedTapPositionChangeElement(TapPositionChange tapPositionChange, EquationSystem<DcVariableType, DcEquationType> equationSystem) {
-        super(tapPositionChange.getBranch(), equationSystem.getEquationTerm(ElementType.BRANCH, tapPositionChange.getBranch().getNum(), ClosedBranchSide1DcFlowEquationTerm.class));
+    public ComputedTapPositionChangeElement(TapPositionChange tapPositionChange, EquationSystem<DcVariableType, DcEquationType> equationSystem,
+                                            DcEquationSystemCreationParameters creationParameters) {
+        super(tapPositionChange.getBranch(), ComputedElement.createBranchEquation(tapPositionChange.getBranch(), equationSystem, creationParameters));
         this.tapPositionChange = tapPositionChange;
     }
 

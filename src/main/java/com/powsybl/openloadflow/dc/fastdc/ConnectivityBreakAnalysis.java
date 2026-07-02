@@ -12,6 +12,7 @@ import com.powsybl.contingency.BranchContingency;
 import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.openloadflow.dc.DcLoadFlowContext;
 import com.powsybl.openloadflow.dc.equations.ClosedBranchSide1DcFlowEquationTerm;
+import com.powsybl.openloadflow.dc.equations.DcEquationSystemCreationParameters;
 import com.powsybl.openloadflow.dc.equations.DcEquationType;
 import com.powsybl.openloadflow.dc.equations.DcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -184,8 +185,7 @@ public final class ConnectivityBreakAnalysis {
         for (ComputedElement element : computedElements) {
             double sum = 0d;
             for (ComputedElement element2 : computedElements) {
-                LfBranch branch = lfNetwork.getBranchById(element2.getLfBranch().getId());
-                ClosedBranchSide1DcFlowEquationTerm p = equationSystem.getEquationTerm(ElementType.BRANCH, branch.getNum(), ClosedBranchSide1DcFlowEquationTerm.class);
+                ClosedBranchSide1DcFlowEquationTerm p = element2.getLfBranchEquation();
                 DenseMatrix elementMatrix = element instanceof ComputedContingencyElement ? contingenciesStates : actionStates;
                 double value = Math.abs(p.calculateSensi(elementMatrix, element.getComputedElementIndex()));
                 sum += value;
@@ -294,11 +294,12 @@ public final class ConnectivityBreakAnalysis {
     }
 
     private static Map<String, ComputedContingencyElement> createContingencyElementsIndexByBranchId(List<PropagatedContingency> contingencies,
-                                                                                                    LfNetwork lfNetwork, EquationSystem<DcVariableType, DcEquationType> equationSystem) {
+                                                                                                    LfNetwork lfNetwork, EquationSystem<DcVariableType, DcEquationType> equationSystem,
+                                                                                                    DcEquationSystemCreationParameters creationParameters) {
         Map<String, ComputedContingencyElement> contingencyElementByBranch =
                 contingencies.stream()
                         .flatMap(contingency -> contingency.getBranchIdsToOpen().keySet().stream())
-                        .map(branch -> new ComputedContingencyElement(new BranchContingency(branch), lfNetwork, equationSystem))
+                        .map(branch -> new ComputedContingencyElement(new BranchContingency(branch), lfNetwork, equationSystem, creationParameters))
                         .filter(element -> element.getLfBranchEquation() != null)
                         .collect(Collectors.toMap(
                                 computedContingencyElement -> computedContingencyElement.getElement().getId(),
@@ -312,7 +313,8 @@ public final class ConnectivityBreakAnalysis {
 
     public static ConnectivityBreakAnalysisResults run(DcLoadFlowContext loadFlowContext, List<PropagatedContingency> contingencies) {
         // index contingency elements by branch id
-        Map<String, ComputedContingencyElement> contingencyElementByBranch = createContingencyElementsIndexByBranchId(contingencies, loadFlowContext.getNetwork(), loadFlowContext.getEquationSystem());
+        Map<String, ComputedContingencyElement> contingencyElementByBranch = createContingencyElementsIndexByBranchId(contingencies, loadFlowContext.getNetwork(), loadFlowContext.getEquationSystem(),
+                loadFlowContext.getParameters().getEquationSystemCreationParameters());
 
         // compute states with +1 -1 to model the contingencies
         DenseMatrix contingenciesStates = ComputedElement.calculateElementsStates(loadFlowContext, contingencyElementByBranch.values());
