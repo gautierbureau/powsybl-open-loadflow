@@ -8,11 +8,11 @@
 package com.powsybl.openloadflow.dc.fastdc;
 
 import com.powsybl.openloadflow.dc.equations.ClosedBranchSide1DcFlowEquationTerm;
+import com.powsybl.openloadflow.dc.equations.DcEquationSystemCreationParameters;
 import com.powsybl.openloadflow.dc.equations.DcEquationType;
 import com.powsybl.openloadflow.dc.equations.DcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.graph.GraphConnectivity;
-import com.powsybl.openloadflow.network.ElementType;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 
@@ -25,10 +25,11 @@ public final class ComputedSwitchBranchElement extends AbstractComputedElement i
 
     private final boolean enabled; // indicates whether the action opens or closes the branch
 
-    public static ComputedSwitchBranchElement create(LfBranch lfBranch, boolean enabled, EquationSystem<DcVariableType, DcEquationType> equationSystem) {
+    public static ComputedSwitchBranchElement create(LfBranch lfBranch, boolean enabled, EquationSystem<DcVariableType, DcEquationType> equationSystem,
+                                                     DcEquationSystemCreationParameters creationParameters) {
         Objects.requireNonNull(lfBranch);
         Objects.requireNonNull(equationSystem);
-        ClosedBranchSide1DcFlowEquationTerm branchEquation = equationSystem.getEquationTerm(ElementType.BRANCH, lfBranch.getNum(), ClosedBranchSide1DcFlowEquationTerm.class);
+        ClosedBranchSide1DcFlowEquationTerm branchEquation = ComputedElement.createBranchEquation(lfBranch, equationSystem, creationParameters);
         return new ComputedSwitchBranchElement(lfBranch, enabled, branchEquation);
     }
 

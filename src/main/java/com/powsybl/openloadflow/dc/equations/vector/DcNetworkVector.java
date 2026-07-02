@@ -113,21 +113,20 @@ public class DcNetworkVector extends AbstractLfNetworkListener
         variablesInvalid = false;
     }
 
-    private boolean isBranchConnectedSide1(int branchNum) {
-        return branchVector.bus1Num[branchNum] != -1 && branchVector.connected1[branchNum];
-    }
-
-    private boolean isBranchConnectedSide2(int branchNum) {
-        return branchVector.bus2Num[branchNum] != -1 && branchVector.connected2[branchNum];
-    }
-
     /**
      * Update all DC power flows from the state vector.
+     *
+     * <p>The closed branch flow is computed whenever both bus angle variables exist, mirroring the scalar
+     * {@code ClosedBranchSide{1,2}DcFlowEquationTerm.eval()} which always evaluates {@code -power * deltaPhase}
+     * from the current state. Reporting a zero flow for a disconnected branch is handled downstream by the
+     * {@code branch.setP1/setP2} evaluable swap in {@code DcEquationSystemUpdater}, not by gating here (gating
+     * on the cached disabled/connected status would return a stale zero for branches reconnected through the
+     * Woodbury connectivity machinery).
      */
     public void updateClosedBranches(double[] state) {
         for (int branchNum = 0; branchNum < branchVector.getSize(); branchNum++) {
-            if (!branchVector.disabled[branchNum] && !branchVector.zeroImpedance[branchNum]
-                    && isBranchConnectedSide1(branchNum) && isBranchConnectedSide2(branchNum)) {
+            if (!branchVector.zeroImpedance[branchNum]
+                    && branchVector.ph1Row[branchNum] != -1 && branchVector.ph2Row[branchNum] != -1) {
                 double a1 = branchVector.a1Row[branchNum] != -1 ? state[branchVector.a1Row[branchNum]]
                         : branchVector.a1[branchNum];
                 branchVector.a1State[branchNum] = a1;

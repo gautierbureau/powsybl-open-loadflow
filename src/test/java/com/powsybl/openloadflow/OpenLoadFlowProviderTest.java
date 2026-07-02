@@ -75,7 +75,7 @@ class OpenLoadFlowProviderTest {
                 "generatorsWithZeroMwTargetAreNotStarted=true, isAcDcNetwork=false, detailedReport=false, includeElementsReconnectingSmallComponents=true, " +
                 "allowNonLinearShuntZeroSection=true), equationSystemCreationParameters=DcEquationSystemCreationParameters(updateFlows=true, " +
                 "forcePhaseControlOffAndAddAngle1Var=true, useTransformerRatio=true, dcApproximationType=IGNORE_R), matrixFactory=DenseMatrixFactory, " +
-                "distributedSlack=true, balanceType=PROPORTIONAL_TO_GENERATION_P_MAX, setVToNan=true, maxOuterLoopIterations=20)",
+                "distributedSlack=true, balanceType=PROPORTIONAL_TO_GENERATION_P_MAX, setVToNan=true, maxOuterLoopIterations=20, vectorized=true)",
                 dcParameters.toString());
     }
 
