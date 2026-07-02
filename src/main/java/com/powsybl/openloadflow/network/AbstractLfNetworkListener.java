@@ -125,4 +125,9 @@ public abstract class AbstractLfNetworkListener implements LfNetworkListener {
     public void onGenerationDisablingStatusChange(LfGenerator generator, boolean disabled) {
         // empty
     }
+
+    @Override
+    public void onLoadDisablingStatusChange(LfLoad load) {
+        // empty
+    }
 }
