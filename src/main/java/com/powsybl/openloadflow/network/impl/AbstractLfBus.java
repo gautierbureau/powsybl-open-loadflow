@@ -858,19 +858,25 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     @Override
     public void setDisabled(boolean disabled) {
-        super.setDisabled(disabled);
-        if (shunt != null) {
-            shunt.setDisabled(disabled);
-        }
-        if (controllerShunt != null) {
-            controllerShunt.setDisabled(disabled);
-        }
-        for (LfHvdc hvdc : hvdcs) {
-            if (disabled) {
-                hvdc.setDisabled(true);
-            } else if (!hvdc.getOtherBus(this).isDisabled()) {
-                // if both buses enabled only
-                hvdc.setDisabled(false);
+        // Only propagate to the attached shunts and HVDC links when the bus disabling status actually
+        // changes. During a security analysis the pre-contingency state is restored for every bus after
+        // each contingency, so this method is called network-wide with an unchanged value the vast
+        // majority of the time; short-circuiting avoids scanning shunts and HVDC links needlessly.
+        if (disabled != isDisabled()) {
+            super.setDisabled(disabled);
+            if (shunt != null) {
+                shunt.setDisabled(disabled);
+            }
+            if (controllerShunt != null) {
+                controllerShunt.setDisabled(disabled);
+            }
+            for (LfHvdc hvdc : hvdcs) {
+                if (disabled) {
+                    hvdc.setDisabled(true);
+                } else if (!hvdc.getOtherBus(this).isDisabled()) {
+                    // if both buses enabled only
+                    hvdc.setDisabled(false);
+                }
             }
         }
     }
