@@ -173,4 +173,10 @@ public class LfNetworkListenerTracer implements LfNetworkListener {
         LOGGER.trace("onHvdcAcEmulationStatusChange(hvdc={}, acEmulationStatus={})", hvdc, acEmulationStatus);
         delegate.onHvdcAcEmulationStatusChange(hvdc, acEmulationStatus);
     }
+
+    @Override
+    public void onGenerationDisablingStatusChange(LfGenerator generator, boolean disabled) {
+        LOGGER.trace("onGenerationDisablingStatusChange(generatorId='{}', disabled={})", generator.getId(), disabled);
+        delegate.onGenerationDisablingStatusChange(generator, disabled);
+    }
 }

@@ -507,7 +507,14 @@ public abstract class AbstractLfGenerator extends AbstractLfInjection implements
 
     @Override
     public void setDisabled(boolean disabled) {
-        this.disabled = disabled;
+        if (disabled != this.disabled) {
+            this.disabled = disabled;
+            if (bus != null) {
+                for (LfNetworkListener listener : bus.getNetwork().getListeners()) {
+                    listener.onGenerationDisablingStatusChange(this, disabled);
+                }
+            }
+        }
     }
 
     @Override
