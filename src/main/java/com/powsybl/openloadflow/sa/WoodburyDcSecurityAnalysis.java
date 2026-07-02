@@ -308,7 +308,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
         // predicate to determine if a branch is disabled or not due to the contingency
         // note that branches with one side opened due to the contingency are considered as disabled
-        Predicate<LfBranch> isBranchDisabled = branch -> lfContingency.getDisabledNetwork().getBranchesStatus().containsKey(branch);
+        Map<LfBranch, DisabledBranchStatus> disabledBranchesStatus = lfContingency.getDisabledNetwork().getBranchesStatus();
+        Predicate<LfBranch> isBranchDisabled = disabledBranchesStatus::containsKey;
 
         // process post contingency result with supplier giving post contingency states
         logPostContingencyStart(lfNetwork, lfContingency);
