@@ -390,6 +390,35 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         }
     }
 
+    /**
+     * Sum of the right-hand side (constant) contributions of all active terms of the equation of given
+     * element number. Used by the target vector to move constant term parts to the right-hand side,
+     * mirroring {@code SingleEquation.rhs()} for the vectorized path.
+     */
+    public double getRhs(int elementNum) {
+        double rhs = 0;
+        for (EquationTermArray<V, E> termArray : termArrays) {
+            int[] termNumsConcatenatedStartIndices = termArray.getTermNumsConcatenatedStartIndices();
+            var termNums = termArray.getTermNumsConcatenated();
+            int iStart = termNumsConcatenatedStartIndices[elementNum];
+            int iEnd = termNumsConcatenatedStartIndices[elementNum + 1];
+            for (int i = iStart; i < iEnd; i++) {
+                int termNum = termNums.getQuick(i);
+                if (termArray.isTermActive(termNum)) {
+                    rhs += termArray.getEvaluator().rhs(termArray.getTermElementNum(termNum));
+                }
+            }
+        }
+        if (hasSingleEquationTerms[elementNum]) {
+            for (SingleEquationTerm<V, E> singleTerm : singleTermsByEquationElementNum.get(elementNum).terms) {
+                if (singleTerm.isActive() && singleTerm.hasRhs()) {
+                    rhs += singleTerm.rhs();
+                }
+            }
+        }
+        return rhs;
+    }
+
     public interface DerHandler {
 
         int onDer(int column, int row, double value, int matrixElementIndex);
