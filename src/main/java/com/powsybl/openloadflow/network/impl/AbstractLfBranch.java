@@ -106,6 +106,10 @@ public abstract class AbstractLfBranch extends AbstractElement implements LfBran
         return bus2;
     }
 
+    protected List<LfLimitsGroup> getCachedLimits1(LimitType type) {
+        return getLimits1(type);
+    }
+
     private List<LfLimitsGroup> getLimits1(LimitType type) {
         switch (type) {
             case ACTIVE_POWER -> {
@@ -152,6 +156,10 @@ public abstract class AbstractLfBranch extends AbstractElement implements LfBran
             setLimits1(type, limits);
         }
         return limits;
+    }
+
+    protected List<LfLimitsGroup> getCachedLimits2(LimitType type) {
+        return getLimits2(type);
     }
 
     private List<LfLimitsGroup> getLimits2(LimitType type) {
