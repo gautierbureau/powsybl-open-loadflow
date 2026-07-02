@@ -177,6 +177,34 @@ class LfNetworkTest extends AbstractSerDeTest {
     }
 
     @Test
+    void testLoadDisablingStatusChangeEvent() {
+        Network network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+        LfNetwork lfNetwork = Networks.load(network, new MostMeshedSlackBusSelector()).get(0);
+        LfLoad load = lfNetwork.getBuses().stream()
+                .flatMap(b -> b.getLoads().stream())
+                .findFirst().orElseThrow();
+        String originalId = load.getOriginalIds().get(0);
+
+        List<LfLoad> events = new ArrayList<>();
+        lfNetwork.addListener(new AbstractLfNetworkListener() {
+            @Override
+            public void onLoadDisablingStatusChange(LfLoad l) {
+                events.add(l);
+            }
+        });
+
+        // event on effective change
+        load.setOriginalLoadDisabled(originalId, true);
+        assertEquals(List.of(load), events);
+        // no event when the status does not actually change
+        load.setOriginalLoadDisabled(originalId, true);
+        assertEquals(List.of(load), events);
+        // event on change back
+        load.setOriginalLoadDisabled(originalId, false);
+        assertEquals(List.of(load, load), events);
+    }
+
+    @Test
     void testMultipleConnectedComponentsACMainComponent() {
         Network network = ConnectedComponentNetworkFactory.createTwoUnconnectedCC();
         LoadFlow.Runner loadFlowRunner = new LoadFlow.Runner(new OpenLoadFlowProvider(commonTestConfig.matrixFactory()));

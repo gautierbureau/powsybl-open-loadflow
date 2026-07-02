@@ -179,4 +179,10 @@ public class LfNetworkListenerTracer implements LfNetworkListener {
         LOGGER.trace("onGenerationDisablingStatusChange(generatorId='{}', disabled={})", generator.getId(), disabled);
         delegate.onGenerationDisablingStatusChange(generator, disabled);
     }
+
+    @Override
+    public void onLoadDisablingStatusChange(LfLoad load) {
+        LOGGER.trace("onLoadDisablingStatusChange(loadId='{}')", load.getId());
+        delegate.onLoadDisablingStatusChange(load);
+    }
 }
