@@ -17,20 +17,14 @@ Tracking the planned work for the voltage-collapse / continuation power flow pro
   (opt-in `recordBusVoltages`, on by default), with a finite-difference `dV/dλ` per bus. `ContinuationResult`
   exposes `getMonitoredBusIds()` and `getPvCurve(busId)` returning plottable `PvCurvePoint`s. Works for both
   engines; `dV/dλ` diverges towards the nose (collapse proximity indicator).
+- **Smooth generator participation** — the predictor–corrector engine takes an optional `GenerationParticipation`
+  (by generator id / weights / all / none) so participating generators ramp their target P by `(1 + λ·k_G)`
+  alongside the loads; the slack closes the residual, and `F_λ` picks the scaling up automatically. On a Eurostag
+  variant with a generator at the load bus, participation moves the nose from λ≈1.09 to λ≈1.40.
 
 ## Backlog
 
-### 1. Smooth generator participation
-Today the single slack bus absorbs the whole load increase in the predictor–corrector engine. Add a smooth
-generation-increase direction: scale participating generators' target P by `(1 + λ·k_G)` alongside the loads.
-Since `F_λ` is computed by finite-differencing the target vector, generator scaling is picked up automatically
-once the mutation step scales generators too. Deliverables:
-- a `GenerationParticipation` direction (by generator id / by participation factor), analogous to
-  `LoadIncreaseDirection`;
-- keep the balance well-posed (slack still closes the residual);
-- a test where generation participation changes the nose location.
-
-### 2. Reactive-limit breakpoints on the curve
+### 1. Reactive-limit breakpoints on the curve
 The smooth predictor–corrector deliberately ignores reactive limits. Real P–V curves have breakpoints where a
 generator hits Q_max/Q_min and switches PV→PQ. Add discrete event handling to the continuation:
 - monitor each PV generator's reactive power along the curve;
@@ -39,7 +33,7 @@ generator hits Q_max/Q_min and switches PV→PQ. Add discrete event handling to 
 - mark breakpoints in the result. Note: structure changes rebuild `F_λ` and the equation index, so this needs
   care around the constant-`F_λ` assumption.
 
-### 3. Public API + docs
+### 2. Public API + docs
 Expose both engines through the standard OpenLoadFlow surface instead of the current programmatic-only entry:
 - an `OpenLoadFlowParameters` extension (or a dedicated `ContinuationPowerFlow` runner) selecting engine
   (stepped / predictor–corrector), the load & generation directions, and stepping parameters;

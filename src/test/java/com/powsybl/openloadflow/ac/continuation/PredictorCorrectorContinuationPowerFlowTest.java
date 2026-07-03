@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -119,6 +120,42 @@ class PredictorCorrectorContinuationPowerFlowTest {
                 .mapToDouble(Math::abs)
                 .max().orElseThrow();
         assertTrue(maxAbsSlope > 10.0, "dV/dlambda should diverge near the nose, got " + maxAbsSlope);
+    }
+
+    @Test
+    void generationParticipationChangesNoseTest() {
+        Network network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+        // a local generator at the load bus, whose ramp-up can offset the local load increase
+        network.getVoltageLevel("VLLOAD").newGenerator()
+                .setId("GLOAD").setBus("NLOAD").setConnectableBus("NLOAD")
+                .setMinP(0).setMaxP(2000).setTargetP(200).setTargetQ(0)
+                .setVoltageRegulatorOn(false)
+                .add();
+
+        LoadFlowParameters parameters = new LoadFlowParameters()
+                .setUseReactiveLimits(false)
+                .setDistributedSlack(false);
+        OpenLoadFlowParameters parametersExt = OpenLoadFlowParameters.create(parameters)
+                .setSlackBusSelectionMode(SlackBusSelectionMode.FIRST);
+
+        PredictorCorrectorContinuationPowerFlow cpf =
+                new PredictorCorrectorContinuationPowerFlow(new PredictorCorrectorParameters());
+
+        // slack-only: the single slack bus absorbs the whole load increase
+        ContinuationResult slackOnly = cpf.run(network, parameters, parametersExt, commonTestConfig.matrixFactory(),
+                LoadIncreaseDirection.allLoads(), GenerationParticipation.none());
+
+        // the local generator ramps up alongside the load, relieving the stressed corridor
+        ContinuationResult withGeneration = cpf.run(network, parameters, parametersExt, commonTestConfig.matrixFactory(),
+                LoadIncreaseDirection.allLoads(), GenerationParticipation.ofGeneratorIds(Set.of("GLOAD")));
+
+        assertSame(ContinuationResult.Status.NOSE_POINT_REACHED, slackOnly.getStatus());
+        assertSame(ContinuationResult.Status.NOSE_POINT_REACHED, withGeneration.getStatus());
+
+        // local generation participation pushes the collapse point to a higher load factor
+        assertTrue(withGeneration.getMaxLoadFactor() > slackOnly.getMaxLoadFactor() + 0.1,
+                "Expected the nose to move up with local generation: slackOnly=" + slackOnly.getMaxLoadFactor()
+                        + ", withGeneration=" + withGeneration.getMaxLoadFactor());
     }
 
     @Test

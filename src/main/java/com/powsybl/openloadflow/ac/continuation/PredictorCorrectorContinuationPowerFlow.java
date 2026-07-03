@@ -26,6 +26,7 @@ import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfLoad;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.impl.Networks;
@@ -60,10 +61,11 @@ import java.util.Objects;
  * point and traces the lower (unstable) branch. The tangent at the nose gives the voltage participation factors,
  * i.e. which buses drive the collapse.</p>
  *
- * <p>This is a smooth continuation: the load is increased along a {@link LoadIncreaseDirection} and the single
- * slack bus absorbs the active power imbalance. Discrete outer-loop controls (distributed slack, reactive
- * limits, ...) are intentionally not applied during the continuation, so the traced curve is smooth. For a
- * collapse point accounting for those controls, use the stepped {@link ContinuationPowerFlow}.</p>
+ * <p>This is a smooth continuation: the load is increased along a {@link LoadIncreaseDirection} and, optionally,
+ * generation is increased along a {@link GenerationParticipation} to pick it up; the slack bus absorbs whatever
+ * is left. Discrete outer-loop controls (distributed slack, reactive limits, ...) are intentionally not applied
+ * during the continuation, so the traced curve is smooth. For a collapse point accounting for those controls,
+ * use the stepped {@link ContinuationPowerFlow}.</p>
  *
  * <p>The augmented linear system is solved by block elimination (bordering) that reuses the sparse LU
  * factorization of {@code F_x} kept by the existing {@link JacobianMatrix}: each corrector iteration performs
@@ -88,6 +90,9 @@ public class PredictorCorrectorContinuationPowerFlow {
     private record ParticipatingLoad(LfLoad load, double weight, double baseTargetP, double baseTargetQ) {
     }
 
+    private record ParticipatingGenerator(LfGenerator generator, double weight, double baseTargetP) {
+    }
+
     /**
      * Mutable state shared by the predictor and corrector of a single run.
      */
@@ -100,12 +105,14 @@ public class PredictorCorrectorContinuationPowerFlow {
         private final EquationVector<AcVariableType, AcEquationType> equationVector;
         private final StateVector stateVector;
         private final List<ParticipatingLoad> participants;
+        private final List<ParticipatingGenerator> participatingGenerators;
         private final int n;
         private final double[] fLambda;
 
         private double lambda;
 
-        private Continuation(AcLoadFlowContext context, List<ParticipatingLoad> participants) {
+        private Continuation(AcLoadFlowContext context, List<ParticipatingLoad> participants,
+                             List<ParticipatingGenerator> participatingGenerators) {
             this.network = context.getNetwork();
             this.equationSystem = context.getEquationSystem();
             this.j = context.getJacobianMatrix();
@@ -113,6 +120,7 @@ public class PredictorCorrectorContinuationPowerFlow {
             this.equationVector = context.getEquationVector();
             this.stateVector = equationSystem.getStateVector();
             this.participants = participants;
+            this.participatingGenerators = participatingGenerators;
             this.n = equationSystem.getIndex().getColumnCount();
             this.fLambda = computeFLambda();
         }
@@ -122,11 +130,11 @@ public class PredictorCorrectorContinuationPowerFlow {
          * F_lambda = -(target(lambda=1) - target(lambda=0)).
          */
         private double[] computeFLambda() {
-            applyLoadIncrease(0.0);
+            applyIncrease(0.0);
             double[] t0 = targetVector.getArray().clone();
-            applyLoadIncrease(1.0);
+            applyIncrease(1.0);
             double[] t1 = targetVector.getArray().clone();
-            applyLoadIncrease(0.0);
+            applyIncrease(0.0);
             double[] result = new double[n];
             for (int i = 0; i < n; i++) {
                 result[i] = -(t1[i] - t0[i]);
@@ -134,13 +142,16 @@ public class PredictorCorrectorContinuationPowerFlow {
             return result;
         }
 
-        private void applyLoadIncrease(double lambdaValue) {
+        private void applyIncrease(double lambdaValue) {
             for (ParticipatingLoad p : participants) {
                 double scaling = 1.0 + lambdaValue * p.weight();
                 p.load().setTargetP(p.baseTargetP() * scaling);
                 if (parameters.isScaleReactivePowerWithActivePower()) {
                     p.load().setTargetQ(p.baseTargetQ() * scaling);
                 }
+            }
+            for (ParticipatingGenerator g : participatingGenerators) {
+                g.generator().setTargetP(g.baseTargetP() * (1.0 + lambdaValue * g.weight()));
             }
         }
 
@@ -232,7 +243,7 @@ public class PredictorCorrectorContinuationPowerFlow {
                 System.arraycopy(z, 0, deltaX, 0, n);
                 addToState(deltaX);
                 lambda += z[n];
-                applyLoadIncrease(lambda);
+                applyIncrease(lambda);
                 if (!Double.isFinite(lambda) || !Double.isFinite(infinityNorm(stateVector.get()))) {
                     return false;
                 }
@@ -316,11 +327,18 @@ public class PredictorCorrectorContinuationPowerFlow {
     }
 
     public ContinuationResult run(AcLoadFlowContext context, LoadIncreaseDirection direction) {
+        return run(context, direction, GenerationParticipation.none());
+    }
+
+    public ContinuationResult run(AcLoadFlowContext context, LoadIncreaseDirection direction,
+                                  GenerationParticipation generationParticipation) {
         Objects.requireNonNull(context);
         Objects.requireNonNull(direction);
+        Objects.requireNonNull(generationParticipation);
         LfNetwork network = context.getNetwork();
 
         List<ParticipatingLoad> participants = new ArrayList<>();
+        List<ParticipatingGenerator> participatingGenerators = new ArrayList<>();
         for (LfBus bus : network.getBuses()) {
             if (bus.isDisabled()) {
                 continue;
@@ -329,6 +347,12 @@ public class PredictorCorrectorContinuationPowerFlow {
                 double weight = direction.getWeight(load);
                 if (weight != 0.0) {
                     participants.add(new ParticipatingLoad(load, weight, load.getTargetP(), load.getTargetQ()));
+                }
+            }
+            for (LfGenerator generator : bus.getGenerators()) {
+                double weight = generationParticipation.getWeight(generator);
+                if (weight != 0.0) {
+                    participatingGenerators.add(new ParticipatingGenerator(generator, weight, generator.getTargetP()));
                 }
             }
         }
@@ -342,10 +366,10 @@ public class PredictorCorrectorContinuationPowerFlow {
         voltageInitializer.prepare(network, ReportNode.NO_OP);
         AcSolverUtil.initStateVector(network, context.getEquationSystem(), voltageInitializer);
 
-        Continuation c = new Continuation(context, participants);
+        Continuation c = new Continuation(context, participants, participatingGenerators);
 
         // base case (lambda = 0), solved with lambda frozen
-        c.applyLoadIncrease(0.0);
+        c.applyIncrease(0.0);
         c.lambda = 0.0;
         if (!c.correct(PARAM_LAMBDA, 0.0)) {
             LOGGER.warn("Continuation aborted: base case did not converge");
@@ -389,7 +413,7 @@ public class PredictorCorrectorContinuationPowerFlow {
             }
             c.addToState(predictorDx);
             c.lambda = savedLambda + step * tangent[c.n];
-            c.applyLoadIncrease(c.lambda);
+            c.applyIncrease(c.lambda);
 
             double eta = stepParamVariable == PARAM_LAMBDA ? c.lambda : c.stateVector.get(stepParamVariable);
 
@@ -430,7 +454,7 @@ public class PredictorCorrectorContinuationPowerFlow {
                 // reject the step and refine
                 c.stateVector.set(savedState);
                 c.lambda = savedLambda;
-                c.applyLoadIncrease(c.lambda);
+                c.applyIncrease(c.lambda);
                 step *= parameters.getStepDecreaseFactor();
                 consecutiveSuccesses = 0;
                 if (step < parameters.getMinStepSize()) {
@@ -443,7 +467,7 @@ public class PredictorCorrectorContinuationPowerFlow {
         // tangent-based voltage participation factors at the nose
         c.stateVector.set(noseState);
         c.lambda = noseLambda;
-        c.applyLoadIncrease(noseLambda);
+        c.applyIncrease(noseLambda);
         double[] noseTangent = c.computeTangent(noseParamVariable, null);
         Map<String, Double> participation = c.tangentVoltageParticipation(noseTangent);
         String criticalBusId = participation.entrySet().stream()
@@ -464,6 +488,12 @@ public class PredictorCorrectorContinuationPowerFlow {
      */
     public ContinuationResult run(Network network, LoadFlowParameters lfParameters, OpenLoadFlowParameters lfParametersExt,
                                   MatrixFactory matrixFactory, LoadIncreaseDirection direction) {
+        return run(network, lfParameters, lfParametersExt, matrixFactory, direction, GenerationParticipation.none());
+    }
+
+    public ContinuationResult run(Network network, LoadFlowParameters lfParameters, OpenLoadFlowParameters lfParametersExt,
+                                  MatrixFactory matrixFactory, LoadIncreaseDirection direction,
+                                  GenerationParticipation generationParticipation) {
         Objects.requireNonNull(network);
         AcLoadFlowParameters acParameters = OpenLoadFlowParameters.createAcParameters(network, lfParameters, lfParametersExt,
                 matrixFactory, new EvenShiloachGraphDecrementalConnectivityFactory<>());
@@ -475,7 +505,7 @@ public class PredictorCorrectorContinuationPowerFlow {
                 .orElseThrow(() -> new IllegalStateException("No valid LfNetwork to run continuation on"));
 
         try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters)) {
-            return run(context, direction);
+            return run(context, direction, generationParticipation);
         }
     }
 
