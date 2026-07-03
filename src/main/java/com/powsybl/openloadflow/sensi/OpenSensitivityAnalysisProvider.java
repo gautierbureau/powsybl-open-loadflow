@@ -249,6 +249,34 @@ public class OpenSensitivityAnalysisProvider implements SensitivityAnalysisProvi
             runParameters.getReportNode()), runParameters.getComputationManager().getExecutor());
     }
 
+    /**
+     * Reverse-mode (adjoint / VJP) sensitivity — the dual of {@link #run}: given output cotangents
+     * {@code ȳ} over the declared functions, returns {@code θ̄ = Sᵀ·ȳ} keyed by variable id, WITHOUT
+     * materialising the sensitivity matrix {@code S}. AC only. Reuses the AC load flow retained in the
+     * network cache ({@code networkCacheEnabled}): a plain cached {@code run_ac} must have run on
+     * {@code network} first. See {@link AcSensitivityAnalysis#runAdjoint}.
+     *
+     * @param factors                the (function, variable) declaration, as for {@link #run}.
+     * @param functionCotangentsById dL/dfunction, keyed by monitored function id.
+     * @return dL/dvariable, keyed by variable id.
+     */
+    public Map<String, Double> runAdjoint(Network network,
+                                          String workingVariantId,
+                                          List<SensitivityFactor> factors,
+                                          Map<String, Double> functionCotangentsById,
+                                          List<SensitivityVariableSet> variableSets,
+                                          SensitivityAnalysisParameters sensitivityAnalysisParameters) {
+        Objects.requireNonNull(network);
+        Objects.requireNonNull(factors);
+        Objects.requireNonNull(functionCotangentsById);
+        Objects.requireNonNull(sensitivityAnalysisParameters);
+        if (sensitivityAnalysisParameters.getLoadFlowParameters().isDc()) {
+            throw new PowsyblException("Adjoint (VJP) sensitivity is only supported in AC");
+        }
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(matrixFactory, connectivityFactory, sensitivityAnalysisParameters);
+        return analysis.runAdjoint(network, workingVariantId, variableSets, factors, functionCotangentsById);
+    }
+
     public record ReplayResult<T extends SensitivityResultWriter>(T resultWriter, List<SensitivityFactor> factors, List<Contingency> contingencies) {
     }
 
