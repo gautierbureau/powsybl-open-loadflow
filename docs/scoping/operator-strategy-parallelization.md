@@ -217,7 +217,42 @@ steal strategy work from busy contingencies.
    oversubscription and expose a single tuning knob.
 4. **Phase 3 — Extend to DC / Woodbury** once AC is validated.
 
-## 6. Key code references
+## 6. Implementation status (Phase 1)
+
+A first implementation has landed. It follows **Option A** (spread the operator strategies over the existing
+per-partition machinery) rather than Option B, because it reuses the fully-tested `ContingencyMultiThreadHelper`
+network-cloning / executor / report-merge foundation and introduces **no new intra-network concurrency**: each thread
+still owns a single network that it mutates serially, exactly as before. The parallelism comes from different threads
+running different operator strategies of the same contingency, each on its own network clone.
+
+What was added:
+
+- A new opt-in parameter `OpenSecurityAnalysisParameters.operatorStrategyParallelization` (default `false`), so the
+  historical behaviour is unchanged unless explicitly enabled. It only has an effect when `threadCount > 1`.
+- `SecurityAnalysisPartitioner` (`util.mt`), which balances the partitions over the operator strategies instead of over
+  the contingencies. The strategies of a contingency can be spread over several partitions; a contingency then appears
+  in several partitions, each re-simulating the post-contingency state (the accepted redundant cost of Option A).
+- Result merging in `AbstractSecurityAnalysis.runSync` deduplicates the post-contingency results by contingency id when
+  balancing is active (operator strategy results stay disjoint), so the merged result is identical to a single-threaded
+  run.
+- Safety guard: balancing is only applied when **every operator strategy targets a specific contingency**
+  (`ContingencyContextType.SPECIFIC`); a strategy with any broader context applies to all contingencies and is
+  incompatible with spreading a contingency over several partitions, so the analysis falls back to contingency-level
+  parallelization. This is enforced by `SecurityAnalysisPartitioner.canBalanceOperatorStrategies`.
+
+Because the filtering (per-partition operator strategy list) and the post-contingency deduplication happen at the
+`runSync` level, the feature works uniformly for the AC, default DC and Woodbury DC paths without touching their
+respective `runSimulations` implementations.
+
+Tests: `SecurityAnalysisPartitionerTest` (partitioner behaviour, coverage, fallback) and
+`OpenSecurityAnalysisWithActionsTest#testOperatorStrategyParallelization` (parallel results equal the single-threaded
+reference for thread counts 2/3/4, including the extreme single-contingency / many-strategies case).
+
+Still open for later phases: Option B (solve each contingency once and fork the post-contingency state to avoid the
+redundant post-contingency solves), unifying the concurrency budget across both axes, and removing the shared mutable
+`zeroImpedanceMonitoredIndex` field.
+
+## 7. Key code references
 
 - `AbstractSecurityAnalysis.runSync` — thread-count branch and contingency partitioning
   (`threadCount == 1` vs `> 1`).

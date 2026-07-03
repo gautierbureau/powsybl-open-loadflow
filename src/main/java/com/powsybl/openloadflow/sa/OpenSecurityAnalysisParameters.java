@@ -33,6 +33,8 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
 
     private boolean startWithFrozenACEmulation = START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE;
 
+    private boolean operatorStrategyParallelization = OPERATOR_STRATEGY_PARALLELIZATION_DEFAULT_VALUE;
+
     private NetworkPerThreadMode networkPerThreadMode = NETWORK_PER_THREAD_MODE_DEFAULT_VALUE;
 
     private ContingencyPartitioningMode contingencyPartitioningMode = CONTINGENCY_PARTITIONING_MODE_DEFAULT_VALUE;
@@ -72,6 +74,8 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
     public static final boolean START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE = true;
     public static final String CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME = "contingencyActivePowerLossDistribution";
     public static final String CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE = "Default";
+    public static final String OPERATOR_STRATEGY_PARALLELIZATION_PARAM_NAME = "operatorStrategyParallelization";
+    public static final boolean OPERATOR_STRATEGY_PARALLELIZATION_DEFAULT_VALUE = false;
     public static final String NETWORK_PER_THREAD_MODE_PARAM_NAME = "networkPerThreadMode";
     public static final NetworkPerThreadMode NETWORK_PER_THREAD_MODE_DEFAULT_VALUE = NetworkPerThreadMode.COPY;
     public static final String CONTINGENCY_PARTITIONING_MODE_PARAM_NAME = "contingencyPartitioningMode";
@@ -82,6 +86,7 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
             DC_FAST_MODE_PARAM_NAME,
             CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME,
             START_WITH_FROZEN_AC_EMULATION_PARAM_NAME,
+            OPERATOR_STRATEGY_PARALLELIZATION_PARAM_NAME,
             NETWORK_PER_THREAD_MODE_PARAM_NAME,
             CONTINGENCY_PARTITIONING_MODE_PARAM_NAME);
 
@@ -148,6 +153,23 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
         return this;
     }
 
+    /**
+     * When {@code true}, and when {@link #getThreadCount() thread count} is greater than one, the operator strategies
+     * of a given contingency can be spread over several threads instead of being all evaluated on the single thread
+     * that owns the contingency. This balances the workload when the analysis has few contingencies but many operator
+     * strategies (in the extreme, a single contingency with many operator strategies, where contingency-level
+     * parallelization brings no speed-up). Balancing is only applied when every operator strategy targets a specific
+     * contingency; otherwise the analysis falls back to contingency-level parallelization.
+     */
+    public boolean isOperatorStrategyParallelization() {
+        return operatorStrategyParallelization;
+    }
+
+    public OpenSecurityAnalysisParameters setOperatorStrategyParallelization(boolean operatorStrategyParallelization) {
+        this.operatorStrategyParallelization = operatorStrategyParallelization;
+        return this;
+    }
+
     public NetworkPerThreadMode getNetworkPerThreadMode() {
         return networkPerThreadMode;
     }
@@ -189,6 +211,7 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
                         .setContingencyActivePowerLossDistribution(config.getStringProperty(CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME,
                             CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE))
                         .setStartWithFrozenACEmulation(config.getBooleanProperty(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME, START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE))
+                        .setOperatorStrategyParallelization(config.getBooleanProperty(OPERATOR_STRATEGY_PARALLELIZATION_PARAM_NAME, OPERATOR_STRATEGY_PARALLELIZATION_DEFAULT_VALUE))
                         .setNetworkPerThreadMode(config.getEnumProperty(NETWORK_PER_THREAD_MODE_PARAM_NAME, NetworkPerThreadMode.class, NETWORK_PER_THREAD_MODE_DEFAULT_VALUE))
                         .setContingencyPartitioningMode(config.getEnumProperty(CONTINGENCY_PARTITIONING_MODE_PARAM_NAME,
                             ContingencyPartitioningMode.class, CONTINGENCY_PARTITIONING_MODE_DEFAULT_VALUE)));
@@ -213,6 +236,8 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
                 .ifPresent(this::setContingencyActivePowerLossDistribution);
         Optional.ofNullable(properties.get(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME))
                 .ifPresent(value -> this.setStartWithFrozenACEmulation(Boolean.parseBoolean(value)));
+        Optional.ofNullable(properties.get(OPERATOR_STRATEGY_PARALLELIZATION_PARAM_NAME))
+                .ifPresent(value -> this.setOperatorStrategyParallelization(Boolean.parseBoolean(value)));
         Optional.ofNullable(properties.get(NETWORK_PER_THREAD_MODE_PARAM_NAME))
                 .ifPresent(value -> this.setNetworkPerThreadMode(NetworkPerThreadMode.valueOf(value)));
         Optional.ofNullable(properties.get(CONTINGENCY_PARTITIONING_MODE_PARAM_NAME))
