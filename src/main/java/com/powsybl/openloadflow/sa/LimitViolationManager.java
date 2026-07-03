@@ -60,6 +60,10 @@ public class LimitViolationManager {
         return new ArrayList<>(violations.values());
     }
 
+    public LimitReductionManager getLimitReductionManager() {
+        return limitReductionManager;
+    }
+
     /**
      * Detect violations on branches and on buses
      * @param network network on which the violation limits are checked
@@ -86,6 +90,97 @@ public class LimitViolationManager {
         network.getVoltageAngleLimits().stream()
                 .filter(limit -> !limit.getFrom().isDisabled() && !limit.getTo().isDisabled())
                 .forEach(this::detectVoltageAngleLimitViolations);
+    }
+
+    /**
+     * Detect violations on branches and on buses, checking only the branches that carry at least one limit, using
+     * their limit groups resolved once beforehand (see {@link #getBranchLimitsToCheck}). This avoids looking up (and
+     * reducing) the limits of every branch of the network on each contingency of a security analysis.
+     * @param network network on which the violation limits are checked
+     * @param isBranchDisabled predicate to evaluate if a branch of the network is disabled or not
+     * @param branchLimitsToCheck the precomputed limit groups of the branches carrying at least one limit
+     */
+    public void detectViolations(LfNetwork network, Predicate<LfBranch> isBranchDisabled, List<BranchLimitsToCheck> branchLimitsToCheck) {
+        Objects.requireNonNull(network);
+
+        // Detect violation limits on the branches carrying limits only, using their precomputed limit groups
+        for (BranchLimitsToCheck branchToCheck : branchLimitsToCheck) {
+            if (!isBranchDisabled.test(branchToCheck.branch())) {
+                detectBranchViolations(branchToCheck);
+            }
+        }
+
+        // Detect violation limits on buses
+        network.getBuses().stream().filter(b -> !b.isDisabled()).forEach(this::detectBusViolations);
+
+        // Detect voltage angle limits
+        network.getVoltageAngleLimits().stream()
+                .filter(limit -> !limit.getFrom().isDisabled() && !limit.getTo().isDisabled())
+                .forEach(this::detectVoltageAngleLimitViolations);
+    }
+
+    /**
+     * The non-empty limit groups of a branch, resolved once for a whole security analysis. As branch limits (and their
+     * reductions) do not change between contingencies, resolving them once and iterating them directly lets the
+     * per-contingency detection avoid a per-branch, per-contingency limit lookup on the whole network.
+     */
+    public record BranchLimitsToCheck(LfBranch branch,
+                                      LfBus bus1, List<LfBranch.LfLimitsGroup> currentLimits1,
+                                      List<LfBranch.LfLimitsGroup> activePowerLimits1, List<LfBranch.LfLimitsGroup> apparentPowerLimits1,
+                                      LfBus bus2, List<LfBranch.LfLimitsGroup> currentLimits2,
+                                      List<LfBranch.LfLimitsGroup> activePowerLimits2, List<LfBranch.LfLimitsGroup> apparentPowerLimits2) {
+    }
+
+    private void detectBranchViolations(BranchLimitsToCheck branchToCheck) {
+        LfBranch branch = branchToCheck.branch();
+        if (branchToCheck.bus1() != null) {
+            for (LfBranch.LfLimitsGroup limitsGroup : branchToCheck.currentLimits1()) {
+                detectBranchCurrentViolations(branch, branchToCheck.bus1(), LfBranch::getI1, limitsGroup, TwoSides.ONE);
+            }
+            for (LfBranch.LfLimitsGroup limitsGroup : branchToCheck.activePowerLimits1()) {
+                detectBranchActivePowerViolations(branch, LfBranch::getP1, limitsGroup, TwoSides.ONE);
+            }
+            for (LfBranch.LfLimitsGroup limitsGroup : branchToCheck.apparentPowerLimits1()) {
+                detectBranchApparentPowerViolations(branch, LfBranch::computeApparentPower1, limitsGroup, TwoSides.ONE);
+            }
+        }
+        if (branchToCheck.bus2() != null) {
+            for (LfBranch.LfLimitsGroup limitsGroup : branchToCheck.currentLimits2()) {
+                detectBranchCurrentViolations(branch, branchToCheck.bus2(), LfBranch::getI2, limitsGroup, TwoSides.TWO);
+            }
+            for (LfBranch.LfLimitsGroup limitsGroup : branchToCheck.activePowerLimits2()) {
+                detectBranchActivePowerViolations(branch, LfBranch::getP2, limitsGroup, TwoSides.TWO);
+            }
+            for (LfBranch.LfLimitsGroup limitsGroup : branchToCheck.apparentPowerLimits2()) {
+                detectBranchApparentPowerViolations(branch, LfBranch::computeApparentPower2, limitsGroup, TwoSides.TWO);
+            }
+        }
+    }
+
+    /**
+     * Resolve, once for the whole security analysis, the non-empty limit groups of every branch carrying at least one
+     * limit (on either side, for any limit type). The result is passed to
+     * {@link #detectViolations(LfNetwork, Predicate, List)} so that each contingency reuses these groups instead of
+     * looking them up on every branch of the network again.
+     */
+    public static List<BranchLimitsToCheck> getBranchLimitsToCheck(LfNetwork network, LimitReductionManager limitReductionManager) {
+        List<BranchLimitsToCheck> branchLimitsToCheck = new ArrayList<>();
+        for (LfBranch branch : network.getBranches()) {
+            LfBus bus1 = branch.getBus1();
+            LfBus bus2 = branch.getBus2();
+            List<LfBranch.LfLimitsGroup> current1 = bus1 != null ? branch.getLimits1(LimitType.CURRENT, limitReductionManager) : List.of();
+            List<LfBranch.LfLimitsGroup> activePower1 = bus1 != null ? branch.getLimits1(LimitType.ACTIVE_POWER, limitReductionManager) : List.of();
+            List<LfBranch.LfLimitsGroup> apparentPower1 = bus1 != null ? branch.getLimits1(LimitType.APPARENT_POWER, limitReductionManager) : List.of();
+            List<LfBranch.LfLimitsGroup> current2 = bus2 != null ? branch.getLimits2(LimitType.CURRENT, limitReductionManager) : List.of();
+            List<LfBranch.LfLimitsGroup> activePower2 = bus2 != null ? branch.getLimits2(LimitType.ACTIVE_POWER, limitReductionManager) : List.of();
+            List<LfBranch.LfLimitsGroup> apparentPower2 = bus2 != null ? branch.getLimits2(LimitType.APPARENT_POWER, limitReductionManager) : List.of();
+            if (!current1.isEmpty() || !activePower1.isEmpty() || !apparentPower1.isEmpty()
+                    || !current2.isEmpty() || !activePower2.isEmpty() || !apparentPower2.isEmpty()) {
+                branchLimitsToCheck.add(new BranchLimitsToCheck(branch, bus1, current1, activePower1, apparentPower1,
+                        bus2, current2, activePower2, apparentPower2));
+            }
+        }
+        return branchLimitsToCheck;
     }
 
     private static Pair<String, ThreeSides> getSubjectIdSide(LimitViolation limitViolation) {
