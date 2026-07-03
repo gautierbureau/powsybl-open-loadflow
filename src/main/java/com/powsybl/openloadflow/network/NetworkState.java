@@ -85,8 +85,20 @@ public class NetworkState {
         ElementState.restore(branchStates);
         ElementState.restore(hvdcStates);
         ElementState.restore(areaStates);
-        // Set excluded slack buses of each synchronous network
-        network.getSynchronousNetworks().forEach(scLfNetwork -> scLfNetwork.setExcludedSlackBuses(excludedSlackBuses));
+        restoreExcludedSlackBuses();
+    }
+
+    /**
+     * Reset the excluded slack buses of each synchronous network to the saved value. A contingency only changes them
+     * when it isolates the slack bus, which is rare, so the value is compared first: {@code setExcludedSlackBuses}
+     * scans the synchronous network buses on each call, which is not worth doing when nothing changed.
+     */
+    private void restoreExcludedSlackBuses() {
+        network.getSynchronousNetworks().forEach(scLfNetwork -> {
+            if (!scLfNetwork.getExcludedSlackBuses().equals(excludedSlackBuses)) {
+                scLfNetwork.setExcludedSlackBuses(excludedSlackBuses);
+            }
+        });
     }
 
     /**
@@ -107,7 +119,6 @@ public class NetworkState {
             hvdcStateByHvdc.get(hvdc).restore();
         }
         ElementState.restore(areaStates);
-        // Set excluded slack buses of each synchronous network
-        network.getSynchronousNetworks().forEach(scLfNetwork -> scLfNetwork.setExcludedSlackBuses(excludedSlackBuses));
+        restoreExcludedSlackBuses();
     }
 }
