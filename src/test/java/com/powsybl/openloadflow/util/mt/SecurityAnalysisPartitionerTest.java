@@ -148,11 +148,11 @@ class SecurityAnalysisPartitionerTest {
 
     @Test
     void cheaperPartitionCostSpreadsMore() {
-        // a single contingency with 8 operator strategies, 4 partitions: with the expensive rebuild cost the strategies
-        // are not worth spreading (one partition), but with the cheaper copy cost they are spread over the 4 partitions
+        // a single contingency with 16 operator strategies, 4 partitions: with the expensive rebuild cost the strategies
+        // are not worth spreading (one partition), but with the cheaper copy cost they are spread over the partitions
         List<Contingency> contingencies = List.of(contingency("c1"));
         List<OperatorStrategy> operatorStrategies = new ArrayList<>();
-        for (int j = 0; j < 8; j++) {
+        for (int j = 0; j < 16; j++) {
             operatorStrategies.add(specificStrategy("s" + j, "c1"));
         }
 
@@ -164,6 +164,33 @@ class SecurityAnalysisPartitionerTest {
         assertEquals(1, rebuild.stream().filter(p -> !p.operatorStrategies().isEmpty()).count(), "rebuild cost keeps the strategies on one partition");
         assertTrue(copy.stream().filter(p -> !p.operatorStrategies().isEmpty()).count() > 1, "copy cost spreads the strategies over several partitions");
         assertEachStrategyAssignedOnce(operatorStrategies, copy);
+    }
+
+    @Test
+    void multipleContingenciesSpreadOverDisjointPartitionBlocks() {
+        // 2 contingencies, 16 operator strategies each, 4 partitions, cheap copy cost: each contingency must be spread
+        // over its own disjoint block of 2 partitions (not leaked into all 4), so it is simulated by exactly 2 of them
+        List<Contingency> contingencies = List.of(contingency("c1"), contingency("c2"));
+        List<OperatorStrategy> operatorStrategies = new ArrayList<>();
+        for (Contingency contingency : contingencies) {
+            for (int j = 0; j < 16; j++) {
+                operatorStrategies.add(specificStrategy(contingency.getId() + "_s" + j, contingency.getId()));
+            }
+        }
+
+        List<SecurityAnalysisPartitioner.Partition> partitions = SecurityAnalysisPartitioner.partition(contingencies,
+                operatorStrategies, 4, true, SecurityAnalysisPartitioner.PARTITION_FIXED_COST_COPY);
+
+        // all 4 partitions are used, each with operator strategies
+        assertEquals(4, partitions.stream().filter(p -> !p.operatorStrategies().isEmpty()).count());
+        // each contingency is simulated by exactly 2 partitions (its disjoint block), not all 4
+        for (String contingencyId : List.of("c1", "c2")) {
+            long partitionsSimulating = partitions.stream().filter(p -> contingencyIds(p).contains(contingencyId)).count();
+            assertEquals(2, partitionsSimulating, contingencyId + " should be spread over exactly 2 partitions");
+        }
+        // no partition simulates both contingencies (disjoint blocks)
+        assertTrue(partitions.stream().allMatch(p -> contingencyIds(p).size() <= 1), "partition blocks must be disjoint");
+        assertEachStrategyAssignedOnce(operatorStrategies, partitions);
     }
 
     private static List<String> contingencyIds(SecurityAnalysisPartitioner.Partition partition) {

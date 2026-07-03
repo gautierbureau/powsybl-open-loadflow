@@ -258,10 +258,27 @@ with it directly — the partitioner still decides which contingencies/strategie
 mode decides how each partition's network is provisioned.
 
 Because a copy is much cheaper than a rebuild, the scheduler's per-partition fixed cost is mode dependent:
-`PARTITION_FIXED_COST_REBUILD` (6 load flows) for rebuild mode and `PARTITION_FIXED_COST_COPY` (1.5) for copy mode. With
+`PARTITION_FIXED_COST_REBUILD` (6 load flows) for rebuild mode and `PARTITION_FIXED_COST_COPY` (2.5) for copy mode. With
 the cheaper copy cost the balancer spreads operator strategies more aggressively — e.g. on PEGASE 13659 with a single
 contingency carrying 12 operator strategies, copy mode spreads them over the threads (operator-strategy-parallel beats
 contingency-parallel) whereas the rebuild cost would have kept them on one partition.
+
+#### Disjoint partition blocks
+
+The spread partitioner gives each strategy-bearing contingency its own **disjoint block** of partitions, sized by the
+largest remainder method proportionally to its operator strategy count (at least one partition, never more than its
+strategy count), and distributes that contingency's strategies round-robin over its block. This replaces an earlier
+greedy that let every contingency leak into every partition (so a two-contingency workload ended up with both
+contingencies — and both their post-contingency solves — on all partitions). With disjoint blocks a contingency is
+re-simulated only within its block, keeping redundant post-contingency solves minimal.
+
+The runtime benefit is however strongly hardware dependent. On a machine with only four cores, spreading pays off
+clearly when contingency-level parallelization leaves most threads idle (a single, or very few, contingencies with many
+operator strategies — the feature's main target), but for a workload that already fills a good fraction of the cores
+(e.g. two contingencies on four cores) the extra copies and redundant post-contingency solves can offset the finer
+parallelism. The `PARTITION_FIXED_COST_COPY` value is a heuristic tuned to spread the clear wins while staying close to
+contingency-level parallelization otherwise; a machine with many more cores than contingencies would benefit from a
+lower value.
 
 Still open for later phases: unifying the concurrency budget across both axes, and removing the shared mutable
 `zeroImpedanceMonitoredIndex` field.

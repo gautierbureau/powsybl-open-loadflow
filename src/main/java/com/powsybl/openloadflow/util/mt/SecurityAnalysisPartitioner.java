@@ -13,12 +13,11 @@ import com.powsybl.contingency.strategy.OperatorStrategy;
 import com.powsybl.openloadflow.util.Lists2;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
-import java.util.TreeSet;
 
 /**
  * Splits the work of a security analysis into a fixed number of partitions, one per thread.
@@ -54,9 +53,12 @@ public final class SecurityAnalysisPartitioner {
     /**
      * Fixed cost of an extra partition when its network is a deep copy of the network built once
      * ({@code NetworkPerThreadMode.COPY}, the default). A copy is much cheaper than a rebuild (it is lock free and, with
-     * network presolving, skips the pre-contingency solve), so operator strategies are spread more aggressively.
+     * network presolving, skips the pre-contingency solve), so operator strategies are spread more aggressively. It is
+     * still above one simulation: an extra partition adds a copy and a redundant post-contingency solve, so spreading a
+     * contingency over the threads is only worth it once it carries enough operator strategies (roughly more than
+     * {@code partitionFixedCost} per freed thread) to offset that overhead.
      */
-    public static final double PARTITION_FIXED_COST_COPY = 1.5;
+    public static final double PARTITION_FIXED_COST_COPY = 2.5;
 
     private SecurityAnalysisPartitioner() {
     }
@@ -168,52 +170,127 @@ public final class SecurityAnalysisPartitioner {
             strategiesByBucket.get(bucket).addAll(strategies);
             loads[bucket] += contingencyCost(contingency, strategiesByContingencyId);
         }
-        List<Partition> partitions = new ArrayList<>(partitionCount);
-        for (int i = 0; i < partitionCount; i++) {
-            List<Contingency> bucketContingencyIds = contingenciesByBucket.get(i);
-            List<Contingency> bucketContingencies = contingencies.stream()
-                    .filter(bucketContingencyIds::contains)
-                    .toList();
-            partitions.add(new Partition(bucketContingencies, strategiesByBucket.get(i)));
-        }
-        return partitions;
+        return buildPartitions(contingencies, contingenciesByBucket, strategiesByBucket, partitionCount);
     }
 
+    /**
+     * Spreads the operator strategies over the partitions. Each contingency that carries operator strategies is given a
+     * disjoint block of partitions (sized proportionally to its number of operator strategies), over which its
+     * strategies are distributed round-robin. This bounds how many partitions a contingency fans out to and keeps its
+     * redundant post-contingency solves to that block, instead of letting every contingency leak into every partition.
+     * Contingencies without operator strategies (they still need a post-contingency simulation) are packed into the
+     * least loaded partitions. When there are already at least as many strategy-bearing contingencies as partitions,
+     * spreading brings nothing and the plain contingency split is used.
+     */
     private static List<Partition> spreadPartition(List<Contingency> contingencies,
                                                    Map<String, List<OperatorStrategy>> strategiesByContingencyId, int partitionCount) {
+        List<Contingency> withStrategies = contingencies.stream()
+                .filter(c -> !strategiesByContingencyId.getOrDefault(c.getId(), List.of()).isEmpty())
+                .sorted((c1, c2) -> Long.compare(contingencyCost(c2, strategiesByContingencyId), contingencyCost(c1, strategiesByContingencyId)))
+                .toList();
+        if (withStrategies.size() >= partitionCount) {
+            // enough contingencies to fill the partitions without spreading
+            return contingencyPartition(contingencies, strategiesByContingencyId, partitionCount);
+        }
+
+        int[] partitionsPerContingency = allocatePartitions(withStrategies, strategiesByContingencyId, partitionCount);
+
         long[] loads = new long[partitionCount];
-        List<Set<String>> contingencyIdsByBucket = new ArrayList<>(partitionCount);
+        List<List<Contingency>> contingenciesByBucket = new ArrayList<>(partitionCount);
         List<List<OperatorStrategy>> strategiesByBucket = new ArrayList<>(partitionCount);
         for (int i = 0; i < partitionCount; i++) {
-            contingencyIdsByBucket.add(new TreeSet<>());
+            contingenciesByBucket.add(new ArrayList<>());
             strategiesByBucket.add(new ArrayList<>());
         }
 
-        // heaviest contingencies first (cost = one post-contingency simulation + one simulation per operator strategy)
-        List<Contingency> sortedContingencies = new ArrayList<>(contingencies);
-        sortedContingencies.sort((c1, c2) -> Long.compare(contingencyCost(c2, strategiesByContingencyId), contingencyCost(c1, strategiesByContingencyId)));
-
-        for (Contingency contingency : sortedContingencies) {
-            String contingencyId = contingency.getId();
-            // ensure the contingency is owned by at least one (the least loaded) bucket, even without any strategy
-            addContingencyToBucket(leastLoadedBucket(loads), contingencyId, loads, contingencyIdsByBucket);
-            // then assign each of its strategies to the bucket that minimizes the resulting load
-            for (OperatorStrategy operatorStrategy : strategiesByContingencyId.getOrDefault(contingencyId, List.of())) {
-                int bucket = bestBucketForStrategy(contingencyId, loads, contingencyIdsByBucket);
-                addContingencyToBucket(bucket, contingencyId, loads, contingencyIdsByBucket);
-                strategiesByBucket.get(bucket).add(operatorStrategy);
+        int nextBucket = 0;
+        for (int c = 0; c < withStrategies.size(); c++) {
+            Contingency contingency = withStrategies.get(c);
+            List<OperatorStrategy> strategies = strategiesByContingencyId.get(contingency.getId());
+            int blockStart = nextBucket;
+            int blockSize = partitionsPerContingency[c];
+            nextBucket += blockSize;
+            // each bucket of the block runs the post-contingency simulation of the contingency
+            for (int b = blockStart; b < blockStart + blockSize; b++) {
+                contingenciesByBucket.get(b).add(contingency);
+                loads[b]++;
+            }
+            // distribute the operator strategies round-robin over the block
+            for (int i = 0; i < strategies.size(); i++) {
+                int bucket = blockStart + i % blockSize;
+                strategiesByBucket.get(bucket).add(strategies.get(i));
                 loads[bucket]++;
             }
         }
 
-        // build the partitions, keeping contingencies in their original order within each bucket
+        // pack the strategy-less contingencies (they still need a post-contingency simulation) into the least loaded partitions
+        for (Contingency contingency : contingencies) {
+            if (strategiesByContingencyId.getOrDefault(contingency.getId(), List.of()).isEmpty()) {
+                int bucket = leastLoadedBucket(loads);
+                contingenciesByBucket.get(bucket).add(contingency);
+                loads[bucket]++;
+            }
+        }
+
+        return buildPartitions(contingencies, contingenciesByBucket, strategiesByBucket, partitionCount);
+    }
+
+    /**
+     * Allocates the {@code partitionCount} partitions to the (strategy-bearing) contingencies proportionally to their
+     * number of operator strategies, using the largest remainder method: every contingency gets at least one partition,
+     * never more partitions than it has operator strategies, and the remaining partitions go to the largest remainders.
+     */
+    private static int[] allocatePartitions(List<Contingency> withStrategies,
+                                            Map<String, List<OperatorStrategy>> strategiesByContingencyId, int partitionCount) {
+        int n = withStrategies.size();
+        int[] strategyCounts = new int[n];
+        long totalStrategies = 0;
+        for (int i = 0; i < n; i++) {
+            strategyCounts[i] = strategiesByContingencyId.get(withStrategies.get(i).getId()).size();
+            totalStrategies += strategyCounts[i];
+        }
+        int[] alloc = new int[n];
+        double[] remainder = new double[n];
+        int extra = partitionCount - n; // partitions left after giving one to each contingency
+        int assigned = 0;
+        for (int i = 0; i < n; i++) {
+            double share = totalStrategies == 0 ? 0 : (double) strategyCounts[i] / totalStrategies * extra;
+            alloc[i] = Math.min(1 + (int) Math.floor(share), strategyCounts[i]);
+            remainder[i] = share - Math.floor(share);
+            assigned += alloc[i];
+        }
+        // distribute the leftover partitions to the largest remainders, never exceeding the strategy count cap
+        Integer[] order = new Integer[n];
+        for (int i = 0; i < n; i++) {
+            order[i] = i;
+        }
+        Arrays.sort(order, (a, b) -> Double.compare(remainder[b], remainder[a]));
+        int leftover = partitionCount - assigned;
+        boolean progress = true;
+        while (leftover > 0 && progress) {
+            progress = false;
+            for (int k = 0; k < n && leftover > 0; k++) {
+                int i = order[k];
+                if (alloc[i] < strategyCounts[i]) {
+                    alloc[i]++;
+                    leftover--;
+                    progress = true;
+                }
+            }
+        }
+        return alloc;
+    }
+
+    private static List<Partition> buildPartitions(List<Contingency> contingencies, List<List<Contingency>> contingenciesByBucket,
+                                                   List<List<OperatorStrategy>> strategiesByBucket, int partitionCount) {
         List<Partition> partitions = new ArrayList<>(partitionCount);
         for (int i = 0; i < partitionCount; i++) {
-            Set<String> bucketContingencyIds = contingencyIdsByBucket.get(i);
-            List<Contingency> bucketContingencies = contingencies.stream()
-                    .filter(c -> bucketContingencyIds.contains(c.getId()))
+            List<Contingency> bucketContingencies = contingenciesByBucket.get(i);
+            // keep contingencies in their original order within each bucket
+            List<Contingency> orderedContingencies = contingencies.stream()
+                    .filter(bucketContingencies::contains)
                     .toList();
-            partitions.add(new Partition(bucketContingencies, strategiesByBucket.get(i)));
+            partitions.add(new Partition(orderedContingencies, strategiesByBucket.get(i)));
         }
         return partitions;
     }
@@ -222,32 +299,10 @@ public final class SecurityAnalysisPartitioner {
         return 1L + strategiesByContingencyId.getOrDefault(contingency.getId(), List.of()).size();
     }
 
-    private static void addContingencyToBucket(int bucket, String contingencyId, long[] loads, List<Set<String>> contingencyIdsByBucket) {
-        if (contingencyIdsByBucket.get(bucket).add(contingencyId)) {
-            // first time this bucket sees the contingency: it will have to run its post-contingency simulation
-            loads[bucket]++;
-        }
-    }
-
     private static int leastLoadedBucket(long[] loads) {
         int best = 0;
         for (int i = 1; i < loads.length; i++) {
             if (loads[i] < loads[best]) {
-                best = i;
-            }
-        }
-        return best;
-    }
-
-    private static int bestBucketForStrategy(String contingencyId, long[] loads, List<Set<String>> contingencyIdsByBucket) {
-        int best = 0;
-        long bestCost = Long.MAX_VALUE;
-        for (int i = 0; i < loads.length; i++) {
-            // running the strategy costs one simulation, plus one post-contingency simulation if the bucket does not
-            // already simulate this contingency
-            long cost = loads[i] + (contingencyIdsByBucket.get(i).contains(contingencyId) ? 1 : 2);
-            if (cost < bestCost) {
-                bestCost = cost;
                 best = i;
             }
         }
