@@ -332,7 +332,10 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         double[] lambda = xBar; // solved in place
         context.getJacobianMatrix().solve(lambda);
 
-        // θ̄_v = −(∂F/∂p_v)ᵀ λ per variable group, plus the direct ∂f/∂p term (branch parameters).
+        // θ̄_v = λᵀ·rhs_v per variable group, plus the direct ∂f/∂p term (branch parameters). rhs_v is the
+        // initFactorsRhs column, which already carries the forward's −∂F/∂p sign (it is what solveTransposed
+        // maps to the state sensitivity dx/dp), so this dot product is the exact transpose of the forward
+        // calculateSensi — no extra sign.
         double[] thetaBar = new double[factorGroups.getList().size()];
         for (var group : factorGroups.getList()) {
             int col = group.getIndex();
@@ -340,7 +343,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             for (int row = 0; row < equationCount; row++) {
                 dot += parameterRhs.get(row, col) * lambda[row];
             }
-            double thetaG = -dot;
+            double thetaG = dot;
             for (var factor : group.getFactors()) {
                 Double yBar = cotangents.get(factor);
                 if (yBar != null && yBar != 0.0) {
