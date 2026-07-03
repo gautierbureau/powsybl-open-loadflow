@@ -7,10 +7,13 @@
  */
 package com.powsybl.openloadflow.ac.continuation;
 
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Result of a continuation power flow run: the traced P-V curve and the estimated maximum loadability
@@ -103,5 +106,33 @@ public class ContinuationResult {
      */
     public Map<String, Double> getTangentParticipationByBus() {
         return tangentParticipationByBus;
+    }
+
+    /**
+     * The ids of the buses whose voltage was recorded along the curve (empty when voltage recording is off).
+     */
+    public Set<String> getMonitoredBusIds() {
+        Set<String> busIds = new LinkedHashSet<>();
+        for (ContinuationPoint point : points) {
+            busIds.addAll(point.busVoltages().keySet());
+        }
+        return busIds;
+    }
+
+    /**
+     * The P-V curve of a single bus: one {@link PvCurvePoint} per continuation point that recorded this bus,
+     * in traced order (upper branch then, for a predictor-corrector run, lower branch). Empty when voltage
+     * recording is off or the bus was not monitored.
+     */
+    public List<PvCurvePoint> getPvCurve(String busId) {
+        List<PvCurvePoint> curve = new ArrayList<>();
+        for (ContinuationPoint point : points) {
+            Double voltage = point.busVoltages().get(busId);
+            if (voltage != null) {
+                double slope = point.busDvDlambda().getOrDefault(busId, Double.NaN);
+                curve.add(new PvCurvePoint(point.loadFactor(), voltage, slope, point.stable()));
+            }
+        }
+        return curve;
     }
 }

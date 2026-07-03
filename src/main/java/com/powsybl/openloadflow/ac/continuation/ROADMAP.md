@@ -13,19 +13,14 @@ Tracking the planned work for the voltage-collapse / continuation power flow pro
   tangent-based voltage participation factors (critical bus).
 - **Sparse bordered solve** — the augmented `(n+1)` system is solved by block elimination reusing the existing
   sparse `JacobianMatrix` factorization of `F_x` (two back-substitutions per iteration, no dense matrix).
+- **Full per-bus voltages per point + dV/dλ** — every bus voltage is recorded at each `ContinuationPoint`
+  (opt-in `recordBusVoltages`, on by default), with a finite-difference `dV/dλ` per bus. `ContinuationResult`
+  exposes `getMonitoredBusIds()` and `getPvCurve(busId)` returning plottable `PvCurvePoint`s. Works for both
+  engines; `dV/dλ` diverges towards the nose (collapse proximity indicator).
 
 ## Backlog
 
-### 1. Full per-bus voltages per point + dV/dλ
-Record every bus voltage magnitude (and optionally angle) at each `ContinuationPoint`, not just the minimum,
-so callers can plot a proper P–V curve **per bus**. Add the per-bus tangent slope `dV/dλ` at each point (the
-tangent vector is already computed in the predictor–corrector engine; the stepped engine can finite-difference
-between consecutive points). Deliverables:
-- extend `ContinuationPoint` with `Map<String, Double> busVoltages` (guard memory for large networks, maybe
-  opt-in via a parameter);
-- expose `dV/dλ` per bus at the nose (steepest = most critical), superseding the current min-voltage proxy.
-
-### 2. Smooth generator participation
+### 1. Smooth generator participation
 Today the single slack bus absorbs the whole load increase in the predictor–corrector engine. Add a smooth
 generation-increase direction: scale participating generators' target P by `(1 + λ·k_G)` alongside the loads.
 Since `F_λ` is computed by finite-differencing the target vector, generator scaling is picked up automatically
@@ -35,7 +30,7 @@ once the mutation step scales generators too. Deliverables:
 - keep the balance well-posed (slack still closes the residual);
 - a test where generation participation changes the nose location.
 
-### 3. Reactive-limit breakpoints on the curve
+### 2. Reactive-limit breakpoints on the curve
 The smooth predictor–corrector deliberately ignores reactive limits. Real P–V curves have breakpoints where a
 generator hits Q_max/Q_min and switches PV→PQ. Add discrete event handling to the continuation:
 - monitor each PV generator's reactive power along the curve;
@@ -44,7 +39,7 @@ generator hits Q_max/Q_min and switches PV→PQ. Add discrete event handling to 
 - mark breakpoints in the result. Note: structure changes rebuild `F_λ` and the equation index, so this needs
   care around the constant-`F_λ` assumption.
 
-### 4. Public API + docs
+### 3. Public API + docs
 Expose both engines through the standard OpenLoadFlow surface instead of the current programmatic-only entry:
 - an `OpenLoadFlowParameters` extension (or a dedicated `ContinuationPowerFlow` runner) selecting engine
   (stepped / predictor–corrector), the load & generation directions, and stepping parameters;

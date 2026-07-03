@@ -88,6 +88,40 @@ class PredictorCorrectorContinuationPowerFlowTest {
     }
 
     @Test
+    void perBusCurveAndSensitivityTest() {
+        Network network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+        LoadFlowParameters parameters = new LoadFlowParameters()
+                .setUseReactiveLimits(false)
+                .setDistributedSlack(false);
+        OpenLoadFlowParameters parametersExt = OpenLoadFlowParameters.create(parameters)
+                .setSlackBusSelectionMode(SlackBusSelectionMode.FIRST);
+
+        ContinuationResult result = new PredictorCorrectorContinuationPowerFlow(new PredictorCorrectorParameters())
+                .run(network, parameters, parametersExt, commonTestConfig.matrixFactory(), LoadIncreaseDirection.allLoads());
+
+        // per-bus voltages recorded for every bus at every point
+        assertTrue(result.getMonitoredBusIds().contains("VLLOAD_0"));
+
+        // the load bus P-V curve has one entry per continuation point
+        List<PvCurvePoint> curve = result.getPvCurve("VLLOAD_0");
+        assertEquals(result.getPoints().size(), curve.size());
+        assertEquals(0.0, curve.get(0).loadFactor());
+
+        // voltage decreases monotonically along the traced curve (upper branch then lower branch)
+        for (int i = 1; i < curve.size(); i++) {
+            assertTrue(curve.get(i).voltage() < curve.get(i - 1).voltage());
+        }
+
+        // dV/dlambda magnitude blows up near the nose: a voltage collapse proximity indicator
+        double maxAbsSlope = curve.stream()
+                .map(PvCurvePoint::dvDlambda)
+                .filter(Double::isFinite)
+                .mapToDouble(Math::abs)
+                .max().orElseThrow();
+        assertTrue(maxAbsSlope > 10.0, "dV/dlambda should diverge near the nose, got " + maxAbsSlope);
+    }
+
+    @Test
     void noParticipatingLoadTest() {
         Network network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
         LoadFlowParameters parameters = new LoadFlowParameters()

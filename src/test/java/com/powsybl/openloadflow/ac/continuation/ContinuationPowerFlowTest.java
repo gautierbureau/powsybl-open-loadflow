@@ -80,6 +80,32 @@ class ContinuationPowerFlowTest {
     }
 
     @Test
+    void perBusCurveTest() {
+        Network network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+        LoadFlowParameters parameters = new LoadFlowParameters()
+                .setUseReactiveLimits(false)
+                .setDistributedSlack(true);
+        OpenLoadFlowParameters parametersExt = createParametersExt(parameters);
+
+        ContinuationResult result = new ContinuationPowerFlow(new ContinuationPowerFlowParameters())
+                .run(network, parameters, parametersExt, commonTestConfig.matrixFactory(), LoadIncreaseDirection.allLoads());
+
+        assertTrue(result.getMonitoredBusIds().contains("VLLOAD_0"));
+
+        List<PvCurvePoint> curve = result.getPvCurve("VLLOAD_0");
+        assertEquals(result.getPoints().size(), curve.size());
+        assertEquals(0.0, curve.get(0).loadFactor());
+
+        // on the stable branch the load bus voltage drops as the load increases, so dV/dlambda < 0
+        for (PvCurvePoint p : curve) {
+            if (Double.isFinite(p.dvDlambda())) {
+                assertTrue(p.dvDlambda() < 0, "Expected negative dV/dlambda, got " + p.dvDlambda());
+                assertTrue(p.stable());
+            }
+        }
+    }
+
+    @Test
     void noParticipatingLoadTest() {
         Network network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
         LoadFlowParameters parameters = new LoadFlowParameters()

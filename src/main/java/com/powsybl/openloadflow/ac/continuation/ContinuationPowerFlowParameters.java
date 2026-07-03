@@ -27,6 +27,7 @@ public class ContinuationPowerFlowParameters {
     public static final int DEFAULT_STEP_INCREASE_THRESHOLD = 2;
     public static final int DEFAULT_MAX_STEPS = 100;
     public static final boolean DEFAULT_SCALE_REACTIVE_POWER_WITH_ACTIVE_POWER = true;
+    public static final boolean DEFAULT_RECORD_BUS_VOLTAGES = true;
 
     private double initialStepSize = DEFAULT_INITIAL_STEP_SIZE;
     private double minStepSize = DEFAULT_MIN_STEP_SIZE;
@@ -36,6 +37,7 @@ public class ContinuationPowerFlowParameters {
     private int stepIncreaseThreshold = DEFAULT_STEP_INCREASE_THRESHOLD;
     private int maxSteps = DEFAULT_MAX_STEPS;
     private boolean scaleReactivePowerWithActivePower = DEFAULT_SCALE_REACTIVE_POWER_WITH_ACTIVE_POWER;
+    private boolean recordBusVoltages = DEFAULT_RECORD_BUS_VOLTAGES;
 
     /** Load factor increment used for the first step. */
     public double getInitialStepSize() {
@@ -114,6 +116,20 @@ public class ContinuationPowerFlowParameters {
 
     public ContinuationPowerFlowParameters setScaleReactivePowerWithActivePower(boolean scaleReactivePowerWithActivePower) {
         this.scaleReactivePowerWithActivePower = scaleReactivePowerWithActivePower;
+        return this;
+    }
+
+    /**
+     * If true, every bus voltage magnitude is recorded at each point so per-bus P-V curves and dV/dlambda can be
+     * built. Costs memory proportional to (buses x points); disable it on large networks when only the margin is
+     * needed.
+     */
+    public boolean isRecordBusVoltages() {
+        return recordBusVoltages;
+    }
+
+    public ContinuationPowerFlowParameters setRecordBusVoltages(boolean recordBusVoltages) {
+        this.recordBusVoltages = recordBusVoltages;
         return this;
     }
 }

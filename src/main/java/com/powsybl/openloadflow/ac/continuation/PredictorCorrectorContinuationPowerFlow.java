@@ -259,9 +259,10 @@ public class PredictorCorrectorContinuationPowerFlow {
             return t;
         }
 
-        private ContinuationPoint buildPoint(boolean stable) {
+        private ContinuationPoint buildPoint(boolean stable, ContinuationPoint previous) {
             double minVoltage = Double.MAX_VALUE;
             String minVoltageBusId = null;
+            Map<String, Double> busVoltages = parameters.isRecordBusVoltages() ? new LinkedHashMap<>() : Map.of();
             for (Variable<AcVariableType> variable : equationSystem.getIndex().getSortedVariablesToFind()) {
                 if (variable.getType() == AcVariableType.BUS_V) {
                     LfBus bus = network.getBus(variable.getElementNum());
@@ -273,12 +274,17 @@ public class PredictorCorrectorContinuationPowerFlow {
                         minVoltage = v;
                         minVoltageBusId = bus.getId();
                     }
+                    if (parameters.isRecordBusVoltages()) {
+                        busVoltages.put(bus.getId(), v);
+                    }
                 }
             }
             double participatingLoadTargetPMw = participants.stream()
                     .mapToDouble(p -> p.load().getTargetP())
                     .sum() * PerUnit.SB;
-            return new ContinuationPoint(lambda, participatingLoadTargetPMw, minVoltage, minVoltageBusId, stable);
+            Map<String, Double> busDvDlambda = ContinuationPoint.derivativeVsLoadFactor(busVoltages, lambda, previous);
+            return new ContinuationPoint(lambda, participatingLoadTargetPMw, minVoltage, minVoltageBusId, stable,
+                    busVoltages, busDvDlambda);
         }
 
         /**
@@ -347,7 +353,7 @@ public class PredictorCorrectorContinuationPowerFlow {
         }
 
         List<ContinuationPoint> points = new ArrayList<>();
-        points.add(c.buildPoint(true));
+        points.add(c.buildPoint(true, null));
 
         double[] previousTangent = null;
         int paramVariable = PARAM_LAMBDA;
@@ -393,7 +399,7 @@ public class PredictorCorrectorContinuationPowerFlow {
                     turned = true;
                 }
                 boolean stable = !turned;
-                ContinuationPoint point = c.buildPoint(stable);
+                ContinuationPoint point = c.buildPoint(stable, points.get(points.size() - 1));
                 points.add(point);
 
                 if (stable && c.lambda >= maxLambda) {

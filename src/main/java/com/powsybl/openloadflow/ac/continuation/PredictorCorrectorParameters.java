@@ -31,6 +31,7 @@ public class PredictorCorrectorParameters {
     public static final boolean DEFAULT_TRACE_LOWER_BRANCH = true;
     public static final double DEFAULT_MIN_LOAD_FACTOR = 0.0;
     public static final boolean DEFAULT_SCALE_REACTIVE_POWER_WITH_ACTIVE_POWER = true;
+    public static final boolean DEFAULT_RECORD_BUS_VOLTAGES = true;
 
     private double initialStepSize = DEFAULT_INITIAL_STEP_SIZE;
     private double minStepSize = DEFAULT_MIN_STEP_SIZE;
@@ -44,6 +45,7 @@ public class PredictorCorrectorParameters {
     private boolean traceLowerBranch = DEFAULT_TRACE_LOWER_BRANCH;
     private double minLoadFactor = DEFAULT_MIN_LOAD_FACTOR;
     private boolean scaleReactivePowerWithActivePower = DEFAULT_SCALE_REACTIVE_POWER_WITH_ACTIVE_POWER;
+    private boolean recordBusVoltages = DEFAULT_RECORD_BUS_VOLTAGES;
 
     /** Arc length of the first predictor step, in the combined (state, lambda) tangent space. */
     public double getInitialStepSize() {
@@ -156,6 +158,20 @@ public class PredictorCorrectorParameters {
 
     public PredictorCorrectorParameters setScaleReactivePowerWithActivePower(boolean scaleReactivePowerWithActivePower) {
         this.scaleReactivePowerWithActivePower = scaleReactivePowerWithActivePower;
+        return this;
+    }
+
+    /**
+     * If true, every bus voltage magnitude is recorded at each point so per-bus P-V curves and dV/dlambda can be
+     * built. Costs memory proportional to (buses x points); disable it on large networks when only the margin and
+     * nose are needed.
+     */
+    public boolean isRecordBusVoltages() {
+        return recordBusVoltages;
+    }
+
+    public PredictorCorrectorParameters setRecordBusVoltages(boolean recordBusVoltages) {
+        this.recordBusVoltages = recordBusVoltages;
         return this;
     }
 }

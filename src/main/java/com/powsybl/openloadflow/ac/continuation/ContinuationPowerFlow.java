@@ -28,7 +28,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -109,7 +111,7 @@ public class ContinuationPowerFlow {
             LOGGER.warn("Continuation aborted: base case did not converge ({})", baseResult.getSolverStatus());
             return new ContinuationResult(ContinuationResult.Status.BASE_CASE_NOT_CONVERGED, List.of(), 0.0, null);
         }
-        points.add(buildPoint(network, participants, 0.0));
+        points.add(buildPoint(network, participants, 0.0, null));
 
         // subsequent steps are warm-started from the previous converged solution
         acParameters.setVoltageInitializer(new PreviousValueVoltageInitializer());
@@ -129,7 +131,7 @@ public class ContinuationPowerFlow {
             AcLoadFlowResult result = new AcloadFlowEngine(context).run();
             if (result.isSuccess()) {
                 lambda = trialLambda;
-                ContinuationPoint point = buildPoint(network, participants, lambda);
+                ContinuationPoint point = buildPoint(network, participants, lambda, points.get(points.size() - 1));
                 points.add(point);
                 LOGGER.debug("Continuation step converged: lambda={}, minV={} pu at bus '{}'",
                         lambda, point.minVoltage(), point.minVoltageBusId());
@@ -164,9 +166,11 @@ public class ContinuationPowerFlow {
         }
     }
 
-    private static ContinuationPoint buildPoint(LfNetwork network, List<ParticipatingLoad> participants, double lambda) {
+    private ContinuationPoint buildPoint(LfNetwork network, List<ParticipatingLoad> participants, double lambda,
+                                         ContinuationPoint previous) {
         double minVoltage = Double.MAX_VALUE;
         String minVoltageBusId = null;
+        Map<String, Double> busVoltages = parameters.isRecordBusVoltages() ? new LinkedHashMap<>() : Map.of();
         for (LfBus bus : network.getBuses()) {
             if (bus.isDisabled() || bus.isFictitious()) {
                 continue;
@@ -176,12 +180,17 @@ public class ContinuationPowerFlow {
                 minVoltage = v;
                 minVoltageBusId = bus.getId();
             }
+            if (parameters.isRecordBusVoltages() && !Double.isNaN(v)) {
+                busVoltages.put(bus.getId(), v);
+            }
         }
         double participatingLoadTargetPMw = participants.stream()
                 .mapToDouble(p -> p.load().getTargetP())
                 .sum() * PerUnit.SB;
+        Map<String, Double> busDvDlambda = ContinuationPoint.derivativeVsLoadFactor(busVoltages, lambda, previous);
         // the stepped continuation only traces the upper, stable branch
-        return new ContinuationPoint(lambda, participatingLoadTargetPMw, minVoltage, minVoltageBusId, true);
+        return new ContinuationPoint(lambda, participatingLoadTargetPMw, minVoltage, minVoltageBusId, true,
+                busVoltages, busDvDlambda);
     }
 
     /**
