@@ -252,6 +252,40 @@ Still open for later phases: Option B (solve each contingency once and fork the 
 redundant post-contingency solves), unifying the concurrency budget across both axes, and removing the shared mutable
 `zeroImpedanceMonitoredIndex` field.
 
+### Benchmark
+
+`SecurityAnalysisParallelizationBenchmark` (package `com.powsybl.openloadflow.sa.benchmark`) compares the wall-clock
+time of a security analysis run single-threaded, parallelized on contingencies only, and parallelized on operator
+strategies. It targets a workload skewed towards operator strategies (few contingencies, many strategies each). It is
+meant to run on a large network such as PEGASE 13659, which carries no branch current limits, so the benchmark adds a
+permanent current limit to every branch (derived from the base-case flow) to give limit-violation detection realistic
+work.
+
+The network is not bundled; it is passed via `-Dbenchmark.network=...` (so the benchmark is skipped in CI). Both PowSyBl
+native formats and the MATPOWER `.m` text format are accepted — `case13659pegase.m` is downloadable from the MATPOWER
+project, and `MatpowerCaseParser` parses it before round-tripping through the official `powsybl-matpower-converter`
+importer (added as a test dependency).
+
+```
+mvn test -Dtest=SecurityAnalysisParallelizationBenchmark \
+    -Dbenchmark.network=/path/to/case13659pegase.m \
+    -Dbenchmark.contingencies=1 -Dbenchmark.strategiesPerContingency=32 -Dbenchmark.threads=4
+```
+
+Illustrative results on PEGASE 13659 (13659 buses, 20467 branches), 4 cores, 1 contingency carrying 32 operator
+strategies — the case where contingency-level parallelization brings nothing:
+
+| configuration | threads | time | speed-up |
+| --- | --- | --- | --- |
+| single-threaded | 1 | 17329 ms | x1.00 |
+| contingency-parallel | 4 | 16400 ms | x1.06 |
+| operator-strategy-parallel | 4 | 12935 ms | x1.34 |
+
+Contingency-level parallelization is essentially inactive (one contingency, one partition), whereas operator strategy
+parallelization spreads the 32 strategies over the threads. The speed-up is bounded here by the low core count and by
+the Option A overheads (one network clone and pre-contingency solve per partition, plus the redundant post-contingency
+solves); it grows with the number of strategies per contingency and the number of available cores.
+
 ## 7. Key code references
 
 - `AbstractSecurityAnalysis.runSync` — thread-count branch and contingency partitioning
