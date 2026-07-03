@@ -17,6 +17,8 @@ A feature-only diff (13 files, no build-environment workarounds) that adds, acro
 - **Python** — the `pypowsybl/continuation/` package (`run`, `ContinuationParameters`, `ContinuationEngine`,
   `ContinuationResult` exposing `curve` / `breakpoints` / `summary` DataFrames, `max_load_factor`,
   `critical_bus_id`, `pv_curve(bus_id)`), registered in `pypowsybl/__init__.py`, with `tests/test_continuation.py`.
+- **Docs** — `docs/reference/continuation.rst` (API reference) and `docs/user_guide/continuation.rst` (narrative
+  guide with examples), added to the reference and user-guide toctrees.
 - `CONTINUATION_PROTOTYPE.md` — design notes.
 
 Apply it on top of a pypowsybl checkout with:

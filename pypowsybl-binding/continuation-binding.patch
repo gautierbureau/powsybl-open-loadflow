@@ -211,6 +211,174 @@ index 0e8caf0..64e5431 100644
      m.def("run_loadflow_async", &runLoadFlowAsyncPython, "Run a load flow asynchronously", py::call_guard<py::gil_scoped_release>(),
            py::arg("network"), py::arg("variant_id"), py::arg("parameters"), py::arg("provider"), py::arg("report_node"),
            py::arg("results_future"));
+diff --git a/docs/reference/continuation.rst b/docs/reference/continuation.rst
+new file mode 100644
+index 0000000..e8d911c
+--- /dev/null
++++ b/docs/reference/continuation.rst
+@@ -0,0 +1,51 @@
++============
++Continuation
++============
++
++.. module:: pypowsybl.continuation
++
++The continuation module traces the P-V "nose" curve of a network as its load increases, up to the maximum
++loadability / voltage collapse point.
++
++.. warning::
++
++    This is an experimental, OpenLoadFlow-specific analysis. Its API may change.
++
++Running a continuation power flow
++---------------------------------
++
++.. autosummary::
++   :toctree: api/
++   :nosignatures:
++
++    run
++
++Parameters
++----------
++
++The continuation can be customized using continuation parameters.
++
++.. autosummary::
++   :toctree: api/
++   :nosignatures:
++
++    ContinuationParameters
++
++The engine is selected with an enum class:
++
++.. autosummary::
++   :toctree: api/
++   :template: autosummary/class_without_members.rst
++
++    ContinuationEngine
++
++Results
++-------
++
++The result exposes the traced curve and the estimated collapse point.
++
++.. autosummary::
++   :toctree: api/
++   :nosignatures:
++
++    ContinuationResult
+diff --git a/docs/reference/index.rst b/docs/reference/index.rst
+index fe87c97..c73e006 100644
+--- a/docs/reference/index.rst
++++ b/docs/reference/index.rst
+@@ -9,6 +9,7 @@ of pypowsybl classes and methods.
+ 
+    network
+    loadflow
++   continuation
+    rao
+    security
+    sensitivity
+diff --git a/docs/user_guide/continuation.rst b/docs/user_guide/continuation.rst
+new file mode 100644
+index 0000000..3489f61
+--- /dev/null
++++ b/docs/user_guide/continuation.rst
+@@ -0,0 +1,81 @@
++Continuation power flow (voltage collapse)
++==========================================
++
++For detailed documentation of the continuation power flow, please refer to the
++`PowSyBl OpenLoadFlow documentation <https://powsybl.readthedocs.io/projects/powsybl-open-loadflow/en/latest/advanced_programming/continuation.html>`_.
++
++.. warning::
++
++    This is an experimental, OpenLoadFlow-specific analysis. Its API may change.
++
++You can use the module :mod:`pypowsybl.continuation` to trace the P-V "nose" curve of a network as its load
++increases, up to the **maximum loadability / voltage collapse** point. The distance from the base case to the
++nose is the loadability margin.
++
++Running a continuation
++----------------------
++
++By default the predictor-corrector engine increases every load, and returns the traced curve and a collapse
++summary:
++
++.. code-block:: python
++
++    >>> import pypowsybl.network as pn
++    >>> import pypowsybl.continuation as continuation
++    >>> network = pn.create_eurostag_tutorial_example1_network()
++    >>> result = continuation.run(network)
++    >>> result.status
++    'NOSE_POINT_REACHED'
++    >>> round(result.max_load_factor, 3)      # loadability margin (lambda at collapse)
++    0.86
++    >>> result.critical_bus_id                # the collapse-driving bus
++    'VLLOAD_0'
++
++The P-V curve of any monitored bus is a plottable :class:`pandas.DataFrame`, indexed by ``(point, bus_id)``,
++with the load factor, the voltage, the sensitivity ``dv_dlambda`` (which diverges towards the nose) and a
++``stable`` flag distinguishing the upper branch from the lower, unstable branch traced beyond the nose:
++
++.. code-block:: python
++
++    >>> curve = result.pv_curve(result.critical_bus_id)
++    >>> curve.columns.tolist()
++    ['load_factor', 'voltage', 'dv_dlambda', 'stable']
++
++The two engines
++---------------
++
++:class:`~pypowsybl.continuation.ContinuationEngine` selects the algorithm:
++
++- ``STEPPED`` reuses the full AC load flow and its outer loops (distributed slack, reactive limits, ...). It
++  traces the upper branch and the loadability margin but stops at the nose.
++- ``PREDICTOR_CORRECTOR`` is a true continuation power flow that passes through the nose and traces the lower,
++  unstable branch, on a smooth single-slack model.
++
++.. code-block:: python
++
++    >>> from pypowsybl.continuation import ContinuationParameters, ContinuationEngine
++    >>> result = continuation.run(network, ContinuationParameters(engine=ContinuationEngine.STEPPED))
++
++Load and generation directions
++-------------------------------
++
++By default every load increases. You can stress a subset of loads, and (predictor-corrector only) have
++generators pick up the increase instead of leaving it all to the slack bus, which moves the collapse point:
++
++.. code-block:: python
++
++    >>> params = ContinuationParameters(load_ids=['LOAD'], generator_ids=['GEN'])
++    >>> result = continuation.run(network, params)
++
++Reactive limits
++---------------
++
++The predictor-corrector engine can switch a generator from PV to PQ when it hits a reactive limit, which
++introduces a breakpoint on the curve and usually brings the collapse point closer. The breakpoints are reported
++in ``result.breakpoints``:
++
++.. code-block:: python
++
++    >>> params = ContinuationParameters(enforce_reactive_limits=True)
++    >>> result = continuation.run(network, params)
++    >>> result.breakpoints            # DataFrame: bus_id, load_factor, q_limit_mvar, max_limit
+diff --git a/docs/user_guide/index.rst b/docs/user_guide/index.rst
+index 9b624f6..f0962d8 100644
+--- a/docs/user_guide/index.rst
++++ b/docs/user_guide/index.rst
+@@ -12,6 +12,7 @@ relying as much as possible on practical examples.
+    network_visualization
+    per_unit
+    loadflow
++   continuation
+    rao
+    security
+    sensitivity
 diff --git a/java/pypowsybl/src/main/java/com/powsybl/python/continuation/ContinuationCFunctions.java b/java/pypowsybl/src/main/java/com/powsybl/python/continuation/ContinuationCFunctions.java
 new file mode 100644
 index 0000000..2d3d33c
