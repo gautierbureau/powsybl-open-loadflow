@@ -376,17 +376,19 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      * variables) is the same as the forward; instead of materialising the sensitivity matrix {@code S},
      * it contracts an output cotangent to return {@code θ̄ = Sᵀ·ȳ}.
      *
-     * @param factorReader          the (function, variable) declaration, as in the forward.
+     * @param factors               the (function, variable) declaration, as in the forward. The cotangents
+     *                               and the returned map are keyed by the ids on these factors (function
+     *                               and variable ids are resolved internally, so the caller's ids are kept).
      * @param functionCotangentsById dL/dfunction, keyed by monitored function id (same value shared by
      *                               every factor sharing that function).
      * @return dL/dvariable, keyed by variable id.
      */
     public Map<String, Double> runAdjoint(Network network, String workingVariantId,
                                           List<SensitivityVariableSet> variableSets,
-                                          SensitivityFactorReader factorReader,
+                                          List<SensitivityFactor> factors,
                                           Map<String, Double> functionCotangentsById) {
         Objects.requireNonNull(network);
-        Objects.requireNonNull(factorReader);
+        Objects.requireNonNull(factors);
         Objects.requireNonNull(functionCotangentsById);
         network.getVariantManager().setWorkingVariant(workingVariantId);
 
@@ -401,8 +403,12 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
 
         Map<String, SensitivityVariableSet> variableSetsById = variableSets.stream()
                 .collect(Collectors.toMap(SensitivityVariableSet::getId, Function.identity()));
+        // A LfSensitivityFactor's getFunctionId()/getVariableId() are the RESOLVED LF element ids (a
+        // BUS_VOLTAGE function id is resolved to the bus-view bus id, an SVC pilot variable to its pilot
+        // bus), NOT the caller's ids — only getIndex() links back to the declared factor. So match the
+        // cotangent (in) and the θ̄ map (out) through `factors` by index, using the ids the caller passed.
         SensitivityFactorHolder<AcVariableType, AcEquationType> allFactorHolder =
-                readAndCheckFactors(network, variableSetsById, factorReader, lfNetwork, breakers);
+                readAndCheckFactors(network, variableSetsById, new SensitivityFactorModelReader(factors, network), lfNetwork, breakers);
         List<LfSensitivityFactor<AcVariableType, AcEquationType>> validLfFactors = allFactorHolder.getAllFactors().stream()
                 .filter(f -> f.getStatus() == LfSensitivityFactor.Status.VALID)
                 .collect(Collectors.toList());
@@ -420,10 +426,10 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                     lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().getFirst(), -1d);
         }
 
-        // cotangent per factor = the cotangent of its monitored function
+        // cotangent per factor = the cotangent of its monitored function, matched by the caller's id
         Map<LfSensitivityFactor<AcVariableType, AcEquationType>, Double> cotangents = new HashMap<>();
         for (var factor : validLfFactors) {
-            Double yBar = functionCotangentsById.get(factor.getFunctionId());
+            Double yBar = functionCotangentsById.get(factors.get(factor.getIndex()).getFunctionId());
             if (yBar != null && yBar != 0.0) {
                 cotangents.put(factor, yBar);
             }
@@ -433,7 +439,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
 
         Map<String, Double> gradientByVariableId = new LinkedHashMap<>();
         for (var group : factorGroups.getList()) {
-            gradientByVariableId.put(group.getFactors().get(0).getVariableId(), thetaBar[group.getIndex()]);
+            gradientByVariableId.put(factors.get(group.getFactors().get(0).getIndex()).getVariableId(), thetaBar[group.getIndex()]);
         }
         return gradientByVariableId;
     }

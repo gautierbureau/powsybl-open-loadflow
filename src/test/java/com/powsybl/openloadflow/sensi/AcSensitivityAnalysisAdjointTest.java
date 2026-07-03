@@ -11,6 +11,7 @@ import com.powsybl.contingency.ContingencyContext;
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Generator;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.extensions.SecondaryVoltageControlAdder;
 import com.powsybl.loadflow.LoadFlow;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.SparseMatrixFactory;
@@ -21,8 +22,6 @@ import com.powsybl.sensitivity.SensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityAnalysisResult;
 import com.powsybl.sensitivity.SensitivityAnalysisRunParameters;
 import com.powsybl.sensitivity.SensitivityFactor;
-import com.powsybl.sensitivity.SensitivityFactorModelReader;
-import com.powsybl.sensitivity.SensitivityFactorReader;
 import com.powsybl.sensitivity.SensitivityFunctionType;
 import com.powsybl.sensitivity.SensitivityVariableType;
 import org.junit.jupiter.api.Test;
@@ -107,9 +106,8 @@ class AcSensitivityAnalysisAdjointTest {
         // reverse mode: ȳ = e_branch -> θ̄_g = dP_branch1/dP_g
         AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
                 new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
-        SensitivityFactorReader reader = new SensitivityFactorModelReader(factors, network);
         Map<String, Double> thetaBar = analysis.runAdjoint(network,
-                network.getVariantManager().getWorkingVariantId(), List.of(), reader, Map.of(branch, 1.0));
+                network.getVariantManager().getWorkingVariantId(), List.of(), factors, Map.of(branch, 1.0));
 
         // forward sensitivity matrix S (its own no-cache load flow; unscaled == raw here)
         SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, factors,
@@ -159,7 +157,7 @@ class AcSensitivityAnalysisAdjointTest {
                 new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
         Map<String, Double> thetaBar = analysis.runAdjoint(network,
                 network.getVariantManager().getWorkingVariantId(), List.of(),
-                new SensitivityFactorModelReader(factors, network), Map.of(branch, 1.0));
+                factors, Map.of(branch, 1.0));
 
         SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, factors,
                 new SensitivityAnalysisRunParameters().setParameters(sensiParams));
@@ -172,6 +170,96 @@ class AcSensitivityAnalysisAdjointTest {
             maxAbs = Math.max(maxAbs, Math.abs(theta));
         }
         assertTrue(maxAbs > 0.1, "gradient must be non-trivial, got max |θ̄| = " + maxAbs);
+    }
+
+    private static Network ieee14WithZone(double pilotTargetV) {
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getGenerator("B8-G").newMinMaxReactiveLimits().setMinQ(-6).setMaxQ(200).add();
+        network.newExtension(SecondaryVoltageControlAdder.class)
+                .newControlZone().withName("z1")
+                    .newPilotPoint().withTargetV(pilotTargetV).withBusbarSectionsOrBusesIds(List.of("B10")).add()
+                    .newControlUnit().withId("B6-G").add()
+                    .newControlUnit().withId("B8-G").add()
+                    .add()
+                .add();
+        return network;
+    }
+
+    private static LoadFlowParameters svcCacheEnabledParameters() {
+        LoadFlowParameters lfp = new LoadFlowParameters().setUseReactiveLimits(false);
+        OpenLoadFlowParameters.create(lfp)
+                .setSecondaryVoltageControl(true)
+                .setMaxPlausibleTargetVoltage(1.6)
+                .setNetworkCacheEnabled(true);
+        return lfp;
+    }
+
+    private static double busVoltage(Network network, String busId) {
+        return network.getBusBreakerView().getBus(busId).getV();
+    }
+
+    private static double nominalV(Network network, String busId) {
+        return network.getBusBreakerView().getBus(busId).getVoltageLevel().getNominalV();
+    }
+
+    @Test
+    void runAdjointHandlesSvcPilotLeverOnIeee14() {
+        // TVC's RST lever: the SVC pilot-point target voltage (SVC_PILOT_POINT_TARGET_VOLTAGE, variableId =
+        // the zone name). runAdjoint reuses fillSvcPilotFactorsRhs (the closed-loop coordination) on the
+        // cached converged context. θ̄ is RAW per-unit dV_bus_pu / dV_pilot_pu, whereas the forward S and the
+        // physical re-solve FD are kV/kV, so they relate by the nominal-voltage ratio Vnom(pilot)/Vnom(f0)
+        // (which is 1 when the monitored bus shares the pilot's voltage level).
+        String zone = "z1";
+        String pilot = "B10";
+        List<String> monitored = List.of("B10", "B6", "B4"); // pilot, a controller bus, a far bus on another VL
+        double targetV = 13.0;
+        double dV = 0.1; // kV central step on the pilot target
+
+        LoadFlowParameters lfp = svcCacheEnabledParameters();
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+
+        Network network = ieee14WithZone(targetV);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        List<SensitivityFactor> factors = new ArrayList<>();
+        for (String bus : monitored) {
+            factors.add(new SensitivityFactor(SensitivityFunctionType.BUS_VOLTAGE, bus,
+                    SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE, zone, false, ContingencyContext.all()));
+        }
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+
+        // forward closed-loop sensitivity S (kV/kV) and a per-bus re-solve central FD (kV/kV)
+        SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, factors,
+                new SensitivityAnalysisRunParameters().setParameters(sensiParams));
+        Network nBefore = ieee14WithZone(targetV - dV);
+        LoadFlow.find("OpenLoadFlow").run(nBefore, lfp);
+        Network nAfter = ieee14WithZone(targetV + dV);
+        LoadFlow.find("OpenLoadFlow").run(nAfter, lfp);
+
+        double pilotTheta = 0;
+        for (String f0 : monitored) {
+            // ȳ = e_{f0} -> θ̄[zone] = dV_f0 / dV_pilotTarget (closed loop), raw per-unit
+            Map<String, Double> thetaBar = analysis.runAdjoint(network,
+                    network.getVariantManager().getWorkingVariantId(), List.of(), factors, Map.of(f0, 1.0));
+            double theta = thetaBar.get(zone);
+            double ratio = nominalV(network, pilot) / nominalV(network, f0); // pu/pu = (kV/kV) * Vnom(pilot)/Vnom(f0)
+
+            double sKv = fwd.getBusVoltageSensitivityValue(zone, f0, SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE);
+            assertEquals(sKv * ratio, theta, 1e-4 * (Math.abs(sKv * ratio) + 1e-3),
+                    "runAdjoint vs forward closed-loop S for " + f0);
+
+            double fdKv = (busVoltage(nAfter, f0) - busVoltage(nBefore, f0)) / (2 * dV);
+            assertEquals(fdKv * ratio, theta, 5e-3 * (Math.abs(fdKv * ratio) + 1e-2),
+                    "runAdjoint vs re-solve FD for " + f0);
+
+            if (f0.equals(pilot)) {
+                pilotTheta = theta;
+            }
+        }
+        // the closed loop makes the pilot bus voltage track its own target: a non-trivial, ≈1 gradient
+        assertEquals(1.0, pilotTheta, 1e-3, "pilot bus voltage tracks its target");
     }
 
     @Test
@@ -198,7 +286,7 @@ class AcSensitivityAnalysisAdjointTest {
                 new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
         Map<String, Double> thetaBar = analysis.runAdjoint(network,
                 network.getVariantManager().getWorkingVariantId(), List.of(),
-                new SensitivityFactorModelReader(factors, network), Map.of(branchA, wA, branchB, wB));
+                factors, Map.of(branchA, wA, branchB, wB));
 
         SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, factors,
                 new SensitivityAnalysisRunParameters().setParameters(sensiParams));
