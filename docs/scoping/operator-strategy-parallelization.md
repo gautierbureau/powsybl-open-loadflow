@@ -272,19 +272,44 @@ mvn test -Dtest=SecurityAnalysisParallelizationBenchmark \
     -Dbenchmark.contingencies=1 -Dbenchmark.strategiesPerContingency=32 -Dbenchmark.threads=4
 ```
 
-Illustrative results on PEGASE 13659 (13659 buses, 20467 branches), 4 cores, 1 contingency carrying 32 operator
-strategies — the case where contingency-level parallelization brings nothing:
+Illustrative results on PEGASE 13659 (13659 buses, 20467 branches), 4 cores:
+
+*1 contingency carrying 32 operator strategies — contingency-level parallelization brings nothing:*
 
 | configuration | threads | time | speed-up |
 | --- | --- | --- | --- |
-| single-threaded | 1 | 17329 ms | x1.00 |
-| contingency-parallel | 4 | 16400 ms | x1.06 |
-| operator-strategy-parallel | 4 | 12935 ms | x1.34 |
+| single-threaded | 1 | 9280 ms | x1.00 |
+| contingency-parallel | 4 | 9122 ms | x1.02 |
+| operator-strategy-parallel | 4 | 7915 ms | x1.17 |
 
-Contingency-level parallelization is essentially inactive (one contingency, one partition), whereas operator strategy
-parallelization spreads the 32 strategies over the threads. The speed-up is bounded here by the low core count and by
-the Option A overheads (one network clone and pre-contingency solve per partition, plus the redundant post-contingency
-solves); it grows with the number of strategies per contingency and the number of available cores.
+*2 contingencies carrying 16 operator strategies each — contingency-level parallelization already fills the threads:*
+
+| configuration | threads | time | speed-up |
+| --- | --- | --- | --- |
+| single-threaded | 1 | 9954 ms | x1.00 |
+| contingency-parallel | 4 | 6211 ms | x1.60 |
+| operator-strategy-parallel | 4 | 6298 ms | x1.58 |
+
+When there is a single contingency, operator strategy parallelization spreads its strategies over the threads and wins;
+when there are enough contingencies to fill the threads, it matches contingency-level parallelization instead of
+regressing. The speed-up is bounded here by the low core count and by the overheads (one serialized network build and
+pre-contingency solve per partition, plus the redundant post-contingency solves when a contingency is spread); it grows
+with the number of strategies per contingency and the number of available cores.
+
+#### Build-cost-aware scheduling
+
+An early version always spread a contingency's strategies over the threads, which *regressed* below contingency-level
+parallelization when there were already enough contingencies (each extra partition pays a serialized network build plus
+a redundant post-contingency solve that outweighed the strategy balancing). The partitioner now builds two candidate
+plans — spread, and one-partition-per-contingency — and keeps whichever has the lower estimated makespan under a model
+that charges `PARTITION_FIXED_COST` per non-empty partition (its serialized build + pre-contingency solve). Because the
+one-partition-per-contingency plan is always a candidate, balancing can never do worse than plain contingency-level
+parallelization, while still spreading when a contingency carries enough strategies to justify the extra builds.
+
+Note the measurements confirmed that the redundant post-contingency solves are *not* the dominant overhead (contingency
+and action load flows already warm-start via `PreviousValueVoltageInitializer`); the dominant few-contingency cost is
+the serialized network build in `ContingencyMultiThreadHelper`. Reducing that (e.g. a cheaper network fork, or
+parallelizing the builds) — rather than avoiding the warm re-solves — is the main remaining lever for a future phase.
 
 ## 7. Key code references
 
