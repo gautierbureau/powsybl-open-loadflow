@@ -255,22 +255,36 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups,
             DenseMatrix factorsStates,
             AcLoadFlowContext context) {
-        Map<LfBus, Map<LfBus, Double>> weightsByPilot = new HashMap<>();
-        for (SensitivityFactorGroup<AcVariableType, AcEquationType> group : factorGroups.getList()) {
+        boolean hasSvcPilot = factorGroups.getList().stream().anyMatch(group -> {
             LfSensitivityFactor<AcVariableType, AcEquationType> probe = group.getFactors().isEmpty() ? null : group.getFactors().get(0);
-            if (probe == null || probe.getVariableType() != SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE) {
-                continue;
+            return probe != null && probe.getVariableType() == SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE;
+        });
+        if (!hasSvcPilot) {
+            return;
+        }
+        // Build + factorize the all-zones coordination matrix ONCE (it is pilot-independent) and reuse it for
+        // every queried pilot, instead of one full assembly + LU per pilot.
+        try (SvcPilotPointClosedLoopSensitivity.Coordination coordination =
+                     SvcPilotPointClosedLoopSensitivity.buildCoordination(context)) {
+            if (coordination == null) {
+                return; // no active SVC zone
             }
-            LfBus pilotBus = (LfBus) ((SingleVariableLfSensitivityFactor<AcVariableType, AcEquationType>) probe).getVariableElement();
-            Map<LfBus, Double> weights = weightsByPilot.computeIfAbsent(pilotBus, pb ->
-                    SvcPilotPointClosedLoopSensitivity.computeControlledBusWeights(pb, context));
-            int col = group.getIndex();
-            for (var entry : weights.entrySet()) {
-                LfBus controlled = entry.getKey();
-                double w = entry.getValue();
-                context.getEquationSystem()
-                        .getEquation(controlled.getNum(), AcEquationType.BUS_TARGET_V)
-                        .ifPresent(eq -> factorsStates.set(eq.getColumn(), col, w));
+            Map<LfBus, Map<LfBus, Double>> weightsByPilot = new HashMap<>();
+            for (SensitivityFactorGroup<AcVariableType, AcEquationType> group : factorGroups.getList()) {
+                LfSensitivityFactor<AcVariableType, AcEquationType> probe = group.getFactors().isEmpty() ? null : group.getFactors().get(0);
+                if (probe == null || probe.getVariableType() != SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE) {
+                    continue;
+                }
+                LfBus pilotBus = (LfBus) ((SingleVariableLfSensitivityFactor<AcVariableType, AcEquationType>) probe).getVariableElement();
+                Map<LfBus, Double> weights = weightsByPilot.computeIfAbsent(pilotBus, coordination::weightsForPilot);
+                int col = group.getIndex();
+                for (var entry : weights.entrySet()) {
+                    LfBus controlled = entry.getKey();
+                    double w = entry.getValue();
+                    context.getEquationSystem()
+                            .getEquation(controlled.getNum(), AcEquationType.BUS_TARGET_V)
+                            .ifPresent(eq -> factorsStates.set(eq.getColumn(), col, w));
+                }
             }
         }
     }
