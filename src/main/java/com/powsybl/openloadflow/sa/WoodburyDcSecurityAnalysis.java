@@ -90,7 +90,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
      * spread, only a prefix of the list needs checking.</p>
      */
     private record BranchLimitScreen(List<LimitViolationManager.BranchLimitsToCheck> sortedBranches, double[] sortedThresholds,
-                                     int[] busPhiRows, double[] baseBusAngles, int[] phaseShiftRows, double[] basePhaseShifts) {
+                                     int[] busPhiRows, double[] baseBusAngles,
+                                     int[] phaseShiftRows, double[] basePhaseShifts, LimitViolationManager.BranchLimitsToCheck[] phaseShiftBranches) {
 
         /**
          * Number of branches (a prefix of {@link #sortedBranches}) that may violate for the given angle spread, i.e.
@@ -130,16 +131,22 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         }
 
         /**
-         * Whether any branch phase shift changed versus the base case; the screening bound assumes they did not, so the
-         * caller falls back to a full scan when this happens (e.g. a phase tap changer action).
+         * The limit-carrying branches whose own phase shift changed versus the base case (e.g. a phase tap changer
+         * action), or null if none. The angle-spread bound does not cover the extra phase shift term of these branches,
+         * so they are always checked; the angle change they induce on the other branches is already captured by the
+         * spread. Checking a branch that is also in the screened prefix is harmless (violations are de-duplicated).
          */
-        boolean phaseShiftsChanged(double[] postContingencyStates) {
+        List<LimitViolationManager.BranchLimitsToCheck> phaseShiftedBranchesToCheck(double[] postContingencyStates) {
+            List<LimitViolationManager.BranchLimitsToCheck> branches = null;
             for (int k = 0; k < phaseShiftRows.length; k++) {
                 if (Math.abs(postContingencyStates[phaseShiftRows[k]] - basePhaseShifts[k]) > PHASE_SHIFT_DELTA_TOLERANCE) {
-                    return true;
+                    if (branches == null) {
+                        branches = new ArrayList<>();
+                    }
+                    branches.add(phaseShiftBranches[k]);
                 }
             }
-            return false;
+            return branches;
         }
     }
 
@@ -352,7 +359,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         boolean detectBusVoltageViolations = !loadFlowContext.getParameters().isSetVToNan();
         var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager,
                 woodburyContext.limitReductions, woodburyContext.violationsParameters);
-        postActionsViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency, woodburyContext.branchLimitsToCheck(), detectBusVoltageViolations);
+        List<LimitViolationManager.BranchLimitsToCheck> branchesToCheck = branchesToCheck(woodburyContext, postContingencyAndOperatorStrategyStates);
+        postActionsViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency, branchesToCheck, detectBusVoltageViolations);
 
         return new OperatorStrategyResult(operatorStrategy,
             List.of(
@@ -488,8 +496,17 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         BranchLimitScreen screen = woodburyContext.branchLimitScreen();
         if (screen != null) {
             double angleDeltaSpread = screen.angleDeltaSpread(postContingencyStates);
-            if (Double.isFinite(angleDeltaSpread) && !screen.phaseShiftsChanged(postContingencyStates)) {
-                return screen.sortedBranches().subList(0, screen.checkCount(angleDeltaSpread));
+            if (Double.isFinite(angleDeltaSpread)) {
+                List<LimitViolationManager.BranchLimitsToCheck> screened = screen.sortedBranches().subList(0, screen.checkCount(angleDeltaSpread));
+                // branches whose own phase shift changed (e.g. a phase tap changer action) are not covered by the
+                // spread bound and must be checked in addition to the screened prefix
+                List<LimitViolationManager.BranchLimitsToCheck> phaseShifted = screen.phaseShiftedBranchesToCheck(postContingencyStates);
+                if (phaseShifted == null) {
+                    return screened;
+                }
+                List<LimitViolationManager.BranchLimitsToCheck> branches = new ArrayList<>(screened);
+                branches.addAll(phaseShifted);
+                return branches;
             }
         }
         return woodburyContext.branchLimitsToCheck();
@@ -507,15 +524,26 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         DcApproximationType dcApproximationType = creationParameters.getDcApproximationType();
         double dcPowerFactor = creationParameters.getDcPowerFactor();
 
-        // collect the bus angle rows (and base values) used to bound the flow change, and the branch phase shift rows
-        // (and base values) used to check the bound's assumption that phase shifts do not change
+        // limit-carrying branches indexed by branch number, to link phase shift variables back to the branch to check
+        Map<Integer, LimitViolationManager.BranchLimitsToCheck> limitedBranchByNum = new HashMap<>();
+        for (LimitViolationManager.BranchLimitsToCheck branchToCheck : branchLimitsToCheck) {
+            limitedBranchByNum.put(branchToCheck.branch().getNum(), branchToCheck);
+        }
+
+        // collect the bus angle rows (and base values) used to bound the flow change, and the phase shift rows of the
+        // limit-carrying branches (and the branches they belong to) whose change the spread bound does not cover
         List<Integer> busPhiRows = new ArrayList<>();
         List<Integer> phaseShiftRows = new ArrayList<>();
+        List<LimitViolationManager.BranchLimitsToCheck> phaseShiftBranches = new ArrayList<>();
         for (Variable<DcVariableType> variable : context.getEquationSystem().getIndex().getSortedVariablesToFind()) {
             if (variable.getType() == DcVariableType.BUS_PHI) {
                 busPhiRows.add(variable.getRow());
             } else if (variable.getType() == DcVariableType.BRANCH_ALPHA1) {
-                phaseShiftRows.add(variable.getRow());
+                LimitViolationManager.BranchLimitsToCheck branchToCheck = limitedBranchByNum.get(variable.getElementNum());
+                if (branchToCheck != null) {
+                    phaseShiftRows.add(variable.getRow());
+                    phaseShiftBranches.add(branchToCheck);
+                }
             }
         }
 
@@ -533,7 +561,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         }
         return new BranchLimitScreen(sortedBranches, sortedThresholds,
                 toIntArray(busPhiRows), baseValues(busPhiRows, preContingencyStates),
-                toIntArray(phaseShiftRows), baseValues(phaseShiftRows, preContingencyStates));
+                toIntArray(phaseShiftRows), baseValues(phaseShiftRows, preContingencyStates),
+                phaseShiftBranches.toArray(new LimitViolationManager.BranchLimitsToCheck[0]));
     }
 
     private static double screeningThreshold(LimitViolationManager.BranchLimitsToCheck branchToCheck, boolean useTransformerRatio,
