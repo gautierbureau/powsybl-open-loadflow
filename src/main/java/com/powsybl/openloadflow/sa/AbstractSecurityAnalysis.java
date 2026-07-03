@@ -43,10 +43,10 @@ import com.powsybl.openloadflow.network.impl.PropagatedContingency;
 import com.powsybl.openloadflow.network.impl.PropagatedContingencyCreationParameters;
 import com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters;
 import com.powsybl.openloadflow.util.Indexed;
-import com.powsybl.openloadflow.util.Lists2;
 import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.openloadflow.util.Reports;
 import com.powsybl.openloadflow.util.mt.ContingencyMultiThreadHelper;
+import com.powsybl.openloadflow.util.mt.SecurityAnalysisPartitioner;
 import com.powsybl.security.*;
 import com.powsybl.security.limitreduction.LimitReduction;
 import com.powsybl.security.monitor.StateMonitor;
@@ -186,9 +186,17 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             }
 
         } else {
-            var contingenciesPartitions = Lists2.partition(contingencies, securityAnalysisParametersExt.getThreadCount());
-
             OperatorStrategies.check(operatorStrategies, contingencies, actions);
+
+            // when operator strategy parallelization is enabled, the operator strategies of a given contingency can be
+            // spread over several partitions to balance a workload made of few contingencies but many operator
+            // strategies; a contingency may then appear in several partitions and its post-contingency result must be
+            // deduplicated when merging.
+            boolean balanceOperatorStrategies = securityAnalysisParametersExt.isOperatorStrategyParallelization()
+                    && SecurityAnalysisPartitioner.canBalanceOperatorStrategies(operatorStrategies);
+            List<SecurityAnalysisPartitioner.Partition> partitions = SecurityAnalysisPartitioner.partition(contingencies,
+                    operatorStrategies, securityAnalysisParametersExt.getThreadCount(), balanceOperatorStrategies);
+            var contingenciesPartitions = partitions.stream().map(SecurityAnalysisPartitioner.Partition::contingencies).toList();
 
             // we pre-allocate the results so that threads can set result in a stable order (using the partition number)
             // so that we always get results in the same order whatever threads completion order is.
@@ -199,17 +207,24 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 createParameters(lfParameters, lfParametersExt, partitionTopoConfig.isBreaker(), isAreaInterchangeControl(lfParametersExt, contingencies));
             ContingencyMultiThreadHelper.ContingencyRunner<P> contingencyRunner = (partitionNum, lfNetworks, propagatedContingencies, parameters) ->
                     partitionResults.set(partitionNum, runSimulationsOnAllComponents(
-                            lfNetworks, propagatedContingencies, parameters, securityAnalysisParameters, operatorStrategies,
+                            lfNetworks, propagatedContingencies, parameters, securityAnalysisParameters, partitions.get(partitionNum).operatorStrategies(),
                             actions, limitReductions, lfParameters));
             ContingencyMultiThreadHelper.ReportMerger reportMerger = ContingencyMultiThreadHelper::mergeReportThreadResults;
             ContingencyMultiThreadHelper.createLFNetworksPerContingencyPartitionAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
                     parameterProvider, contingencyRunner, saReportNode, reportMerger, executor);
 
-            // we just need to merge post contingency and operator strategy results, all pre contingency are the same
+            // we just need to merge post contingency and operator strategy results, all pre contingency are the same.
+            // when operator strategies are balanced, the same contingency may be simulated by several partitions, so we
+            // keep a single (the first) post-contingency result per contingency; operator strategy results stay disjoint.
             List<PostContingencyResult> postContingencyResults = new ArrayList<>();
             List<OperatorStrategyResult> operatorStrategyResults = new ArrayList<>();
+            Set<String> mergedContingencyIds = new HashSet<>();
             for (var partitionResult : partitionResults) {
-                postContingencyResults.addAll(partitionResult.getPostContingencyResults());
+                for (PostContingencyResult postContingencyResult : partitionResult.getPostContingencyResults()) {
+                    if (!balanceOperatorStrategies || mergedContingencyIds.add(postContingencyResult.getContingency().getId())) {
+                        postContingencyResults.add(postContingencyResult);
+                    }
+                }
                 operatorStrategyResults.addAll(partitionResult.getOperatorStrategyResults());
             }
             finalResult = new SecurityAnalysisResult(partitionResults.get(0).getPreContingencyResult(), postContingencyResults, operatorStrategyResults);
