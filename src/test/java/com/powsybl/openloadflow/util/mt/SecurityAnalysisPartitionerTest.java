@@ -146,6 +146,26 @@ class SecurityAnalysisPartitionerTest {
         }
     }
 
+    @Test
+    void cheaperPartitionCostSpreadsMore() {
+        // a single contingency with 8 operator strategies, 4 partitions: with the expensive rebuild cost the strategies
+        // are not worth spreading (one partition), but with the cheaper copy cost they are spread over the 4 partitions
+        List<Contingency> contingencies = List.of(contingency("c1"));
+        List<OperatorStrategy> operatorStrategies = new ArrayList<>();
+        for (int j = 0; j < 8; j++) {
+            operatorStrategies.add(specificStrategy("s" + j, "c1"));
+        }
+
+        List<SecurityAnalysisPartitioner.Partition> rebuild = SecurityAnalysisPartitioner.partition(contingencies,
+                operatorStrategies, 4, true, SecurityAnalysisPartitioner.PARTITION_FIXED_COST_REBUILD);
+        List<SecurityAnalysisPartitioner.Partition> copy = SecurityAnalysisPartitioner.partition(contingencies,
+                operatorStrategies, 4, true, SecurityAnalysisPartitioner.PARTITION_FIXED_COST_COPY);
+
+        assertEquals(1, rebuild.stream().filter(p -> !p.operatorStrategies().isEmpty()).count(), "rebuild cost keeps the strategies on one partition");
+        assertTrue(copy.stream().filter(p -> !p.operatorStrategies().isEmpty()).count() > 1, "copy cost spreads the strategies over several partitions");
+        assertEachStrategyAssignedOnce(operatorStrategies, copy);
+    }
+
     private static List<String> contingencyIds(SecurityAnalysisPartitioner.Partition partition) {
         return partition.contingencies().stream().map(Contingency::getId).toList();
     }

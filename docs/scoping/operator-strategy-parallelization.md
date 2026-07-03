@@ -255,12 +255,16 @@ post-contingency re-solves. That bottleneck is addressed by the `LfNetworkCopier
 default): the network is built once and each thread gets a lock-free deep copy instead of rebuilding from IIDM, and a
 `NetworksPresolver` runs the pre-contingency load flow once so the copies skip it. Operator strategy balancing composes
 with it directly — the partitioner still decides which contingencies/strategies go to each partition, while the copy
-mode decides how each partition's network is provisioned. Because copies are cheaper than rebuilds, the
-`PARTITION_FIXED_COST` used by the scheduler is now conservative (it could be lowered for COPY mode to spread more
-aggressively — a possible follow-up).
+mode decides how each partition's network is provisioned.
 
-Still open for later phases: lowering `PARTITION_FIXED_COST` for COPY mode, unifying the concurrency budget across both
-axes, and removing the shared mutable `zeroImpedanceMonitoredIndex` field.
+Because a copy is much cheaper than a rebuild, the scheduler's per-partition fixed cost is mode dependent:
+`PARTITION_FIXED_COST_REBUILD` (6 load flows) for rebuild mode and `PARTITION_FIXED_COST_COPY` (1.5) for copy mode. With
+the cheaper copy cost the balancer spreads operator strategies more aggressively — e.g. on PEGASE 13659 with a single
+contingency carrying 12 operator strategies, copy mode spreads them over the threads (operator-strategy-parallel beats
+contingency-parallel) whereas the rebuild cost would have kept them on one partition.
+
+Still open for later phases: unifying the concurrency budget across both axes, and removing the shared mutable
+`zeroImpedanceMonitoredIndex` field.
 
 ### Benchmark
 

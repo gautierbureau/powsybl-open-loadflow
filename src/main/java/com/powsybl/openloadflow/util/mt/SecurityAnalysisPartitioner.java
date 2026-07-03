@@ -43,13 +43,20 @@ import java.util.TreeSet;
 public final class SecurityAnalysisPartitioner {
 
     /**
-     * Fixed cost of a partition (its serialized network build and its pre-contingency solve), expressed in units of one
-     * post-contingency / operator strategy load flow, used by {@link #estimateMakespan}. It is deliberately larger than
-     * one simulation: opening a new partition to spread operator strategies is only worth it when it removes several
-     * simulations from the critical path. Calibrated so that a single contingency carrying many operator strategies is
-     * spread over the threads, while a few contingencies each carrying a handful of operator strategies are not.
+     * Fixed cost of an extra partition when its network is rebuilt from the IIDM network under a lock
+     * ({@code NetworkPerThreadMode.REBUILD}), expressed in units of one post-contingency / operator strategy load flow
+     * and used by {@link #estimateMakespan}. It is deliberately larger than one simulation: the serialized build plus
+     * pre-contingency solve mean that opening a new partition to spread operator strategies is only worth it when it
+     * removes several simulations from the critical path.
      */
-    private static final double PARTITION_FIXED_COST = 6.0;
+    public static final double PARTITION_FIXED_COST_REBUILD = 6.0;
+
+    /**
+     * Fixed cost of an extra partition when its network is a deep copy of the network built once
+     * ({@code NetworkPerThreadMode.COPY}, the default). A copy is much cheaper than a rebuild (it is lock free and, with
+     * network presolving, skips the pre-contingency solve), so operator strategies are spread more aggressively.
+     */
+    public static final double PARTITION_FIXED_COST_COPY = 1.5;
 
     private SecurityAnalysisPartitioner() {
     }
@@ -81,6 +88,16 @@ public final class SecurityAnalysisPartitioner {
      */
     public static List<Partition> partition(List<Contingency> contingencies, List<OperatorStrategy> operatorStrategies,
                                             int partitionCount, boolean balanceOperatorStrategies) {
+        return partition(contingencies, operatorStrategies, partitionCount, balanceOperatorStrategies, PARTITION_FIXED_COST_REBUILD);
+    }
+
+    /**
+     * Builds {@code partitionCount} partitions, using {@code partitionFixedCost} (in units of one load flow) as the cost
+     * of opening an extra partition when estimating which plan (spread vs one partition per contingency) is faster. Pass
+     * {@link #PARTITION_FIXED_COST_COPY} in copy mode and {@link #PARTITION_FIXED_COST_REBUILD} in rebuild mode.
+     */
+    public static List<Partition> partition(List<Contingency> contingencies, List<OperatorStrategy> operatorStrategies,
+                                            int partitionCount, boolean balanceOperatorStrategies, double partitionFixedCost) {
         Objects.requireNonNull(contingencies);
         Objects.requireNonNull(operatorStrategies);
         if (partitionCount < 1) {
@@ -90,12 +107,12 @@ public final class SecurityAnalysisPartitioner {
             Map<String, List<OperatorStrategy>> strategiesByContingencyId = groupByContingencyId(operatorStrategies);
             // Two candidate plans: spread the operator strategies over the partitions, or keep each contingency (with
             // all its operator strategies) on a single partition. Spreading balances the operator strategy work but a
-            // contingency then appears in several partitions, and each extra partition pays a (serialized) network build
+            // contingency then appears in several partitions, and each extra partition pays a network provisioning cost
             // plus a redundant post-contingency solve. We therefore keep whichever plan has the lower estimated
             // makespan, so balancing can never do worse than the plain contingency-level parallelization.
             List<Partition> spread = spreadPartition(contingencies, strategiesByContingencyId, partitionCount);
             List<Partition> perContingency = contingencyPartition(contingencies, strategiesByContingencyId, partitionCount);
-            return estimateMakespan(spread) < estimateMakespan(perContingency) ? spread : perContingency;
+            return estimateMakespan(spread, partitionFixedCost) < estimateMakespan(perContingency, partitionFixedCost) ? spread : perContingency;
         }
         // contingency-only split: each partition gets a disjoint subset of contingencies and the full list of
         // operator strategies (filtered per contingency later on by OperatorStrategies.indexByContingencyId).
@@ -116,16 +133,16 @@ public final class SecurityAnalysisPartitioner {
 
     /**
      * Estimated makespan of a partitioning, in "simulation" units (one unit = one post-contingency or one operator
-     * strategy load flow). Each non-empty partition pays a fixed cost ({@link #PARTITION_FIXED_COST}) for its
-     * (serialized) network build and its pre-contingency solve; those fixed costs add up on the critical path, while
+     * strategy load flow). Each non-empty partition pays {@code partitionFixedCost} for its network provisioning (build
+     * or copy) and, in rebuild mode, its pre-contingency solve; those fixed costs add up on the critical path, while
      * the per-partition simulation load runs in parallel, hence the max.
      */
-    private static double estimateMakespan(List<Partition> partitions) {
+    private static double estimateMakespan(List<Partition> partitions, double partitionFixedCost) {
         long usedPartitions = partitions.stream().filter(p -> !p.contingencies().isEmpty()).count();
         long maxLoad = partitions.stream()
                 .mapToLong(p -> (long) p.contingencies().size() + p.operatorStrategies().size())
                 .max().orElse(0);
-        return usedPartitions * PARTITION_FIXED_COST + maxLoad;
+        return usedPartitions * partitionFixedCost + maxLoad;
     }
 
     /**
