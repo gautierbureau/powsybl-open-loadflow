@@ -28,6 +28,8 @@ import com.powsybl.openloadflow.dc.fastdc.ComputedContingencyElement;
 import com.powsybl.openloadflow.dc.fastdc.ComputedElement;
 import com.powsybl.openloadflow.dc.fastdc.ConnectivityBreakAnalysis;
 import com.powsybl.openloadflow.dc.fastdc.WoodburyEngine;
+import com.powsybl.openloadflow.equations.EquationTerm;
+import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.*;
 import com.powsybl.openloadflow.network.action.*;
@@ -65,8 +67,45 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
 
     private static final double FUNCTION_REFERENCE_ZER0_THRESHOLD = 1e-13;
 
+    // package-private toggle used by tests to compare against the non row-restricted Woodbury correction (TODO: to remove)
+    static boolean restrictStateRowsToMonitoredElements = true;
+
+    // rows of the state vector actually read by the sensitivity factors (the phase/tap variables of the monitored
+    // branches); when set, only those rows of the post-contingency states are corrected by the Woodbury engine
+    private int[] sensitivityStateRows;
+
     public DcSensitivityAnalysis(MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory, SensitivityAnalysisParameters parameters) {
         super(matrixFactory, connectivityFactory, parameters);
+    }
+
+    /**
+     * Compute the rows of the state vector that the sensitivity factors read, i.e. the variable rows of every monitored
+     * branch flow function. As factors read the post-contingency states only at those rows, the Woodbury correction can
+     * be restricted to them instead of the whole state vector (one row per bus). Returns null (meaning "correct every
+     * row") if any function term does not expose its variables, so correctness never depends on the restriction.
+     */
+    private static int[] computeSensitivityStateRows(List<LfSensitivityFactor<DcVariableType, DcEquationType>> factors) {
+        TreeSet<Integer> rows = new TreeSet<>();
+        for (LfSensitivityFactor<DcVariableType, DcEquationType> factor : factors) {
+            if (factor.getStatus() != LfSensitivityFactor.Status.VALID) {
+                continue;
+            }
+            if (!(factor.getFunctionEquationTerm() instanceof EquationTerm<?, ?> functionTerm)) {
+                return null; // cannot determine the read rows: fall back to correcting every row
+            }
+            for (Variable<?> variable : functionTerm.getVariables()) {
+                int row = variable.getRow();
+                if (row >= 0) {
+                    rows.add(row);
+                }
+            }
+        }
+        int[] result = new int[rows.size()];
+        int i = 0;
+        for (int row : rows) {
+            result[i++] = row;
+        }
+        return result;
     }
 
     private static DcLoadFlowParameters createDcLoadFlowParameters(LfNetworkParameters networkParameters, MatrixFactory matrixFactory,
@@ -276,8 +315,8 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
                 newFlowStates = calculateFlowStates(loadFlowContext, participatingElements, disabledNetwork, actions, reportNode);
             }
 
-            engine.toPostContingencyAndOperatorStrategyStates(newFlowStates);
-            engine.toPostContingencyAndOperatorStrategyStates(newFactorStates);
+            engine.toPostContingencyAndOperatorStrategyStates(newFlowStates, sensitivityStateRows);
+            engine.toPostContingencyAndOperatorStrategyStates(newFactorStates, sensitivityStateRows);
             calculateSensitivityValues(factors, newFactorStates, newFlowStates, contingency, operatorStrategy, resultWriter, disabledNetwork);
             // write contingency status
             if (contingency.hasNoImpact()) {
@@ -331,8 +370,8 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
 
             DenseMatrix newFlowStates = calculateFlowStates(loadFlowContext, newParticipatingElements, disabledNetwork, actions, reportNode);
 
-            engine.toPostContingencyAndOperatorStrategyStates(newFlowStates);
-            engine.toPostContingencyAndOperatorStrategyStates(newFactorStates);
+            engine.toPostContingencyAndOperatorStrategyStates(newFlowStates, sensitivityStateRows);
+            engine.toPostContingencyAndOperatorStrategyStates(newFactorStates, sensitivityStateRows);
             calculateSensitivityValues(factors, newFactorStates, newFlowStates, contingency, operatorStrategy, resultWriter, disabledNetwork);
 
             networkState.restore();
@@ -587,6 +626,10 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
                 SensitivityFactorGroupList<DcVariableType, DcEquationType> factorGroups = createFactorGroups(validLfFactors.stream()
                     .filter(factor -> factor.getStatus() == LfSensitivityFactor.Status.VALID)
                     .collect(Collectors.toList()));
+
+                // the sensitivity factors only read the post-contingency states at the rows of the monitored branches,
+                // so the Woodbury correction can be restricted to those rows instead of the whole state vector
+                sensitivityStateRows = restrictStateRowsToMonitoredElements ? computeSensitivityStateRows(validLfFactors) : null;
 
                 // compute the participation for each injection factor (+1 on the injection and then -participation factor on all
                 // buses that contain elements participating to slack distribution)
