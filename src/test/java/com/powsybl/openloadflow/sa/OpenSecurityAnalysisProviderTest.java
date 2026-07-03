@@ -52,7 +52,8 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
     @Test
     void specificParametersNamesTest() {
         assertEquals(List.of("createResultExtension", "contingencyPropagation", "threadCount", "dcFastMode",
-                "contingencyActivePowerLossDistribution", "startWithFrozenACEmulation", "operatorStrategyParallelization"),
+                "contingencyActivePowerLossDistribution", "startWithFrozenACEmulation", "operatorStrategyParallelization",
+                "networkPerThreadMode", "contingencyPartitioningMode"),
             provider.getSpecificParametersNames());
     }
 
@@ -98,6 +99,16 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         assertTrue(parametersExt.isOperatorStrategyParallelization());
         testCount++;
 
+        assertEquals(OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY, parametersExt.getNetworkPerThreadMode());
+        parametersExt.setNetworkPerThreadMode(OpenSecurityAnalysisParameters.NetworkPerThreadMode.REBUILD);
+        assertEquals(OpenSecurityAnalysisParameters.NetworkPerThreadMode.REBUILD, parametersExt.getNetworkPerThreadMode());
+        testCount++;
+
+        assertEquals(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.SLICE, parametersExt.getContingencyPartitioningMode());
+        parametersExt.setContingencyPartitioningMode(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.ROUND_ROBIN);
+        assertEquals(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.ROUND_ROBIN, parametersExt.getContingencyPartitioningMode());
+        testCount++;
+
         assertEquals(OpenSecurityAnalysisParameters.SPECIFIC_PARAMETERS_NAMES.size(), testCount);
     }
 
@@ -112,6 +123,8 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         moduleConfig.setStringProperty("threadCount", "3");
         moduleConfig.setStringProperty("contingencyActivePowerLossDistribution", "Default");
         moduleConfig.setStringProperty("operatorStrategyParallelization", "true");
+        moduleConfig.setStringProperty("networkPerThreadMode", "REBUILD");
+        moduleConfig.setStringProperty("contingencyPartitioningMode", "ROUND_ROBIN");
 
         OpenSecurityAnalysisParameters parametersExt = (OpenSecurityAnalysisParameters) provider.loadSpecificParameters(platformConfig).orElseThrow();
         assertTrue(parametersExt.isCreateResultExtension());
@@ -120,6 +133,8 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         assertFalse(parametersExt.isStartWithFrozenACEmulation());
         assertEquals(3, parametersExt.getThreadCount());
         assertTrue(parametersExt.isOperatorStrategyParallelization());
+        assertEquals(OpenSecurityAnalysisParameters.NetworkPerThreadMode.REBUILD, parametersExt.getNetworkPerThreadMode());
+        assertEquals(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.ROUND_ROBIN, parametersExt.getContingencyPartitioningMode());
         // check test completeness
 
         assertEquals(OpenSecurityAnalysisParameters.SPECIFIC_PARAMETERS_NAMES.size(), moduleConfig.getPropertyNames().size());
@@ -142,7 +157,9 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
                 "threadCount", "3",
                 "startWithFrozenACEmulation", "false",
                 "contingencyActivePowerLossDistribution", "Default",
-                "operatorStrategyParallelization", "true");
+                "operatorStrategyParallelization", "true",
+                "networkPerThreadMode", "REBUILD",
+                "contingencyPartitioningMode", "ROUND_ROBIN");
         OpenSecurityAnalysisParameters parametersExt = (OpenSecurityAnalysisParameters) provider.loadSpecificParameters(properties).orElseThrow();
         assertTrue(parametersExt.isCreateResultExtension());
         assertFalse(parametersExt.isContingencyPropagation());
@@ -150,6 +167,8 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         assertEquals(3, parametersExt.getThreadCount());
         assertFalse(parametersExt.isStartWithFrozenACEmulation());
         assertEquals("Default", parametersExt.getContingencyActivePowerLossDistribution());
+        assertEquals(OpenSecurityAnalysisParameters.NetworkPerThreadMode.REBUILD, parametersExt.getNetworkPerThreadMode());
+        assertEquals(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.ROUND_ROBIN, parametersExt.getContingencyPartitioningMode());
 
         // check test completeness
         assertEquals(OpenSecurityAnalysisParameters.SPECIFIC_PARAMETERS_NAMES.size(), properties.size());

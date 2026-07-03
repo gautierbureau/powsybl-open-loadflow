@@ -40,7 +40,9 @@
       "dcFastMode" : true,
       "contingencyActivePowerLossDistribution" : "Default",
       "startWithFrozenACEmulation" : false,
-      "operatorStrategyParallelization" : true
+      "operatorStrategyParallelization" : true,
+      "networkPerThreadMode" : "COPY",
+      "contingencyPartitioningMode" : "SLICE"
     }
   }
 }
