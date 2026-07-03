@@ -7,6 +7,8 @@
  */
 package com.powsybl.openloadflow.sensi;
 
+import com.powsybl.commons.report.ReportNode;
+import com.powsybl.computation.local.LocalComputationManager;
 import com.powsybl.contingency.Contingency;
 import com.powsybl.contingency.ContingencyContext;
 import com.powsybl.iidm.network.Branch;
@@ -27,6 +29,7 @@ import com.powsybl.sensitivity.SensitivityAnalysis;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityAnalysisResult;
 import com.powsybl.sensitivity.SensitivityFactor;
+import com.powsybl.sensitivity.SensitivityFactorModelReader;
 import com.powsybl.sensitivity.SensitivityFunctionType;
 import com.powsybl.sensitivity.SensitivityVariableType;
 import org.junit.jupiter.api.Test;
@@ -151,11 +154,42 @@ class PegaseAcSensitivityBenchmark {
 
     private static long runOnce(SensitivityAnalysis.Runner runner, Network network, List<SensitivityFactor> factors,
                                 List<Contingency> contingencies, SensitivityAnalysisParameters sensiParameters, String label) {
+        // Two writer modes:
+        //  - default ("model"): the standard runner overload, which accumulates every value in a
+        //    SensitivityResultModelWriter and assembles a SensitivityAnalysisResult (result egress included).
+        //  - "count": a counting SensitivityResultWriter that discards values, to isolate the analysis proper
+        //    (factor ingestion + load flow + solve + value computation) from the result-model egress.
+        boolean countOnly = "count".equals(System.getProperty("bench.writer"));
         long t0 = System.nanoTime();
-        SensitivityAnalysisResult result = runner.run(network, factors, contingencies, sensiParameters);
+        long count;
+        if (countOnly) {
+            SensitivityFactorModelReader reader = new SensitivityFactorModelReader(factors, network);
+            CountingResultWriter writer = new CountingResultWriter();
+            runner.run(network, network.getVariantManager().getWorkingVariantId(), reader, writer,
+                    contingencies, List.of(), sensiParameters, LocalComputationManager.getDefault(), ReportNode.NO_OP);
+            count = writer.count;
+        } else {
+            SensitivityAnalysisResult result = runner.run(network, factors, contingencies, sensiParameters);
+            count = result.getValues().size();
+        }
         long ms = (System.nanoTime() - t0) / 1_000_000;
-        LOGGER.info("  [{}] {} sensitivity values in {} ms", label, result.getValues().size(), ms);
+        LOGGER.info("  [{}] {} sensitivity values in {} ms (writer={})", label, count, ms, countOnly ? "count" : "model");
         return ms;
+    }
+
+    /** Discards sensitivity values, only counting them, to isolate result-egress cost from the analysis. */
+    private static final class CountingResultWriter implements com.powsybl.sensitivity.SensitivityResultWriter {
+        private long count;
+
+        @Override
+        public void writeSensitivityValue(int factorContext, int contingencyIndex, int variableIndex, double value, double functionReference) {
+            count++;
+        }
+
+        @Override
+        public void writeStateStatus(int contingencyIndex, int variableIndex, com.powsybl.sensitivity.SensitivityAnalysisResult.Status status) {
+            // no-op
+        }
     }
 
     private static Network importMatpowerCase(Path mFile) throws IOException {

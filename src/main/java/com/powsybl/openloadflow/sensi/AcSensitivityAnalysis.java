@@ -249,13 +249,27 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                                                            List<LfSensitivityFactor<AcVariableType, AcEquationType>> factorsForReferences,
                                                            List<LfSensitivityFactor<AcVariableType, AcEquationType>> factorsForSensitivities,
                                                            int contingencyIndex, SensitivityResultWriter resultWriter) {
+        long t0 = System.nanoTime();
         DenseMatrix factorsStates = initFactorsRhs(context.getEquationSystem(), factorGroups, participationByBus); // this is the rhs for the moment
         fillSvcPilotFactorsRhs(factorGroups, factorsStates, context);
+        long t1 = System.nanoTime();
         context.getJacobianMatrix().solveTransposed(factorsStates);
+        long t2 = System.nanoTime();
         setFunctionReferences(factorsForReferences);
+        long t3 = System.nanoTime();
         calculateSensitivityValues(factorsForSensitivities, factorsStates, contingencyIndex, resultWriter);
+        long t4 = System.nanoTime();
+        if (PROFILE) {
+            LOGGER.info("AC sensi phases [contingency={}]: rhsBuild={} ms, transposedSolve={} ms, functionReferences={} ms, calculate+write={} ms "
+                            + "(refFactors={}, sensiFactors={}, factorGroups={})",
+                    contingencyIndex, (t1 - t0) / 1_000_000, (t2 - t1) / 1_000_000, (t3 - t2) / 1_000_000, (t4 - t3) / 1_000_000,
+                    factorsForReferences.size(), factorsForSensitivities.size(), factorGroups.getList().size());
+        }
         return factorsStates;
     }
+
+    /** Opt-in ({@code -Dsensi.profile=true}) phase timing of the AC sensitivity solve, for benchmarking. */
+    private static final boolean PROFILE = Boolean.getBoolean("sensi.profile");
 
     /**
      * Fills the RHS columns for SVC_PILOT_TARGET_VOLTAGE factor groups: for each
@@ -475,13 +489,16 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         ReportNode networkReportNode = lfNetwork.getReportNode();
 
         Map<String, SensitivityVariableSet> variableSetsById = variableSets.stream().collect(Collectors.toMap(SensitivityVariableSet::getId, Function.identity()));
+        long tRead0 = System.nanoTime();
         SensitivityFactorHolder<AcVariableType, AcEquationType> allFactorHolder = readAndCheckFactors(network, variableSetsById, factorReader, lfNetwork, breakers);
         List<LfSensitivityFactor<AcVariableType, AcEquationType>> allLfFactors = allFactorHolder.getAllFactors();
+        long tRead1 = System.nanoTime();
         LOGGER.info("Running AC sensitivity analysis with {} factors and {} contingencies", allLfFactors.size(), contingencies.size());
 
         // next we only work with valid and valid only for function factors
         var validFactorHolder = writeInvalidFactors(allFactorHolder, resultWriter, contingencies, new HashMap<>(), parameters);
         var validLfFactors = validFactorHolder.getAllFactors();
+        long tRead2 = System.nanoTime();
 
         try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters)) {
 
@@ -490,8 +507,13 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             acParameters.setVoltageInitReport(false);
 
             // index factors by variable group to compute a minimal number of states
+            long tGroup0 = System.nanoTime();
             SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups = createFactorGroups(validLfFactors.stream()
                     .filter(factor -> factor.getStatus() == LfSensitivityFactor.Status.VALID).collect(Collectors.toList()));
+            if (PROFILE) {
+                LOGGER.info("AC sensi setup: readAndCheckFactors={} ms, writeInvalidFactors={} ms, createFactorGroups={} ms (allFactors={})",
+                        (tRead1 - tRead0) / 1_000_000, (tRead2 - tRead1) / 1_000_000, (System.nanoTime() - tGroup0) / 1_000_000, allLfFactors.size());
+            }
 
             // compute the participation for each injection factor (+1 on the injection and then -participation factor on all
             // buses that contain elements participating to slack distribution
