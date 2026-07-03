@@ -61,11 +61,13 @@ import java.util.Objects;
  * point and traces the lower (unstable) branch. The tangent at the nose gives the voltage participation factors,
  * i.e. which buses drive the collapse.</p>
  *
- * <p>This is a smooth continuation: the load is increased along a {@link LoadIncreaseDirection} and, optionally,
- * generation is increased along a {@link GenerationParticipation} to pick it up; the slack bus absorbs whatever
- * is left. Discrete outer-loop controls (distributed slack, reactive limits, ...) are intentionally not applied
- * during the continuation, so the traced curve is smooth. For a collapse point accounting for those controls,
- * use the stepped {@link ContinuationPowerFlow}.</p>
+ * <p>This is a mostly smooth continuation: the load is increased along a {@link LoadIncreaseDirection} and,
+ * optionally, generation is increased along a {@link GenerationParticipation} to pick it up; the slack bus
+ * absorbs whatever is left. Reactive limits can optionally be enforced
+ * ({@link PredictorCorrectorParameters#setEnforceReactiveLimits}): a voltage-controlled generator bus that hits
+ * its reactive limit is switched PV to PQ, which introduces a breakpoint on the curve (reported in the result)
+ * and usually brings the collapse point closer. Other discrete controls (distributed slack, tap changers, ...)
+ * are not applied. For a collapse point accounting for all of them, use the stepped {@link ContinuationPowerFlow}.</p>
  *
  * <p>The augmented linear system is solved by block elimination (bordering) that reuses the sparse LU
  * factorization of {@code F_x} kept by the existing {@link JacobianMatrix}: each corrector iteration performs
@@ -107,7 +109,7 @@ public class PredictorCorrectorContinuationPowerFlow {
         private final List<ParticipatingLoad> participants;
         private final List<ParticipatingGenerator> participatingGenerators;
         private final int n;
-        private final double[] fLambda;
+        private double[] fLambda;
 
         private double lambda;
 
@@ -126,20 +128,52 @@ public class PredictorCorrectorContinuationPowerFlow {
         }
 
         /**
-         * F_lambda = d F / d lambda, evaluated once (the target is linear in lambda). Since F = calc - target,
-         * F_lambda = -(target(lambda=1) - target(lambda=0)).
+         * F_lambda = d F / d lambda (the target is linear in lambda, so a single finite difference is exact).
+         * Since F = calc - target, F_lambda = -(target(lambda=1) - target(lambda=0)). The load level is restored
+         * to the current lambda afterwards, so this can be recomputed after a reactive-limit structure change.
          */
         private double[] computeFLambda() {
             applyIncrease(0.0);
             double[] t0 = targetVector.getArray().clone();
             applyIncrease(1.0);
             double[] t1 = targetVector.getArray().clone();
-            applyIncrease(0.0);
+            applyIncrease(lambda);
             double[] result = new double[n];
             for (int i = 0; i < n; i++) {
                 result[i] = -(t1[i] - t0[i]);
             }
             return result;
+        }
+
+        /**
+         * Checks every voltage-controlled generator bus (except the slack) against its reactive limits and, for
+         * those beyond a limit, switches them PV to PQ with their reactive power frozen at the limit. Returns the
+         * breakpoints created. After a switch the equation structure changes, so {@link #fLambda} is recomputed.
+         */
+        private List<ReactiveLimitBreakpoint> enforceReactiveLimits() {
+            List<ReactiveLimitBreakpoint> breakpoints = new ArrayList<>();
+            double tolerance = parameters.getReactivePowerLimitTolerance();
+            for (LfBus bus : network.getBuses()) {
+                if (bus.isDisabled() || bus.isSlack() || !bus.isGeneratorVoltageControlEnabled()) {
+                    continue;
+                }
+                double q = bus.getQ().eval() + bus.getLoadTargetQ();
+                if (q > bus.getMaxQ() + tolerance) {
+                    double qLimit = bus.getMaxQ();
+                    bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(qLimit);
+                    bus.setQLimitType(LfBus.QLimitType.MAX_Q);
+                    breakpoints.add(new ReactiveLimitBreakpoint(lambda, bus.getId(), qLimit * PerUnit.SB, true));
+                } else if (q < bus.getMinQ() - tolerance) {
+                    double qLimit = bus.getMinQ();
+                    bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(qLimit);
+                    bus.setQLimitType(LfBus.QLimitType.MIN_Q);
+                    breakpoints.add(new ReactiveLimitBreakpoint(lambda, bus.getId(), qLimit * PerUnit.SB, false));
+                }
+            }
+            if (!breakpoints.isEmpty()) {
+                fLambda = computeFLambda();
+            }
+            return breakpoints;
         }
 
         private void applyIncrease(double lambdaValue) {
@@ -376,6 +410,14 @@ public class PredictorCorrectorContinuationPowerFlow {
             return new ContinuationResult(ContinuationResult.Status.BASE_CASE_NOT_CONVERGED, List.of(), 0.0, null);
         }
 
+        List<ReactiveLimitBreakpoint> reactiveLimitBreakpoints = new ArrayList<>();
+        if (parameters.isEnforceReactiveLimits()) {
+            reactiveLimitBreakpoints.addAll(c.enforceReactiveLimits());
+            if (!reactiveLimitBreakpoints.isEmpty()) {
+                c.correct(PARAM_LAMBDA, 0.0);
+            }
+        }
+
         List<ContinuationPoint> points = new ArrayList<>();
         points.add(c.buildPoint(true, null));
 
@@ -418,6 +460,20 @@ public class PredictorCorrectorContinuationPowerFlow {
             double eta = stepParamVariable == PARAM_LAMBDA ? c.lambda : c.stateVector.get(stepParamVariable);
 
             if (c.correct(stepParamVariable, eta)) {
+                // enforce reactive limits at this new point: switch violating PV buses to PQ and re-converge
+                if (parameters.isEnforceReactiveLimits()) {
+                    List<ReactiveLimitBreakpoint> newBreakpoints = c.enforceReactiveLimits();
+                    if (!newBreakpoints.isEmpty()) {
+                        if (c.equationSystem.getIndex().getColumnCount() != c.n
+                                || !c.correct(PARAM_LAMBDA, c.lambda)) {
+                            LOGGER.warn("Continuation stopped: could not re-converge after a reactive limit switch at lambda={}", c.lambda);
+                            status = ContinuationResult.Status.NOSE_POINT_REACHED;
+                            break;
+                        }
+                        reactiveLimitBreakpoints.addAll(newBreakpoints);
+                        consecutiveSuccesses = 0; // the structure changed: be cautious with the step size
+                    }
+                }
                 boolean nowTurned = c.lambda < previousLambda - 1e-9;
                 if (nowTurned) {
                     turned = true;
@@ -475,10 +531,11 @@ public class PredictorCorrectorContinuationPowerFlow {
                 .map(Map.Entry::getKey)
                 .orElse(nosePoint.minVoltageBusId());
 
-        LOGGER.info("Continuation finished ({}): nose at lambda={}, critical bus='{}', {} points",
-                status, maxLambda, criticalBusId, points.size());
+        LOGGER.info("Continuation finished ({}): nose at lambda={}, critical bus='{}', {} points, {} reactive-limit breakpoints",
+                status, maxLambda, criticalBusId, points.size(), reactiveLimitBreakpoints.size());
 
-        return new ContinuationResult(status, points, maxLambda, nosePoint, criticalBusId, participation);
+        return new ContinuationResult(status, points, maxLambda, nosePoint, criticalBusId, participation,
+                reactiveLimitBreakpoints);
     }
 
     /**

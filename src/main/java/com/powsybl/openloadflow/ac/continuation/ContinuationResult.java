@@ -46,23 +46,27 @@ public class ContinuationResult {
 
     private final Map<String, Double> tangentParticipationByBus;
 
+    private final List<ReactiveLimitBreakpoint> reactiveLimitBreakpoints;
+
     /**
      * Constructor used when the nose is the last traced point (upper branch only, e.g. the stepped continuation).
      */
     public ContinuationResult(Status status, List<ContinuationPoint> points, double maxLoadFactor, String criticalBusId) {
         this(status, points, maxLoadFactor,
                 points.isEmpty() ? null : points.get(points.size() - 1),
-                criticalBusId, Map.of());
+                criticalBusId, Map.of(), List.of());
     }
 
     public ContinuationResult(Status status, List<ContinuationPoint> points, double maxLoadFactor,
-                              ContinuationPoint nosePoint, String criticalBusId, Map<String, Double> tangentParticipationByBus) {
+                              ContinuationPoint nosePoint, String criticalBusId, Map<String, Double> tangentParticipationByBus,
+                              List<ReactiveLimitBreakpoint> reactiveLimitBreakpoints) {
         this.status = Objects.requireNonNull(status);
         this.points = List.copyOf(points);
         this.maxLoadFactor = maxLoadFactor;
         this.nosePoint = nosePoint;
         this.criticalBusId = criticalBusId;
         this.tangentParticipationByBus = Map.copyOf(tangentParticipationByBus);
+        this.reactiveLimitBreakpoints = List.copyOf(reactiveLimitBreakpoints);
     }
 
     public Status getStatus() {
@@ -124,6 +128,14 @@ public class ContinuationResult {
      * in traced order (upper branch then, for a predictor-corrector run, lower branch). Empty when voltage
      * recording is off or the bus was not monitored.
      */
+    /**
+     * The reactive-limit breakpoints encountered along the curve, in traced order: each is a load factor at which
+     * a generator bus switched PV to PQ on hitting a reactive limit. Empty when reactive limits are not enforced.
+     */
+    public List<ReactiveLimitBreakpoint> getReactiveLimitBreakpoints() {
+        return reactiveLimitBreakpoints;
+    }
+
     public List<PvCurvePoint> getPvCurve(String busId) {
         List<PvCurvePoint> curve = new ArrayList<>();
         for (ContinuationPoint point : points) {

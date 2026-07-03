@@ -32,6 +32,8 @@ public class PredictorCorrectorParameters {
     public static final double DEFAULT_MIN_LOAD_FACTOR = 0.0;
     public static final boolean DEFAULT_SCALE_REACTIVE_POWER_WITH_ACTIVE_POWER = true;
     public static final boolean DEFAULT_RECORD_BUS_VOLTAGES = true;
+    public static final boolean DEFAULT_ENFORCE_REACTIVE_LIMITS = false;
+    public static final double DEFAULT_REACTIVE_POWER_LIMIT_TOLERANCE = 1e-4;
 
     private double initialStepSize = DEFAULT_INITIAL_STEP_SIZE;
     private double minStepSize = DEFAULT_MIN_STEP_SIZE;
@@ -46,6 +48,8 @@ public class PredictorCorrectorParameters {
     private double minLoadFactor = DEFAULT_MIN_LOAD_FACTOR;
     private boolean scaleReactivePowerWithActivePower = DEFAULT_SCALE_REACTIVE_POWER_WITH_ACTIVE_POWER;
     private boolean recordBusVoltages = DEFAULT_RECORD_BUS_VOLTAGES;
+    private boolean enforceReactiveLimits = DEFAULT_ENFORCE_REACTIVE_LIMITS;
+    private double reactivePowerLimitTolerance = DEFAULT_REACTIVE_POWER_LIMIT_TOLERANCE;
 
     /** Arc length of the first predictor step, in the combined (state, lambda) tangent space. */
     public double getInitialStepSize() {
@@ -172,6 +176,30 @@ public class PredictorCorrectorParameters {
 
     public PredictorCorrectorParameters setRecordBusVoltages(boolean recordBusVoltages) {
         this.recordBusVoltages = recordBusVoltages;
+        return this;
+    }
+
+    /**
+     * If true, voltage-controlled generator buses that hit a reactive power limit along the curve are switched
+     * from PV to PQ (their reactive power frozen at the limit), introducing breakpoints on the P-V curve. The
+     * network must be loaded so the reactive limits are available (i.e. with reactive limits enabled).
+     */
+    public boolean isEnforceReactiveLimits() {
+        return enforceReactiveLimits;
+    }
+
+    public PredictorCorrectorParameters setEnforceReactiveLimits(boolean enforceReactiveLimits) {
+        this.enforceReactiveLimits = enforceReactiveLimits;
+        return this;
+    }
+
+    /** Reactive power tolerance (per unit) beyond a limit before a bus is switched PV to PQ. */
+    public double getReactivePowerLimitTolerance() {
+        return reactivePowerLimitTolerance;
+    }
+
+    public PredictorCorrectorParameters setReactivePowerLimitTolerance(double reactivePowerLimitTolerance) {
+        this.reactivePowerLimitTolerance = reactivePowerLimitTolerance;
         return this;
     }
 }

@@ -8,6 +8,9 @@
 package com.powsybl.openloadflow.ac.continuation;
 
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.Substation;
+import com.powsybl.iidm.network.TopologyKind;
+import com.powsybl.iidm.network.VoltageLevel;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.CommonTestConfig;
@@ -22,6 +25,7 @@ import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -156,6 +160,70 @@ class PredictorCorrectorContinuationPowerFlowTest {
         assertTrue(withGeneration.getMaxLoadFactor() > slackOnly.getMaxLoadFactor() + 0.1,
                 "Expected the nose to move up with local generation: slackOnly=" + slackOnly.getMaxLoadFactor()
                         + ", withGeneration=" + withGeneration.getMaxLoadFactor());
+    }
+
+    /**
+     * Two 400 kV buses joined by a reactance. b1 hosts the slack generator; b2 hosts a voltage-regulating
+     * generator with a tight reactive limit and a load. As the load grows, the b2 generator must produce more
+     * reactive power to hold its voltage until it hits its Q limit.
+     */
+    private static Network reactiveLimitNetwork() {
+        Network network = Network.create("reactive-limit-continuation", "test");
+        Substation s1 = network.newSubstation().setId("s1").add();
+        VoltageLevel vl1 = s1.newVoltageLevel().setId("vl1").setNominalV(400).setTopologyKind(TopologyKind.BUS_BREAKER).add();
+        vl1.getBusBreakerView().newBus().setId("b1").add();
+        Substation s2 = network.newSubstation().setId("s2").add();
+        VoltageLevel vl2 = s2.newVoltageLevel().setId("vl2").setNominalV(400).setTopologyKind(TopologyKind.BUS_BREAKER).add();
+        vl2.getBusBreakerView().newBus().setId("b2").add();
+
+        vl1.newGenerator().setId("g1").setBus("b1").setConnectableBus("b1")
+                .setTargetP(100).setTargetV(400).setVoltageRegulatorOn(true).setMinP(0).setMaxP(3000).add();
+        network.getGenerator("g1").newMinMaxReactiveLimits().setMinQ(-3000).setMaxQ(3000).add();
+
+        vl2.newGenerator().setId("g2").setBus("b2").setConnectableBus("b2")
+                .setTargetP(100).setTargetV(400).setVoltageRegulatorOn(true).setMinP(0).setMaxP(3000).add();
+        network.getGenerator("g2").newMinMaxReactiveLimits().setMinQ(-60).setMaxQ(60).add();
+
+        vl2.newLoad().setId("l2").setBus("b2").setConnectableBus("b2").setP0(200).setQ0(120).add();
+
+        network.newLine().setId("l12").setVoltageLevel1("vl1").setBus1("b1").setConnectableBus1("b1")
+                .setVoltageLevel2("vl2").setBus2("b2").setConnectableBus2("b2")
+                .setR(1).setX(60).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        return network;
+    }
+
+    @Test
+    void reactiveLimitBreakpointLowersNoseTest() {
+        Network network = reactiveLimitNetwork();
+        LoadFlowParameters parameters = new LoadFlowParameters()
+                .setUseReactiveLimits(true)
+                .setDistributedSlack(false);
+        OpenLoadFlowParameters parametersExt = OpenLoadFlowParameters.create(parameters)
+                .setSlackBusSelectionMode(SlackBusSelectionMode.FIRST);
+
+        // smooth continuation: g2 holds its voltage with unlimited reactive power
+        ContinuationResult smooth = new PredictorCorrectorContinuationPowerFlow(new PredictorCorrectorParameters())
+                .run(network, parameters, parametersExt, commonTestConfig.matrixFactory(), LoadIncreaseDirection.allLoads());
+        assertSame(ContinuationResult.Status.NOSE_POINT_REACHED, smooth.getStatus());
+        assertTrue(smooth.getReactiveLimitBreakpoints().isEmpty());
+
+        // with reactive limits enforced: g2 hits its Q limit and switches PV -> PQ, moving the collapse point
+        ContinuationResult withLimits = new PredictorCorrectorContinuationPowerFlow(
+                new PredictorCorrectorParameters().setEnforceReactiveLimits(true))
+                .run(network, parameters, parametersExt, commonTestConfig.matrixFactory(), LoadIncreaseDirection.allLoads());
+        assertSame(ContinuationResult.Status.NOSE_POINT_REACHED, withLimits.getStatus());
+
+        // there is at least one breakpoint, on g2's bus, at its maximum reactive limit
+        assertFalse(withLimits.getReactiveLimitBreakpoints().isEmpty());
+        ReactiveLimitBreakpoint breakpoint = withLimits.getReactiveLimitBreakpoints().get(0);
+        assertTrue(breakpoint.busId().contains("vl2"));
+        assertTrue(breakpoint.maxLimit());
+        assertEquals(60.0, breakpoint.qLimitMvar(), 1.0);
+
+        // hitting the reactive limit brings the voltage collapse point to a lower load factor
+        assertTrue(withLimits.getMaxLoadFactor() < smooth.getMaxLoadFactor(),
+                "Reactive limits should lower the nose: smooth=" + smooth.getMaxLoadFactor()
+                        + ", withLimits=" + withLimits.getMaxLoadFactor());
     }
 
     @Test

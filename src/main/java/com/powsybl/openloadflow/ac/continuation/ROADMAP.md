@@ -21,19 +21,17 @@ Tracking the planned work for the voltage-collapse / continuation power flow pro
   (by generator id / weights / all / none) so participating generators ramp their target P by `(1 + λ·k_G)`
   alongside the loads; the slack closes the residual, and `F_λ` picks the scaling up automatically. On a Eurostag
   variant with a generator at the load bus, participation moves the nose from λ≈1.09 to λ≈1.40.
+- **Reactive-limit breakpoints** — optional (`setEnforceReactiveLimits`) PV→PQ switching in the
+  predictor–corrector engine. After each converged point, voltage-controlled generator buses (except the slack)
+  are checked against their reactive limits; a violating bus is frozen at its Q limit (via OLF's
+  `freezeGenerationTargetQAndDisableGeneratorVoltageControl`, which swaps `BUS_TARGET_V`→`BUS_TARGET_Q`), `F_λ` is
+  recomputed, and the point is re-converged at fixed λ. Breakpoints are reported in `ContinuationResult`. On a
+  two-bus test, the switch drops the nose from λ≈12.6 to λ≈3.2. Follow-ups: exact bisection to the crossing
+  (currently switches at the detecting point), and PQ→PV switch-back on the lower branch.
 
 ## Backlog
 
-### 1. Reactive-limit breakpoints on the curve
-The smooth predictor–corrector deliberately ignores reactive limits. Real P–V curves have breakpoints where a
-generator hits Q_max/Q_min and switches PV→PQ. Add discrete event handling to the continuation:
-- monitor each PV generator's reactive power along the curve;
-- when a limit is crossed between two points, bisect λ to the crossing, switch the bus PV→PQ (change the
-  equation type / structure), and resume the continuation;
-- mark breakpoints in the result. Note: structure changes rebuild `F_λ` and the equation index, so this needs
-  care around the constant-`F_λ` assumption.
-
-### 2. Public API + docs
+### 1. Public API + docs
 Expose both engines through the standard OpenLoadFlow surface instead of the current programmatic-only entry:
 - an `OpenLoadFlowParameters` extension (or a dedicated `ContinuationPowerFlow` runner) selecting engine
   (stepped / predictor–corrector), the load & generation directions, and stepping parameters;
