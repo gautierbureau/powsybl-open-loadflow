@@ -328,7 +328,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                 continue;
             }
             // getFunctionEquationTerm() is declared as Derivable; the in-scope AC function types are all
-            // EquationTerms, which expose getVariables()/der() (same cast as LoadFlowAdjoint.scatter).
+            // EquationTerms, which expose getVariables()/der() needed to scatter (∂f/∂x)ᵀ into x̄.
             if (!(factor.getFunctionEquationTerm() instanceof EquationTerm)) {
                 continue;
             }
