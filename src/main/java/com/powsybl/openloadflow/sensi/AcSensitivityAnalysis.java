@@ -24,6 +24,8 @@ import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.ac.equations.*;
 import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
+import com.powsybl.openloadflow.equations.EquationTerm;
+import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
 import com.powsybl.openloadflow.network.*;
@@ -269,6 +271,76 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                         .ifPresent(eq -> factorsStates.set(eq.getColumn(), col, w));
             }
         }
+    }
+
+    /**
+     * Reverse-mode (adjoint / VJP) dual of the forward AC sensitivity: given output cotangents {@code ȳ}
+     * over the declared functions, return {@code θ̄ = Sᵀ·ȳ} over the variable groups — WITHOUT
+     * materialising the sensitivity matrix {@code S}. A single transpose solve on the retained (e.g.
+     * networkCacheEnabled) factorization, reusing {@link #initFactorsRhs} (∂F/∂p),
+     * {@link #fillSvcPilotFactorsRhs} (SVC pilot closed-loop) and the function equation terms (∂f/∂x).
+     * Assumes a load flow already converged on {@code context} (its Jacobian is factorized), exactly as
+     * the forward path assumes.
+     *
+     * @param cotangents dL/dfunction, keyed by the base-network sensitivity factor.
+     * @return θ̄ indexed by factor-group index ({@link SensitivityFactorGroup#getIndex()}).
+     */
+    @SuppressWarnings("unchecked")
+    public double[] analyseAdjoint(AcLoadFlowContext context,
+                                   SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups,
+                                   Map<LfSensitivityFactor<AcVariableType, AcEquationType>, Double> cotangents,
+                                   Map<LfBus, Double> slackParticipationByBus) {
+        var equationSystem = context.getEquationSystem();
+        int equationCount = equationSystem.getIndex().getColumnCount();
+
+        // ∂F/∂p columns (one per variable group), including the SVC pilot closed-loop — identical to forward.
+        DenseMatrix parameterRhs = initFactorsRhs(equationSystem, factorGroups, slackParticipationByBus);
+        fillSvcPilotFactorsRhs(factorGroups, parameterRhs, context);
+
+        // x̄ = Σ_f ȳ_f · (∂f/∂x): transpose of calculateSensi — scatter der() into the equation rows.
+        double[] xBar = new double[equationCount];
+        for (var e : cotangents.entrySet()) {
+            double yBar = e.getValue();
+            if (yBar == 0.0) {
+                continue;
+            }
+            // getFunctionEquationTerm() is declared as Derivable; the in-scope AC function types are all
+            // EquationTerms, which expose getVariables()/der() (same cast as LoadFlowAdjoint.scatter).
+            if (!(e.getKey().getFunctionEquationTerm() instanceof EquationTerm)) {
+                continue;
+            }
+            EquationTerm<AcVariableType, AcEquationType> functionTerm =
+                    (EquationTerm<AcVariableType, AcEquationType>) e.getKey().getFunctionEquationTerm();
+            for (Variable<AcVariableType> variable : functionTerm.getVariables()) {
+                int row = variable.getRow();
+                if (row >= 0) {
+                    xBar[row] += yBar * functionTerm.der(variable);
+                }
+            }
+        }
+
+        // λ = J⁻ᵀ x̄: the stored matrix is M = Jᵀ, so plain solve() IS the adjoint solve. One solve.
+        double[] lambda = xBar; // solved in place
+        context.getJacobianMatrix().solve(lambda);
+
+        // θ̄_v = −(∂F/∂p_v)ᵀ λ per variable group, plus the direct ∂f/∂p term (branch parameters).
+        double[] thetaBar = new double[factorGroups.getList().size()];
+        for (var group : factorGroups.getList()) {
+            int col = group.getIndex();
+            double dot = 0.0;
+            for (int row = 0; row < equationCount; row++) {
+                dot += parameterRhs.get(row, col) * lambda[row];
+            }
+            double thetaG = -dot;
+            for (var factor : group.getFactors()) {
+                Double yBar = cotangents.get(factor);
+                if (yBar != null && yBar != 0.0) {
+                    thetaG += yBar * computeParameterDirectPartial(factor);
+                }
+            }
+            thetaBar[col] = thetaG;
+        }
+        return thetaBar;
     }
 
     private static boolean runLoadFlow(AcLoadFlowContext context, boolean isRunningBaseSituation) {

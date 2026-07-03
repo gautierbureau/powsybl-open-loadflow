@@ -16,7 +16,6 @@ import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.util.Evaluable;
-
 import net.jafama.FastMath;
 
 import java.util.Objects;
@@ -181,6 +180,39 @@ public final class LoadFlowAdjoint {
         double lambdaQ = lambdaAt(context.getEquationSystem(), lambda, bus, AcEquationType.BUS_TARGET_Q);
         double v = bus.getV();
         return lambdaQ * v * v; // = −λ_Q·(∂Q^sh/∂B) = −λ_Q·(−V²)
+    }
+
+    /**
+     * Branch admittance-scale cotangent {@code Ȳ = −(∂g/∂z)ᵀλ} for one (closed) controllable line, run
+     * with its whole π-model admittance scaled by a dimensionless {@code z} (converged at {@code z=1};
+     * the line-connection lever, relaxed). Because the four branch flows {@code P1, Q1, P2, Q2} are
+     * <em>linear</em> in {@code z}, their partials at the converged point are the converged flows
+     * themselves, scattered into the active/reactive balance of buses 1 and 2:
+     * <pre>
+     *     Ȳ = −( λ_{P1}·P1 + λ_{Q1}·Q1 + λ_{P2}·P2 + λ_{Q2}·Q2 ) ,
+     * </pre>
+     * mirroring {@link #ratioCotangent} with {@code ∂flow/∂z = flow}. Returns {@code 0} for an open
+     * branch (its admittance is not in the residual — the line-analogue of the V-regulated bus).
+     */
+    public static double branchAdmittanceCotangent(AcLoadFlowContext context, LfBranch branch, double[] lambda) {
+        Objects.requireNonNull(context);
+        Objects.requireNonNull(branch);
+        Objects.requireNonNull(lambda);
+        LfBus bus1 = branch.getBus1();
+        LfBus bus2 = branch.getBus2();
+        if (bus1 == null || bus2 == null) {
+            return 0.0; // open branch: no admittance in the residual
+        }
+        double p1 = branch.getP1().eval();
+        double q1 = branch.getQ1().eval();
+        double p2 = branch.getP2().eval();
+        double q2 = branch.getQ2().eval();
+        var equationSystem = context.getEquationSystem();
+        double dgT = lambdaAt(equationSystem, lambda, bus1, AcEquationType.BUS_TARGET_P) * p1
+                + lambdaAt(equationSystem, lambda, bus1, AcEquationType.BUS_TARGET_Q) * q1
+                + lambdaAt(equationSystem, lambda, bus2, AcEquationType.BUS_TARGET_P) * p2
+                + lambdaAt(equationSystem, lambda, bus2, AcEquationType.BUS_TARGET_Q) * q2;
+        return -dgT;
     }
 
     private static double lambdaAt(EquationSystem<AcVariableType, AcEquationType> equationSystem, double[] lambda,
