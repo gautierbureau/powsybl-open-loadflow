@@ -60,6 +60,10 @@ public class LimitViolationManager {
         return new ArrayList<>(violations.values());
     }
 
+    public LimitReductionManager getLimitReductionManager() {
+        return limitReductionManager;
+    }
+
     /**
      * Detect violations on branches and on buses
      * @param network network on which the violation limits are checked
@@ -79,6 +83,32 @@ public class LimitViolationManager {
         // Detect violation limits on branches
         network.getBranches().stream().filter(b -> !isBranchDisabled.test(b)).forEach(this::detectBranchViolations);
 
+        detectBusAndVoltageAngleViolations(network);
+    }
+
+    /**
+     * Detect violations on branches and on buses, checking only the given branches for branch violations. This is used
+     * when the branches that carry at least one limit have been computed once beforehand (see
+     * {@link #getBranchesWithLimits}), so that a security analysis running many contingencies does not have to look up
+     * the limits of every branch of the network on each contingency.
+     * @param network network on which the violation limits are checked
+     * @param isBranchDisabled predicate to evaluate if a branch of the network is disabled or not
+     * @param branchesWithLimits the branches carrying at least one limit
+     */
+    public void detectViolations(LfNetwork network, Predicate<LfBranch> isBranchDisabled, List<LfBranch> branchesWithLimits) {
+        Objects.requireNonNull(network);
+
+        // Detect violation limits on the branches carrying limits only
+        for (LfBranch branch : branchesWithLimits) {
+            if (!isBranchDisabled.test(branch)) {
+                detectBranchViolations(branch);
+            }
+        }
+
+        detectBusAndVoltageAngleViolations(network);
+    }
+
+    private void detectBusAndVoltageAngleViolations(LfNetwork network) {
         // Detect violation limits on buses
         network.getBuses().stream().filter(b -> !b.isDisabled()).forEach(this::detectBusViolations);
 
@@ -86,6 +116,31 @@ public class LimitViolationManager {
         network.getVoltageAngleLimits().stream()
                 .filter(limit -> !limit.getFrom().isDisabled() && !limit.getTo().isDisabled())
                 .forEach(this::detectVoltageAngleLimitViolations);
+    }
+
+    /**
+     * Compute the subset of network branches that carry at least one limit (on either side, for any limit type). As
+     * branch limits do not change between contingencies, this can be computed once and passed to
+     * {@link #detectViolations(LfNetwork, Predicate, List)} to avoid looking up the limits of the limitless branches on
+     * every contingency.
+     */
+    public static List<LfBranch> getBranchesWithLimits(LfNetwork network, LimitReductionManager limitReductionManager) {
+        List<LfBranch> branchesWithLimits = new ArrayList<>();
+        for (LfBranch branch : network.getBranches()) {
+            if (branch.getBus1() != null && hasLimits(branch, LfBranch::getLimits1, limitReductionManager)
+                    || branch.getBus2() != null && hasLimits(branch, LfBranch::getLimits2, limitReductionManager)) {
+                branchesWithLimits.add(branch);
+            }
+        }
+        return branchesWithLimits;
+    }
+
+    private static boolean hasLimits(LfBranch branch,
+                                     TriFunction<LfBranch, LimitType, LimitReductionManager, List<LfBranch.LfLimitsGroup>> limitsGetter,
+                                     LimitReductionManager limitReductionManager) {
+        return !limitsGetter.apply(branch, LimitType.CURRENT, limitReductionManager).isEmpty()
+                || !limitsGetter.apply(branch, LimitType.ACTIVE_POWER, limitReductionManager).isEmpty()
+                || !limitsGetter.apply(branch, LimitType.APPARENT_POWER, limitReductionManager).isEmpty();
     }
 
     private static Pair<String, ThreeSides> getSubjectIdSide(LimitViolation limitViolation) {
