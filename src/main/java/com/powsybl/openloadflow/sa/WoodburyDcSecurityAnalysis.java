@@ -295,6 +295,20 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 toFastDcResults, restorePreContingencyStates, securityAnalysisSimulationResults, lfContingency));
     }
 
+    /**
+     * Restore the pre contingency state of the network elements collected by the given collector (i.e. the elements
+     * modified by the contingency and its operator strategy actions), then clear the collector for the next
+     * contingency. The collector is disabled during the restoration so that the setter calls it performs do not
+     * collect back the elements being restored.
+     */
+    private static void restoreModifiedNetworkElements(NetworkState networkState, ModifiedElementsCollector modifiedElementsCollector) {
+        modifiedElementsCollector.setEnabled(false);
+        networkState.restore(modifiedElementsCollector.getModifiedBuses(), modifiedElementsCollector.getModifiedBranches(),
+            modifiedElementsCollector.getModifiedHvdcs());
+        modifiedElementsCollector.reset();
+        modifiedElementsCollector.setEnabled(true);
+    }
+
     private void processContingency(WoodburyContext woodburyContext, ConnectivityAnalysisResult connectivityAnalysisResult,
                                     ToFastDcResults toFastDcResults, Runnable restorePreContingencyStates,
                                     SecurityAnalysisSimulationResults securityAnalysisSimulationResults,
@@ -452,6 +466,11 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
             // save base state for later restoration after each contingency/action
             NetworkState networkState = NetworkState.save(lfNetwork);
 
+            // collect the elements modified by each contingency (and its operator strategy actions) so that only
+            // those are restored afterwards, instead of the whole network
+            ModifiedElementsCollector modifiedElementsCollector = new ModifiedElementsCollector();
+            lfNetwork.addListener(modifiedElementsCollector);
+
             List<PostContingencyResult> postContingencyResults = new ArrayList<>();
             List<OperatorStrategyResult> operatorStrategyResults = new ArrayList<>();
             SecurityAnalysisSimulationResults securityAnalysisSimulationResults = new SecurityAnalysisSimulationResults(preContingencyNetworkResult,
@@ -485,8 +504,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 Runnable restorePreContingencyStates = () -> {
                     // update workingContingencyStates as it may have been updated by post contingency states calculation
                     System.arraycopy(preContingencyStates, 0, workingContingencyStates, 0, preContingencyStates.length);
-                    // restore pre contingency state
-                    networkState.restore();
+                    // restore pre contingency state of the elements modified by the contingency
+                    restoreModifiedNetworkElements(networkState, modifiedElementsCollector);
                 };
                 addPostContingencyAndOperatorStrategyResults(woodburyContext, connectivityAnalysisResult, toFastDcResults, restorePreContingencyStates, securityAnalysisSimulationResults);
             });
@@ -495,9 +514,11 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
             connectivityBreakAnalysisResults.connectivityBreakingAnalysisResults().forEach(connectivityAnalysisResult -> {
                 // runnable to restore pre contingency states, after modifications applied to the lfNetwork
                 // no need to update workingContingencyStates as an override of flow states will be computed
-                Runnable restorePreContingencyStates = networkState::restore;
+                Runnable restorePreContingencyStates = () -> restoreModifiedNetworkElements(networkState, modifiedElementsCollector);
                 addPostContingencyAndOperatorStrategyResults(woodburyContext, connectivityAnalysisResult, toFastDcResults, restorePreContingencyStates, securityAnalysisSimulationResults);
             });
+
+            lfNetwork.removeListener(modifiedElementsCollector);
 
             return new SecurityAnalysisResult(
                     new PreContingencyResult(LoadFlowResult.ComponentResult.Status.CONVERGED,
