@@ -18,6 +18,8 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.management.GarbageCollectorMXBean;
+import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -138,6 +140,8 @@ class SoaFactorStoreExperiment {
         long objectsBuildMs = (System.nanoTime() - tObj) / 1_000_000;
         long objectsHeap = usedHeap() - baseline;
         int objectsSize = objects.size();
+        // GC mark cost with the millions of objects live: each full GC must scan every factor's reference fields.
+        long objectsGcMs = measureGcTime(10);
         objects = null;
 
         long baseline2 = usedHeap();
@@ -150,13 +154,40 @@ class SoaFactorStoreExperiment {
         long storeBuildMs = (System.nanoTime() - tStore) / 1_000_000;
         long storeHeap = usedHeap() - baseline2;
         int storeSize = store.size();
+        // GC mark cost with the interned store live: int[] columns hold no references, so the collector only traces the
+        // small pools instead of millions of reference slots.
+        long storeGcMs = measureGcTime(10);
+        // keep the store reachable across the GC measurement
+        assertEquals(count, storeSize);
 
         LOGGER.info("=== SoA heap footprint for {} single-variable factors (shared ids: 100 variables x 20000 functions) ===", count);
-        LOGGER.info("  per-factor objects : {} MB ({} bytes/factor), build={} ms, size={}", objectsHeap / (1024 * 1024), objectsHeap / count, objectsBuildMs, objectsSize);
-        LOGGER.info("  SoA store          : {} MB ({} bytes/factor), build={} ms, size={}", storeHeap / (1024 * 1024), storeHeap / count, storeBuildMs, storeSize);
-        LOGGER.info("  reduction          : {} MB ({}% heap), build {} ms -> {} ms",
-                (objectsHeap - storeHeap) / (1024 * 1024), objectsHeap > 0 ? (objectsHeap - storeHeap) * 100 / objectsHeap : 0,
-                objectsBuildMs, storeBuildMs);
+        LOGGER.info("  per-factor objects : {} MB ({} bytes/factor), build={} ms, gc(10x live)={} ms, size={}",
+                objectsHeap / (1024 * 1024), objectsHeap / count, objectsBuildMs, objectsGcMs, objectsSize);
+        LOGGER.info("  SoA store (interned): {} MB ({} bytes/factor), build={} ms, gc(10x live)={} ms, size={}",
+                storeHeap / (1024 * 1024), storeHeap / count, storeBuildMs, storeGcMs, storeSize);
+        LOGGER.info("  reduction          : heap {}%, build {} ms -> {} ms, gc-mark {} ms -> {} ms ({}% less)",
+                objectsHeap > 0 ? (objectsHeap - storeHeap) * 100 / objectsHeap : 0, objectsBuildMs, storeBuildMs,
+                objectsGcMs, storeGcMs, objectsGcMs > 0 ? (objectsGcMs - storeGcMs) * 100 / objectsGcMs : 0);
+    }
+
+    /** Total GC collection time (ms) spent over {@code cycles} forced full collections, via the GC MX beans. */
+    private static long measureGcTime(int cycles) {
+        long before = totalGcTime();
+        for (int i = 0; i < cycles; i++) {
+            System.gc();
+        }
+        return totalGcTime() - before;
+    }
+
+    private static long totalGcTime() {
+        long total = 0;
+        for (GarbageCollectorMXBean bean : ManagementFactory.getGarbageCollectorMXBeans()) {
+            long t = bean.getCollectionTime();
+            if (t > 0) {
+                total += t;
+            }
+        }
+        return total;
     }
 
     private static long usedHeap() {
