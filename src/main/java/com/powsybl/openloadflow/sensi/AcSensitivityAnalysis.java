@@ -491,9 +491,9 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         Map<String, SensitivityVariableSet> variableSetsById = variableSets.stream().collect(Collectors.toMap(SensitivityVariableSet::getId, Function.identity()));
         long tRead0 = System.nanoTime();
         SensitivityFactorHolder<AcVariableType, AcEquationType> allFactorHolder = readAndCheckFactors(network, variableSetsById, factorReader, lfNetwork, breakers);
-        List<LfSensitivityFactor<AcVariableType, AcEquationType>> allLfFactors = allFactorHolder.getAllFactors();
+        int allFactorCount = allFactorHolder.getFactorCount();
         long tRead1 = System.nanoTime();
-        LOGGER.info("Running AC sensitivity analysis with {} factors and {} contingencies", allLfFactors.size(), contingencies.size());
+        LOGGER.info("Running AC sensitivity analysis with {} factors and {} contingencies", allFactorCount, contingencies.size());
 
         // next we only work with valid and valid only for function factors
         var validFactorHolder = writeInvalidFactors(allFactorHolder, resultWriter, contingencies, new HashMap<>(), parameters);
@@ -512,7 +512,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                     .filter(factor -> factor.getStatus() == LfSensitivityFactor.Status.VALID).collect(Collectors.toList()));
             if (PROFILE) {
                 LOGGER.info("AC sensi setup: readAndCheckFactors={} ms, writeInvalidFactors={} ms, createFactorGroups={} ms (allFactors={})",
-                        (tRead1 - tRead0) / 1_000_000, (tRead2 - tRead1) / 1_000_000, (System.nanoTime() - tGroup0) / 1_000_000, allLfFactors.size());
+                        (tRead1 - tRead0) / 1_000_000, (tRead2 - tRead1) / 1_000_000, (System.nanoTime() - tGroup0) / 1_000_000, allFactorCount);
             }
 
             // compute the participation for each injection factor (+1 on the injection and then -participation factor on all
