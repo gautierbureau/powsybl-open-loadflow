@@ -61,6 +61,12 @@ class AcSensitivityAnalysisAdjointTest {
         return lfp;
     }
 
+    private static LoadFlowParameters distributedSlackCacheEnabledParameters() {
+        LoadFlowParameters lfp = new LoadFlowParameters().setDistributedSlack(true);
+        OpenLoadFlowParameters.create(lfp).setNetworkCacheEnabled(true);
+        return lfp;
+    }
+
     private static SensitivityFactor injectionToBranchFlow(String branch, String gen) {
         return new SensitivityFactor(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, branch,
                 SensitivityVariableType.INJECTION_ACTIVE_POWER, gen, false, ContingencyContext.all());
@@ -116,6 +122,53 @@ class AcSensitivityAnalysisAdjointTest {
             double theta = thetaBar.get(g);
             assertEquals(s, theta, 1e-5 * (Math.abs(s) + 1e-3), "runAdjoint vs forward S for " + g);
             assertEquals(fd, theta, 2e-3 * (Math.abs(fd) + 1e-2), "runAdjoint vs finite difference for " + g);
+            maxAbs = Math.max(maxAbs, Math.abs(theta));
+        }
+        assertTrue(maxAbs > 0.1, "gradient must be non-trivial, got max |θ̄| = " + maxAbs);
+    }
+
+    @Test
+    void runAdjointHandlesDistributedSlackOnIeee14() {
+        // Distributed slack is an outer loop folded into the RHS via slackParticipationByBus
+        // (getParticipatingElements) exactly as the forward does — no Schur/augmented Jacobian — so the
+        // transpose picks it up on the shared λ. The gate is that runAdjoint reproduces the forward
+        // sensitivity S with the slack DISTRIBUTED over the machines (S differs from the single-slack case
+        // because the injection variable now carries the -participation columns).
+        //
+        // We compare against the forward S rather than a raw-targetP re-solve: perturbing a *participating*
+        // generator's targetP has part of the change reabsorbed by the slack distribution, so the physical
+        // FD's effective injection pattern is not the SPI INJECTION_ACTIVE_POWER variable (they disagree by
+        // the participation, ~2x here). That is a property of the forward injection convention, which OLF's
+        // own distributed-slack sensitivity tests validate against a convention-correct FD; here we assert
+        // the adjoint inherits it exactly.
+        Network network = IeeeCdfNetworkFactory.create14();
+        LoadFlowParameters lfp = distributedSlackCacheEnabledParameters();
+        String branch = "L1-2-1";
+
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        List<SensitivityFactor> factors = new ArrayList<>();
+        for (String g : GENS) {
+            factors.add(injectionToBranchFlow(branch, g));
+        }
+
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+        Map<String, Double> thetaBar = analysis.runAdjoint(network,
+                network.getVariantManager().getWorkingVariantId(), List.of(),
+                new SensitivityFactorModelReader(factors, network), Map.of(branch, 1.0));
+
+        SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, factors,
+                new SensitivityAnalysisRunParameters().setParameters(sensiParams));
+
+        double maxAbs = 0;
+        for (String g : GENS) {
+            double s = fwd.getBranchFlow1SensitivityValue(g, branch, SensitivityVariableType.INJECTION_ACTIVE_POWER);
+            double theta = thetaBar.get(g);
+            assertEquals(s, theta, 1e-5 * (Math.abs(s) + 1e-3), "runAdjoint vs forward S (distributed slack) for " + g);
             maxAbs = Math.max(maxAbs, Math.abs(theta));
         }
         assertTrue(maxAbs > 0.1, "gradient must be non-trivial, got max |θ̄| = " + maxAbs);
