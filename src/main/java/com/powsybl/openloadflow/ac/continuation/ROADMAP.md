@@ -28,15 +28,17 @@ Tracking the planned work for the voltage-collapse / continuation power flow pro
   recomputed, and the point is re-converged at fixed λ. Breakpoints are reported in `ContinuationResult`. On a
   two-bus test, the switch drops the nose from λ≈12.6 to λ≈3.2. Follow-ups: exact bisection to the crossing
   (currently switches at the detecting point), and PQ→PV switch-back on the lower branch.
+- **Public API + docs** — a single facade `ContinuationAnalysis` unifies both engines behind
+  `ContinuationAnalysisParameters` (engine choice, load & generation directions, per-engine stepping params),
+  with a one-argument default-config entry point and a configurable overload. Documented in
+  `docs/advanced_programming/continuation.md`. Kept as a dedicated runner rather than a `LoadFlow` provider
+  integration, since a continuation is a separate analysis, not a load flow.
 
 ## Backlog
 
-### 1. Public API + docs
-Expose both engines through the standard OpenLoadFlow surface instead of the current programmatic-only entry:
-- an `OpenLoadFlowParameters` extension (or a dedicated `ContinuationPowerFlow` runner) selecting engine
-  (stepped / predictor–corrector), the load & generation directions, and stepping parameters;
-- a result object aligned with powsybl conventions;
-- a `docs/` page (P–V curve concept, the two engines and when to use each, parameters, examples).
+Nothing scheduled — the prototype covers the planned scope. Possible future work: exact reactive-limit bisection
+and PQ→PV switch-back; a nose-robust sparse augmented factorization fallback; broader validation networks; and,
+if it graduates from prototype, promotion out of `advanced_programming` and pypowsybl bindings.
 
 ## Notes / known tradeoffs
 
@@ -46,4 +48,5 @@ Expose both engines through the standard OpenLoadFlow surface instead of the cur
   collapse, the fallback is to factor the augmented `(n+1)` matrix sparsely (non-singular at the nose, but
   re-factored each iteration).
 - **Two complementary engines.** The stepped engine gives the *practical* collapse point (with reactive limits
-  and slack distribution); the predictor–corrector gives the *full smooth* curve. Item 3 aims to narrow the gap.
+  and slack distribution); the predictor–corrector gives the *full smooth* curve, now with optional reactive
+  limits narrowing the gap.
