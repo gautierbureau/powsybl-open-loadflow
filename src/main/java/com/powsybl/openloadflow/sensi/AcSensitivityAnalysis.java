@@ -59,45 +59,41 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
     }
 
     private void calculateSensitivityValues(List<LfSensitivityFactor<AcVariableType, AcEquationType>> lfFactors,
-                                            SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups, DenseMatrix factorsState,
-                                            int contingencyIndex, SensitivityResultWriter resultWriter) {
-        Set<LfSensitivityFactor<AcVariableType, AcEquationType>> lfFactorsSet = new HashSet<>(lfFactors);
-
-        // VALID_ONLY_FOR_FUNCTION status is for factors where variable element is not in the main connected component but reference element is.
-        // Therefore, the sensitivity is known to value 0 and the reference value can be computed.
-        lfFactors.stream().filter(factor -> factor.getStatus() == LfSensitivityFactor.Status.VALID_ONLY_FOR_FUNCTION)
-                .forEach(factor -> {
-                    if (!filterSensitivityValue(0, factor.getVariableType(), factor.getFunctionType(), parameters)) {
-                        resultWriter.writeSensitivityValue(factor.getIndex(), contingencyIndex, -1, 0, unscaleFunction(factor, factor.getFunctionReference()));
-                    }
-                });
-
-        for (SensitivityFactorGroup<AcVariableType, AcEquationType> factorGroup : factorGroups.getList()) {
-            for (LfSensitivityFactor<AcVariableType, AcEquationType> factor : factorGroup.getFactors()) {
-                if (!lfFactorsSet.contains(factor)) {
-                    continue;
+                                            DenseMatrix factorsState, int contingencyIndex, SensitivityResultWriter resultWriter) {
+        // Iterate the factors directly: each valid factor already knows its factor group (and hence the column of the
+        // solved states matrix to read), so there is no need to scan every factor group and filter by membership.
+        for (LfSensitivityFactor<AcVariableType, AcEquationType> factor : lfFactors) {
+            // VALID_ONLY_FOR_FUNCTION status is for factors where variable element is not in the main connected component
+            // but reference element is. Therefore, the sensitivity is known to value 0 and the reference value can be computed.
+            if (factor.getStatus() == LfSensitivityFactor.Status.VALID_ONLY_FOR_FUNCTION) {
+                if (!filterSensitivityValue(0, factor.getVariableType(), factor.getFunctionType(), parameters)) {
+                    resultWriter.writeSensitivityValue(factor.getIndex(), contingencyIndex, -1, 0, unscaleFunction(factor, factor.getFunctionReference()));
                 }
-                double sensi;
-                double ref;
-                if (factor.getSensitivityValuePredefinedResult() != null) {
-                    sensi = factor.getSensitivityValuePredefinedResult();
-                } else {
-                    if (!factor.getFunctionEquationTerm().isActive()) {
-                        throw new PowsyblException("Found an inactive equation for a factor that has no predefined result");
-                    }
-                    sensi = factor.getFunctionEquationTerm().calculateSensi(factorsState, factorGroup.getIndex());
-                    // Add the direct term (explicit dependence of the function on the variable), if any
-                    sensi += computeParameterDirectPartial(factor);
+                continue;
+            }
+            if (factor.getStatus() != LfSensitivityFactor.Status.VALID) {
+                continue;
+            }
+            double sensi;
+            double ref;
+            if (factor.getSensitivityValuePredefinedResult() != null) {
+                sensi = factor.getSensitivityValuePredefinedResult();
+            } else {
+                if (!factor.getFunctionEquationTerm().isActive()) {
+                    throw new PowsyblException("Found an inactive equation for a factor that has no predefined result");
                 }
-                if (factor.getFunctionPredefinedResult() != null) {
-                    ref = factor.getFunctionPredefinedResult();
-                } else {
-                    ref = factor.getFunctionReference();
-                }
-                double unscaledSensi = unscaleSensitivity(factor, sensi);
-                if (!filterSensitivityValue(unscaledSensi, factor.getVariableType(), factor.getFunctionType(), parameters)) {
-                    resultWriter.writeSensitivityValue(factor.getIndex(), contingencyIndex, -1, unscaledSensi, unscaleFunction(factor, ref));
-                }
+                sensi = factor.getFunctionEquationTerm().calculateSensi(factorsState, factor.getGroup().getIndex());
+                // Add the direct term (explicit dependence of the function on the variable), if any
+                sensi += computeParameterDirectPartial(factor);
+            }
+            if (factor.getFunctionPredefinedResult() != null) {
+                ref = factor.getFunctionPredefinedResult();
+            } else {
+                ref = factor.getFunctionReference();
+            }
+            double unscaledSensi = unscaleSensitivity(factor, sensi);
+            if (!filterSensitivityValue(unscaledSensi, factor.getVariableType(), factor.getFunctionType(), parameters)) {
+                resultWriter.writeSensitivityValue(factor.getIndex(), contingencyIndex, -1, unscaledSensi, unscaleFunction(factor, ref));
             }
         }
     }
@@ -231,14 +227,34 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
 
         // we make the assumption that we ran a loadflow before, and thus this jacobian is the right one
 
-        // solve system
+        // solve system and calculate sensitivity values
+        solveAndCalculateSensitivityValues(context, factorGroups, participationByBus, lfFactors, lfFactors, contingencyIndex, resultWriter);
+    }
+
+    /**
+     * Runs the transposed-Jacobian solve at the current operating point and writes out the resulting sensitivity
+     * values. It assembles the factor-group right-hand side, overlays the SVC pilot columns, solves
+     * {@code Jᵀ·x = RHS} in place, refreshes the function references and finally extracts the sensitivity values.
+     * The solved states matrix is returned so the caller can reuse it (e.g. the base-case states are reused for
+     * no-impact contingencies).
+     *
+     * @param factorsForReferences   factors whose function references are refreshed from the solved state; the base
+     *                               case refreshes every valid factor so that no-impact contingencies can reuse the
+     *                               base states, whereas a contingency refreshes only its own factors.
+     * @param factorsForSensitivities factors for which sensitivity values are actually written.
+     */
+    private DenseMatrix solveAndCalculateSensitivityValues(AcLoadFlowContext context,
+                                                           SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups,
+                                                           Map<LfBus, Double> participationByBus,
+                                                           List<LfSensitivityFactor<AcVariableType, AcEquationType>> factorsForReferences,
+                                                           List<LfSensitivityFactor<AcVariableType, AcEquationType>> factorsForSensitivities,
+                                                           int contingencyIndex, SensitivityResultWriter resultWriter) {
         DenseMatrix factorsStates = initFactorsRhs(context.getEquationSystem(), factorGroups, participationByBus); // this is the rhs for the moment
         fillSvcPilotFactorsRhs(factorGroups, factorsStates, context);
         context.getJacobianMatrix().solveTransposed(factorsStates);
-        setFunctionReferences(lfFactors);
-
-        // calculate sensitivity values
-        calculateSensitivityValues(lfFactors, factorGroups, factorsStates, contingencyIndex, resultWriter);
+        setFunctionReferences(factorsForReferences);
+        calculateSensitivityValues(factorsForSensitivities, factorsStates, contingencyIndex, resultWriter);
+        return factorsStates;
     }
 
     /**
@@ -479,19 +495,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
 
             // compute the participation for each injection factor (+1 on the injection and then -participation factor on all
             // buses that contain elements participating to slack distribution
-
-            Map<LfBus, Double> slackParticipationByBus;
-            if (lfParameters.isDistributedSlack()) {
-                List<ParticipatingElement> participatingElements = getParticipatingElements(lfNetwork.getBuses(), lfParameters.getBalanceType(), lfParametersExt);
-                slackParticipationByBus = participatingElements.stream().collect(Collectors.toMap(
-                        ParticipatingElement::getLfBus,
-                        element -> -element.getFactor(),
-                        Double::sum
-                ));
-            } else {
-                slackParticipationByBus = Collections.singletonMap(lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().getFirst(), -1d);
-
-            }
+            Map<LfBus, Double> slackParticipationByBus = computeSlackParticipationByBus(lfNetwork, lfNetwork.getBuses(), lfParameters, lfParametersExt);
 
             // if we have at least one bus target voltage linked to a ratio tap changer, we have to rebuild the AC equation
             // system obtained just before the transformer steps rounding.
@@ -504,17 +508,10 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             }
 
             // we make the assumption that we ran a loadflow before, and thus this jacobian is the right one
-
-            // initialize right hand side from valid factors
-            DenseMatrix factorsStates = initFactorsRhs(context.getEquationSystem(), factorGroups, slackParticipationByBus); // this is the rhs for the moment
-            fillSvcPilotFactorsRhs(factorGroups, factorsStates, context);
-
-            // solve system
-            context.getJacobianMatrix().solveTransposed(factorsStates);
-
-            // calculate sensitivity values
-            setFunctionReferences(validLfFactors);
-            calculateSensitivityValues(validFactorHolder.getFactorsForBaseNetwork(), factorGroups, factorsStates, -1, resultWriter);
+            // solve system and calculate base-case sensitivity values. Function references are refreshed for every valid
+            // factor (not only the base-network ones) so that no-impact contingencies can reuse these base-case states.
+            DenseMatrix factorsStates = solveAndCalculateSensitivityValues(context, factorGroups, slackParticipationByBus,
+                    validLfFactors, validFactorHolder.getFactorsForBaseNetwork(), -1, resultWriter);
 
             NetworkState networkState = NetworkState.save(lfNetwork);
 
@@ -539,13 +536,29 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                             AcSolverUtil.initStateVector(lfNetwork, context.getEquationSystem(), context.getParameters().getVoltageInitializer());
 
                             calculateSensitivityValues(validFactorHolder.getFactorsForContingency(contingency.getContingency().getId()),
-                                factorGroups, factorsStates, contingency.getIndex(), resultWriter);
+                                factorsStates, contingency.getIndex(), resultWriter);
                             // write contingency status
                             resultWriter.writeStateStatus(contingency.getIndex(), -1, SensitivityAnalysisResult.Status.NO_IMPACT);
                         });
             });
         }
 
+    }
+
+    /**
+     * Builds the slack participation map used as the injection right-hand side: {@code -participationFactor} on every
+     * bus participating to slack distribution when the slack is distributed, or {@code -1} on the single slack bus
+     * otherwise. Shared by the base case (over all network buses) and the post-contingency case (over the buses still
+     * connected to the slack component).
+     */
+    private Map<LfBus, Double> computeSlackParticipationByBus(LfNetwork lfNetwork, Collection<LfBus> buses,
+                                                              LoadFlowParameters lfParameters, OpenLoadFlowParameters lfParametersExt) {
+        if (lfParameters.isDistributedSlack()) {
+            return getParticipatingElements(buses, lfParameters.getBalanceType(), lfParametersExt).stream()
+                .collect(Collectors.toMap(ParticipatingElement::getLfBus, element -> -element.getFactor(), Double::sum));
+        } else {
+            return Collections.singletonMap(lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().getFirst(), -1d);
+        }
     }
 
     private void computeLfContingency(LfContingency lfContingency, LfNetwork lfNetwork, LoadFlowParameters lfParameters,
@@ -567,7 +580,6 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
 
         setPredefinedResults(contingencyFactors, lfContingency.getDisabledNetwork(), contingency);
 
-        Map<LfBus, Double> postContingencySlackParticipationByBus;
         Set<LfBus> slackConnectedComponent;
         boolean hasChanged = false;
         if (lfContingency.getDisabledNetwork().getBuses().isEmpty()) {
@@ -578,7 +590,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             // contingency breaking connectivity
             LOGGER.debug("Contingency '{}' with loss of connectivity", lfContingency.getId());
             // we check if factors are still in the main component
-            slackConnectedComponent = new HashSet<>(lfNetwork.getBuses()).stream()
+            slackConnectedComponent = lfNetwork.getBuses().stream()
                 .filter(Predicate.not(lfContingency.getDisabledNetwork().getBuses()::contains))
                 .collect(Collectors.toSet());
             // we recompute GLSK weights if needed
@@ -587,12 +599,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
 
         // compute the participation for each injection factor (+1 on the injection and then -participation factor on all
         // buses that contain elements participating to slack distribution)
-        if (lfParameters.isDistributedSlack()) {
-            postContingencySlackParticipationByBus = getParticipatingElements(slackConnectedComponent, lfParameters.getBalanceType(), contingencyLfParametersExt).stream()
-                .collect(Collectors.toMap(ParticipatingElement::getLfBus, element -> -element.getFactor(), Double::sum));
-        } else {
-            postContingencySlackParticipationByBus = Collections.singletonMap(lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().getFirst(), -1d);
-        }
+        Map<LfBus, Double> postContingencySlackParticipationByBus = computeSlackParticipationByBus(lfNetwork, slackConnectedComponent, lfParameters, contingencyLfParametersExt);
         calculatePostContingencySensitivityValues(contingencyFactors, lfContingency, lfNetwork, context, factorGroups, postContingencySlackParticipationByBus,
             lfParameters, contingencyLfParametersExt, lfContingency.getIndex(), resultWriter, variablesTargetVoltageInfo.hasTransformerTargetVoltage());
 
