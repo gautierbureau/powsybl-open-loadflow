@@ -17,6 +17,7 @@ import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
+import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.sensitivity.SensitivityAnalysis;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityAnalysisResult;
@@ -298,5 +299,87 @@ class AcSensitivityAnalysisAdjointTest {
             assertEquals(expected, thetaBar.get(g), 1e-5 * (Math.abs(expected) + 1e-3),
                     "weighted Sᵀȳ for " + g);
         }
+    }
+
+    // y -> y + dY at constant ksi: scale R and X so the series admittance modulus shifts by dY; re-solve on a
+    // fresh network and return [P1(variableLine), P1(crossBranch)] in MW.
+    private static double[] admittancePerturbedFlows(LoadFlowParameters lfp, String variableLine, String crossBranch,
+                                                     double rBase, double xBase, double yBase, double dY) {
+        Network n = IeeeCdfNetworkFactory.create14();
+        double scale = yBase / (yBase + dY);
+        n.getLine(variableLine).setR(rBase * scale).setX(xBase * scale);
+        LoadFlow.find("OpenLoadFlow").run(n, lfp);
+        return new double[] {n.getBranch(variableLine).getTerminal1().getP(),
+            n.getBranch(crossBranch).getTerminal1().getP()};
+    }
+
+    @Test
+    void runAdjointHandlesLineAdmittanceLeverOnIeee14() {
+        // TVC's line lever: BRANCH_ADMITTANCE = the series admittance modulus y = 1/hypot(R,X) at constant ksi.
+        // The KEY case is a SELF-sensitivity (the monitored function is on the very branch whose admittance is
+        // the variable): then AcSensitivityAnalysis.computeParameterDirectPartial contributes an explicit
+        // direct term on top of the through-Jacobian term. analyseAdjoint adds yBar*computeParameterDirectPartial
+        // exactly as the forward's calculateSensitivityValues adds sensi += computeParameterDirectPartial, so
+        // this gate validates the adjoint direct-term handling (and its sign). A CROSS factor (function on a
+        // different branch) has a zero direct term and checks the indirect term only.
+        //
+        // Scaling: runAdjoint returns RAW per-unit; the forward S getter unscales by funcBase/varBase, so
+        // θ̄ = S * varBase/funcBase. For BRANCH_ACTIVE_POWER (funcBase = PerUnit.SB) and BRANCH_ADMITTANCE
+        // (varBase = 1/PerUnit.zb(Vnom_bus2)) that factor is exactly 1/Vnom(bus2)^2. The physical re-solve FD
+        // (MW per physical siemens) equals the unscaled forward S, so the same factor maps it to θ̄.
+        String variableLine = "L2-3-1"; // the controllable line -> its series admittance is the lever
+        String crossBranch = "L1-5-1";  // a different monitored branch (direct term = 0)
+        LoadFlowParameters lfp = cacheEnabledParameters();
+
+        Network network = IeeeCdfNetworkFactory.create14();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        List<SensitivityFactor> factors = List.of(
+                new SensitivityFactor(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, variableLine,
+                        SensitivityVariableType.BRANCH_ADMITTANCE, variableLine, false, ContingencyContext.all()),
+                new SensitivityFactor(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, crossBranch,
+                        SensitivityVariableType.BRANCH_ADMITTANCE, variableLine, false, ContingencyContext.all()));
+
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+
+        String variantId = network.getVariantManager().getWorkingVariantId();
+        double thetaSelf = analysis.runAdjoint(network, variantId, List.of(), factors, Map.of(variableLine, 1.0)).get(variableLine);
+        double thetaCross = analysis.runAdjoint(network, variantId, List.of(), factors, Map.of(crossBranch, 1.0)).get(variableLine);
+
+        // forward S (unscaled: physical MW per physical siemens)
+        SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, factors,
+                new SensitivityAnalysisRunParameters().setParameters(sensiParams));
+        double sSelf = fwd.getBranchFlow1SensitivityValue(variableLine, variableLine, SensitivityVariableType.BRANCH_ADMITTANCE);
+        double sCross = fwd.getBranchFlow1SensitivityValue(variableLine, crossBranch, SensitivityVariableType.BRANCH_ADMITTANCE);
+
+        // raw-per-unit conversion factor varBase/funcBase = 1/Vnom(bus2)^2 (mirrors unscaleSensitivity)
+        double vnom2 = network.getBranch(variableLine).getTerminal2().getVoltageLevel().getNominalV();
+        double toRaw = (1.0 / PerUnit.zb(vnom2)) / PerUnit.SB;
+
+        assertEquals(sSelf * toRaw, thetaSelf, 1e-4 * (Math.abs(sSelf * toRaw) + 1e-6),
+                "runAdjoint vs forward S, self (direct term)");
+        assertEquals(sCross * toRaw, thetaCross, 1e-4 * (Math.abs(sCross * toRaw) + 1e-6),
+                "runAdjoint vs forward S, cross");
+
+        // physical re-solve central finite difference on the admittance modulus
+        double rBase = network.getLine(variableLine).getR();
+        double xBase = network.getLine(variableLine).getX();
+        double yBase = 1.0 / Math.hypot(rBase, xBase);
+        double dY = 1e-4 * yBase;
+        double[] pPlus = admittancePerturbedFlows(lfp, variableLine, crossBranch, rBase, xBase, yBase, dY);
+        double[] pMinus = admittancePerturbedFlows(lfp, variableLine, crossBranch, rBase, xBase, yBase, -dY);
+        double fdSelf = (pPlus[0] - pMinus[0]) / (2 * dY);
+        double fdCross = (pPlus[1] - pMinus[1]) / (2 * dY);
+
+        assertEquals(fdSelf * toRaw, thetaSelf, 2e-2 * (Math.abs(fdSelf * toRaw) + 1e-6),
+                "runAdjoint vs re-solve FD, self (direct term)");
+        assertEquals(fdCross * toRaw, thetaCross, 2e-2 * (Math.abs(fdCross * toRaw) + 1e-6),
+                "runAdjoint vs re-solve FD, cross");
+
+        // the direct term makes the self-sensitivity substantial (and it must have the right sign to match S/FD)
+        assertTrue(Math.abs(thetaSelf) > 1e-3, "self-sensitivity (with direct term) must be non-trivial, got " + thetaSelf);
     }
 }
