@@ -217,9 +217,13 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                         .toList();
             } else {
                 // SecurityAnalysisPartitioner handles both the operator-strategy-balanced case and the plain (SLICE)
-                // contingency split
+                // contingency split. Copies are much cheaper than rebuilds, so with COPY mode we spread the operator
+                // strategies more aggressively (lower fixed cost per extra partition).
+                double partitionFixedCost = securityAnalysisParametersExt.getNetworkPerThreadMode() == OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY
+                        ? SecurityAnalysisPartitioner.PARTITION_FIXED_COST_COPY
+                        : SecurityAnalysisPartitioner.PARTITION_FIXED_COST_REBUILD;
                 partitions = SecurityAnalysisPartitioner.partition(contingencies, operatorStrategies,
-                        securityAnalysisParametersExt.getThreadCount(), balanceOperatorStrategies);
+                        securityAnalysisParametersExt.getThreadCount(), balanceOperatorStrategies, partitionFixedCost);
             }
             var contingenciesPartitions = partitions.stream().map(SecurityAnalysisPartitioner.Partition::contingencies).toList();
 
