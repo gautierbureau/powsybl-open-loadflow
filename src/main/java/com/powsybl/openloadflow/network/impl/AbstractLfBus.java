@@ -50,7 +50,9 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     protected boolean generatorReactivePowerControlEnabled = false;
 
-    protected Double generationTargetP;
+    protected double generationTargetP;
+
+    protected boolean generationTargetPValid;
 
     private double generationTargetQ = Double.NaN;
 
@@ -72,7 +74,9 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     protected final List<LfLoad> loads = new ArrayList<>();
 
-    protected Double loadTargetP;
+    protected double loadTargetP;
+
+    protected boolean loadTargetPValid;
 
     protected Double loadTargetQ;
 
@@ -413,7 +417,7 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     @Override
     public void invalidateGenerationTargetP() {
-        generationTargetP = null;
+        generationTargetPValid = false;
         if (forceTargetQInReactiveLimits && !isGenerationTargetQFrozen) {
             invalidateGenerationTargetQ();
         }
@@ -427,11 +431,13 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     @Override
     public double getGenerationTargetP() {
-        if (generationTargetP == null) {
-            generationTargetP = 0.0;
+        if (!generationTargetPValid) {
+            double sum = 0.0;
             for (LfGenerator generator : generators) {
-                generationTargetP += generator.getTargetP();
+                sum += generator.getTargetP();
             }
+            generationTargetP = sum;
+            generationTargetPValid = true;
         }
         return generationTargetP;
     }
@@ -477,16 +483,18 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     @Override
     public void invalidateLoadTargetP() {
-        loadTargetP = null;
+        loadTargetPValid = false;
     }
 
     @Override
     public double getLoadTargetP() {
-        if (loadTargetP == null) {
-            loadTargetP = 0.0;
+        if (!loadTargetPValid) {
+            double sum = 0.0;
             for (LfLoad load : loads) {
-                loadTargetP += load.getTargetP() * load.getLoadModel().flatMap(lm -> lm.getExpTermP(0).map(LfLoadModel.ExpTerm::c)).orElse(1d);
+                sum += load.getTargetP() * load.getLoadModel().flatMap(lm -> lm.getExpTermP(0).map(LfLoadModel.ExpTerm::c)).orElse(1d);
             }
+            loadTargetP = sum;
+            loadTargetPValid = true;
         }
         return loadTargetP + getFictitiousInjectionTargetP();
     }
