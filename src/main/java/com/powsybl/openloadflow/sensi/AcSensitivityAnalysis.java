@@ -16,6 +16,7 @@ import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.math.matrix.MatrixFactory;
+import com.powsybl.openloadflow.NetworkCache;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
@@ -42,6 +43,7 @@ import com.powsybl.openloadflow.util.Lists2;
 import com.powsybl.openloadflow.util.Reports;
 import com.powsybl.openloadflow.util.mt.ContingencyMultiThreadHelper;
 import com.powsybl.sensitivity.*;
+import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.*;
 import java.util.concurrent.ExecutionException;
@@ -298,19 +300,26 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         fillSvcPilotFactorsRhs(factorGroups, parameterRhs, context);
 
         // x̄ = Σ_f ȳ_f · (∂f/∂x): transpose of calculateSensi — scatter der() into the equation rows.
+        // ȳ is per monitored FUNCTION, so add each function's ∂f/∂x exactly once even though a function
+        // paired with several variables produces several factors that share the same cotangent.
         double[] xBar = new double[equationCount];
+        Set<Pair<SensitivityFunctionType, String>> seenFunctions = new HashSet<>();
         for (var e : cotangents.entrySet()) {
             double yBar = e.getValue();
             if (yBar == 0.0) {
                 continue;
             }
+            var factor = e.getKey();
+            if (!seenFunctions.add(Pair.of(factor.getFunctionType(), factor.getFunctionId()))) {
+                continue;
+            }
             // getFunctionEquationTerm() is declared as Derivable; the in-scope AC function types are all
             // EquationTerms, which expose getVariables()/der() (same cast as LoadFlowAdjoint.scatter).
-            if (!(e.getKey().getFunctionEquationTerm() instanceof EquationTerm)) {
+            if (!(factor.getFunctionEquationTerm() instanceof EquationTerm)) {
                 continue;
             }
             EquationTerm<AcVariableType, AcEquationType> functionTerm =
-                    (EquationTerm<AcVariableType, AcEquationType>) e.getKey().getFunctionEquationTerm();
+                    (EquationTerm<AcVariableType, AcEquationType>) factor.getFunctionEquationTerm();
             for (Variable<AcVariableType> variable : functionTerm.getVariables()) {
                 int row = variable.getRow();
                 if (row >= 0) {
@@ -341,6 +350,75 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             thetaBar[col] = thetaG;
         }
         return thetaBar;
+    }
+
+    /**
+     * Public reverse-mode / VJP entry point — the adjoint sibling of {@link #analyse}. Reuses the AC
+     * load flow OpenLoadFlow retained in the network cache ({@code networkCacheEnabled}): the caller
+     * must have run a cached AC load flow on {@code network} first. The factor declaration (functions ×
+     * variables) is the same as the forward; instead of materialising the sensitivity matrix {@code S},
+     * it contracts an output cotangent to return {@code θ̄ = Sᵀ·ȳ}.
+     *
+     * @param factorReader          the (function, variable) declaration, as in the forward.
+     * @param functionCotangentsById dL/dfunction, keyed by monitored function id (same value shared by
+     *                               every factor sharing that function).
+     * @return dL/dvariable, keyed by variable id.
+     */
+    public Map<String, Double> runAdjoint(Network network, String workingVariantId,
+                                          List<SensitivityVariableSet> variableSets,
+                                          SensitivityFactorReader factorReader,
+                                          Map<String, Double> functionCotangentsById) {
+        Objects.requireNonNull(network);
+        Objects.requireNonNull(factorReader);
+        Objects.requireNonNull(functionCotangentsById);
+        network.getVariantManager().setWorkingVariant(workingVariantId);
+
+        NetworkCache.Entry<NetworkCache.LfInput, NetworkCache.AcLfValue> entry =
+                NetworkCache.AC_LF_INSTANCE.findEntry(network)
+                        .orElseThrow(() -> new PowsyblException("No cached AC load flow for this network "
+                                + "— run a load flow with networkCacheEnabled=true before runAdjoint."));
+        NetworkCache.AcLfValue value = entry.getValues().get(0); // main synchronous network
+        AcLoadFlowContext context = value.getContext();
+        LfNetwork lfNetwork = value.getNetwork();
+        boolean breakers = context.getParameters().getNetworkParameters().isBreakers();
+
+        Map<String, SensitivityVariableSet> variableSetsById = variableSets.stream()
+                .collect(Collectors.toMap(SensitivityVariableSet::getId, Function.identity()));
+        SensitivityFactorHolder<AcVariableType, AcEquationType> allFactorHolder =
+                readAndCheckFactors(network, variableSetsById, factorReader, lfNetwork, breakers);
+        List<LfSensitivityFactor<AcVariableType, AcEquationType>> validLfFactors = allFactorHolder.getAllFactors().stream()
+                .filter(f -> f.getStatus() == LfSensitivityFactor.Status.VALID)
+                .collect(Collectors.toList());
+        SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups = createFactorGroups(validLfFactors);
+
+        LoadFlowParameters lfParameters = parameters.getLoadFlowParameters();
+        Map<LfBus, Double> slackParticipationByBus;
+        if (lfParameters.isDistributedSlack()) {
+            List<ParticipatingElement> participatingElements = getParticipatingElements(
+                    lfNetwork.getBuses(), lfParameters.getBalanceType(), OpenLoadFlowParameters.get(lfParameters));
+            slackParticipationByBus = participatingElements.stream().collect(Collectors.toMap(
+                    ParticipatingElement::getLfBus, e -> -e.getFactor(), Double::sum));
+        } else {
+            slackParticipationByBus = Collections.singletonMap(
+                    lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().getFirst(), -1d);
+        }
+
+        // cotangent per factor = the cotangent of its monitored function
+        Map<LfSensitivityFactor<AcVariableType, AcEquationType>, Double> cotangents = new HashMap<>();
+        for (var factor : validLfFactors) {
+            Double yBar = functionCotangentsById.get(factor.getFunctionId());
+            if (yBar != null && yBar != 0.0) {
+                cotangents.put(factor, yBar);
+            }
+        }
+
+        double[] thetaBar = analyseAdjoint(context, factorGroups, cotangents, slackParticipationByBus);
+
+        Map<String, Double> gradientByVariableId = new LinkedHashMap<>();
+        for (var group : factorGroups.getList()) {
+            gradientByVariableId.put(group.getFactors().get(0).getVariableId(), thetaBar[group.getIndex()]);
+        }
+        return gradientByVariableId;
     }
 
     private static boolean runLoadFlow(AcLoadFlowContext context, boolean isRunningBaseSituation) {
