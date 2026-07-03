@@ -593,14 +593,18 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         lfNetwork.setReportNode(postContSimReportNode);
 
         List<LfSensitivityFactor<AcVariableType, AcEquationType>> contingencyFactors = validFactorHolder.getFactorsForContingency(lfContingency.getId());
+        long tStart = System.nanoTime();
         contingencyFactors.forEach(lfFactor -> {
             lfFactor.setSensitivityValuePredefinedResult(null);
             lfFactor.setFunctionPredefinedResult(null);
         });
+        long tReset = System.nanoTime();
 
         lfContingency.apply(lfParameters.getBalanceType());
+        long tApply = System.nanoTime();
 
         setPredefinedResults(contingencyFactors, lfContingency.getDisabledNetwork(), contingency);
+        long tPredefined = System.nanoTime();
 
         Set<LfBus> slackConnectedComponent;
         boolean hasChanged = false;
@@ -630,6 +634,15 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         }
         networkState.restore();
 
+        if (PROFILE) {
+            // Stateless per-contingency log (no shared instance state): the predefined-results handling that #2 targets
+            // is the reset loop + setPredefinedResults, versus the total post-contingency cost (dominated by the AC
+            // load-flow re-solve). resetPredefined + setPredefined vs total tells us whether de-boxing that path matters.
+            long tEnd = System.nanoTime();
+            LOGGER.info("post-contingency '{}': resetPredefined={} ms, setPredefinedResults={} ms, applyContingency={} ms, total={} ms (contingencyFactors={})",
+                    lfContingency.getId(), (tReset - tStart) / 1_000_000, (tPredefined - tApply) / 1_000_000,
+                    (tApply - tReset) / 1_000_000, (tEnd - tStart) / 1_000_000, contingencyFactors.size());
+        }
     }
 
     private OpenLoadFlowParameters applyGenericContingencyParameters(AcLoadFlowContext context, LoadFlowParameters lfParameters,
