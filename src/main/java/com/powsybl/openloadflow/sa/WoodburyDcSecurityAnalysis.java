@@ -207,9 +207,11 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 woodburyContext.modifiedMonitoredElementsParameters());
         postContingencyNetworkResult.update(isBranchDisabledDueToContingency);
 
-        // detect violations
+        // detect violations; in DC the bus voltages are left undefined (set to NaN), so bus voltage violations
+        // cannot occur and the network-wide bus scan is skipped
+        boolean detectBusVoltageViolations = !loadFlowContext.getParameters().isSetVToNan();
         var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, woodburyContext.limitReductions, woodburyContext.violationsParameters);
-        postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency);
+        postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency, detectBusVoltageViolations);
 
         // connectivity result due to the contingency
         var connectivityResult = new ConnectivityResult(
@@ -260,10 +262,12 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 woodburyContext.modifiedMonitoredElementsParameters);
         postActionsNetworkResult.update(isBranchDisabledDueToContingency);
 
-        // detect violations
+        // detect violations; in DC the bus voltages are left undefined (set to NaN), so bus voltage violations
+        // cannot occur and the network-wide bus scan is skipped
+        boolean detectBusVoltageViolations = !loadFlowContext.getParameters().isSetVToNan();
         var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager,
                 woodburyContext.limitReductions, woodburyContext.violationsParameters);
-        postActionsViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency);
+        postActionsViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency, detectBusVoltageViolations);
 
         return new OperatorStrategyResult(operatorStrategy,
             List.of(

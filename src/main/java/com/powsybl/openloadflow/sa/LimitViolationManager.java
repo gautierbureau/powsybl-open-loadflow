@@ -74,13 +74,26 @@ public class LimitViolationManager {
      * @param isBranchDisabled predicate to evaluate if a branch of the network is disabled or not
      */
     public void detectViolations(LfNetwork network, Predicate<LfBranch> isBranchDisabled) {
+        detectViolations(network, isBranchDisabled, true);
+    }
+
+    /**
+     * Detect violations on branches and on buses
+     * @param network network on which the violation limits are checked
+     * @param isBranchDisabled predicate to evaluate if a branch of the network is disabled or not
+     * @param detectBusVoltageViolations whether bus voltage violations should be looked for; a DC security analysis
+     *                                   leaves the bus voltages undefined, so it can skip the network-wide bus scan
+     */
+    public void detectViolations(LfNetwork network, Predicate<LfBranch> isBranchDisabled, boolean detectBusVoltageViolations) {
         Objects.requireNonNull(network);
 
         // Detect violation limits on branches
         network.getBranches().stream().filter(b -> !isBranchDisabled.test(b)).forEach(this::detectBranchViolations);
 
         // Detect violation limits on buses
-        network.getBuses().stream().filter(b -> !b.isDisabled()).forEach(this::detectBusViolations);
+        if (detectBusVoltageViolations) {
+            network.getBuses().stream().filter(b -> !b.isDisabled()).forEach(this::detectBusViolations);
+        }
 
         // Detect voltage angle limits
         network.getVoltageAngleLimits().stream()
