@@ -10,9 +10,7 @@ package com.powsybl.openloadflow.ac.continuation;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
-import com.powsybl.math.matrix.DenseMatrix;
-import com.powsybl.math.matrix.LUDecomposition;
-import com.powsybl.math.matrix.Matrix;
+import com.powsybl.math.matrix.MatrixException;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
@@ -38,6 +36,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -66,9 +65,11 @@ import java.util.Objects;
  * limits, ...) are intentionally not applied during the continuation, so the traced curve is smooth. For a
  * collapse point accounting for those controls, use the stepped {@link ContinuationPowerFlow}.</p>
  *
- * <p>The augmented linear system is solved with a dense factorization ({@code O(n^3)} per iteration), which is
- * fine for the small and medium networks this prototype targets; a production implementation would use a sparse
- * bordered solve reusing the existing {@link JacobianMatrix} factorization.</p>
+ * <p>The augmented linear system is solved by block elimination (bordering) that reuses the sparse LU
+ * factorization of {@code F_x} kept by the existing {@link JacobianMatrix}: each corrector iteration performs
+ * two sparse back-substitutions rather than factoring a separate {@code (n+1)x(n+1)} matrix. The bordering
+ * relies on {@code F_x} being non-singular; exactly at the nose it is singular, but the continuation points
+ * straddle that point, and a singular solve there is caught and turned into a step reduction.</p>
  *
  * @author Claude
  */
@@ -155,29 +156,43 @@ public class PredictorCorrectorContinuationPowerFlow {
         }
 
         /**
-         * Solves the augmented system {@code A_aug . z = rhs} where
-         * {@code A_aug = [F_x F_lambda; c^T d]}, using a dense factorization. The parameterization row is
-         * {@code c = e_k, d = 0} for a state-variable parameter, or {@code c = 0, d = 1} for the lambda parameter.
+         * Solves the augmented system {@code [A b; c^T d] . [dx; dlambda] = [r1; r2]} where {@code A = F_x} and
+         * {@code b = F_lambda}, by block elimination (bordering) that reuses the sparse factorization of {@code A}
+         * held by the existing {@link JacobianMatrix} &mdash; no dense matrix is built:
+         * <pre>
+         *   u = A^-1 r1,   v = A^-1 b
+         *   dlambda = (r2 - c^T u) / (d - c^T v)
+         *   dx = u - dlambda v
+         * </pre>
+         * The parameterization row is {@code c = e_k, d = 0} for a state-variable parameter, or
+         * {@code c = 0, d = 1} for the lambda parameter. Each {@code A^-1} apply is a sparse back-substitution
+         * on the LU that the Jacobian keeps up to date at the current state.
+         *
+         * @return {@code [dx (variable indexed); dlambda]}, or an all-NaN vector if {@code A} is singular.
          */
         private double[] solveAugmented(int paramVariable, double[] rhs) {
-            Matrix m = j.getMatrix(); // m = F_x^T (stored transposed), updated to the current state
-            DenseMatrix aAug = new DenseMatrix(n + 1, n + 1);
-            // A_aug[equation c][variable r] = F_x[c][r] = m[r][c]
-            m.iterateNonZeroValue((row, col, value) -> aAug.set(col, row, value));
-            // border column: d F / d lambda
-            for (int c = 0; c < n; c++) {
-                aAug.set(c, n, fLambda[c]);
+            double[] u = Arrays.copyOf(rhs, n); // r1, overwritten in place with A^-1 r1
+            double[] v = fLambda.clone();       // b, overwritten in place with A^-1 b
+            try {
+                // both solves reuse the same LU of the current F_x (state is unchanged between them)
+                j.solveTransposed(u);
+                j.solveTransposed(v);
+            } catch (MatrixException e) {
+                // A is singular (exactly at the nose): signal failure, the caller reduces the step
+                double[] nan = new double[n + 1];
+                Arrays.fill(nan, Double.NaN);
+                return nan;
             }
-            // border row: parameterization equation
-            if (paramVariable == PARAM_LAMBDA) {
-                aAug.set(n, n, 1.0);
-            } else {
-                aAug.set(n, paramVariable, 1.0);
+            double r2 = rhs[n];
+            double cu = paramVariable == PARAM_LAMBDA ? 0.0 : u[paramVariable];
+            double cv = paramVariable == PARAM_LAMBDA ? 0.0 : v[paramVariable];
+            double d = paramVariable == PARAM_LAMBDA ? 1.0 : 0.0;
+            double dLambda = (r2 - cu) / (d - cv);
+            double[] z = new double[n + 1];
+            for (int r = 0; r < n; r++) {
+                z[r] = u[r] - dLambda * v[r];
             }
-            double[] z = rhs.clone();
-            try (LUDecomposition lu = aAug.decomposeLU()) {
-                lu.solve(z);
-            }
+            z[n] = dLambda;
             return z;
         }
 
