@@ -76,21 +76,47 @@ class SecurityAnalysisPartitionerTest {
 
     @Test
     void singleContingencyManyStrategiesSpreadOverThreads() {
+        // a single contingency carrying many operator strategies: contingency-level parallelization is useless, so the
+        // strategies must be spread over the threads (the extra network builds are worth it given the number of strategies)
         List<Contingency> contingencies = List.of(contingency("c1"));
         List<OperatorStrategy> operatorStrategies = new ArrayList<>();
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 40; i++) {
             operatorStrategies.add(specificStrategy("s" + i, "c1"));
         }
 
         List<SecurityAnalysisPartitioner.Partition> partitions = SecurityAnalysisPartitioner.partition(contingencies, operatorStrategies, 4, true);
 
         assertEquals(4, partitions.size());
-        // the single contingency is simulated by every partition that runs one of its strategies
+        // the strategies are spread over several partitions
+        long partitionsWithStrategies = partitions.stream().filter(p -> !p.operatorStrategies().isEmpty()).count();
+        assertTrue(partitionsWithStrategies > 1, "operator strategies should be spread over several partitions");
+        // every partition that runs a strategy also simulates the (single) contingency
         for (SecurityAnalysisPartitioner.Partition partition : partitions) {
-            assertEquals(List.of("c1"), contingencyIds(partition));
-            assertEquals(1, partition.operatorStrategies().size());
+            if (!partition.operatorStrategies().isEmpty()) {
+                assertEquals(List.of("c1"), contingencyIds(partition));
+            }
         }
         // every strategy is assigned exactly once, all covered
+        assertEachStrategyAssignedOnce(operatorStrategies, partitions);
+    }
+
+    @Test
+    void fewStrategiesPerContingencyAreNotSpread() {
+        // a few contingencies each carrying a handful of operator strategies: contingency-level parallelization already
+        // fills the threads, so spreading (which would duplicate contingencies and add network builds) must not happen
+        List<Contingency> contingencies = List.of(contingency("c1"), contingency("c2"), contingency("c3"), contingency("c4"));
+        List<OperatorStrategy> operatorStrategies = new ArrayList<>();
+        for (Contingency contingency : contingencies) {
+            for (int j = 0; j < 3; j++) {
+                operatorStrategies.add(specificStrategy(contingency.getId() + "_s" + j, contingency.getId()));
+            }
+        }
+
+        List<SecurityAnalysisPartitioner.Partition> partitions = SecurityAnalysisPartitioner.partition(contingencies, operatorStrategies, 4, true);
+
+        // each contingency is simulated by exactly one partition (no duplication, no redundant post-contingency solve)
+        List<String> allContingencyIds = partitions.stream().flatMap(p -> contingencyIds(p).stream()).toList();
+        assertEquals(allContingencyIds.size(), new HashSet<>(allContingencyIds).size(), "no contingency should be duplicated across partitions");
         assertEachStrategyAssignedOnce(operatorStrategies, partitions);
     }
 
