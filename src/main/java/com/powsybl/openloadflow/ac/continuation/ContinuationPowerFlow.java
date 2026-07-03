@@ -180,7 +180,8 @@ public class ContinuationPowerFlow {
         double participatingLoadTargetPMw = participants.stream()
                 .mapToDouble(p -> p.load().getTargetP())
                 .sum() * PerUnit.SB;
-        return new ContinuationPoint(lambda, participatingLoadTargetPMw, minVoltage, minVoltageBusId);
+        // the stepped continuation only traces the upper, stable branch
+        return new ContinuationPoint(lambda, participatingLoadTargetPMw, minVoltage, minVoltageBusId, true);
     }
 
     /**

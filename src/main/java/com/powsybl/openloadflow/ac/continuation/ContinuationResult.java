@@ -8,11 +8,12 @@
 package com.powsybl.openloadflow.ac.continuation;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
 /**
- * Result of a {@link ContinuationPowerFlow} run: the traced P-V curve and the estimated maximum loadability
+ * Result of a continuation power flow run: the traced P-V curve and the estimated maximum loadability
  * (voltage collapse) point.
  *
  * @author Claude
@@ -20,7 +21,7 @@ import java.util.Optional;
 public class ContinuationResult {
 
     public enum Status {
-        /** The nose of the P-V curve was located (the adaptive step converged below its minimum value). */
+        /** The nose of the P-V curve was located (maximum loadability / voltage collapse point). */
         NOSE_POINT_REACHED,
         /** The maximum number of steps was reached before the nose could be located. */
         MAX_STEPS_REACHED,
@@ -36,13 +37,29 @@ public class ContinuationResult {
 
     private final double maxLoadFactor;
 
+    private final ContinuationPoint nosePoint;
+
     private final String criticalBusId;
 
+    private final Map<String, Double> tangentParticipationByBus;
+
+    /**
+     * Constructor used when the nose is the last traced point (upper branch only, e.g. the stepped continuation).
+     */
     public ContinuationResult(Status status, List<ContinuationPoint> points, double maxLoadFactor, String criticalBusId) {
+        this(status, points, maxLoadFactor,
+                points.isEmpty() ? null : points.get(points.size() - 1),
+                criticalBusId, Map.of());
+    }
+
+    public ContinuationResult(Status status, List<ContinuationPoint> points, double maxLoadFactor,
+                              ContinuationPoint nosePoint, String criticalBusId, Map<String, Double> tangentParticipationByBus) {
         this.status = Objects.requireNonNull(status);
         this.points = List.copyOf(points);
         this.maxLoadFactor = maxLoadFactor;
+        this.nosePoint = nosePoint;
         this.criticalBusId = criticalBusId;
+        this.tangentParticipationByBus = Map.copyOf(tangentParticipationByBus);
     }
 
     public Status getStatus() {
@@ -50,7 +67,8 @@ public class ContinuationResult {
     }
 
     /**
-     * All the converged points of the P-V curve, ordered by increasing load factor, starting with the base case.
+     * All the converged points, ordered as traced: the upper (stable) branch from the base case up to the nose,
+     * then, for a predictor-corrector continuation, the lower (unstable) branch beyond the nose.
      */
     public List<ContinuationPoint> getPoints() {
         return points;
@@ -65,16 +83,25 @@ public class ContinuationResult {
     }
 
     /**
-     * The last converged point, i.e. the estimated voltage collapse / maximum loadability point.
+     * The estimated voltage collapse / maximum loadability point (the nose of the P-V curve).
      */
     public Optional<ContinuationPoint> getNosePoint() {
-        return points.isEmpty() ? Optional.empty() : Optional.of(points.get(points.size() - 1));
+        return Optional.ofNullable(nosePoint);
     }
 
     /**
-     * The id of the weakest bus (lowest voltage) at the nose point, a proxy for the bus driving the collapse.
+     * The id of the bus driving the collapse.
      */
     public Optional<String> getCriticalBusId() {
         return Optional.ofNullable(criticalBusId);
+    }
+
+    /**
+     * Normalized voltage participation factors (per bus) derived from the tangent vector at the nose point.
+     * A high value means the bus voltage is very sensitive to the load increase near collapse. Empty when the
+     * continuation does not compute a tangent (e.g. the stepped continuation).
+     */
+    public Map<String, Double> getTangentParticipationByBus() {
+        return tangentParticipationByBus;
     }
 }

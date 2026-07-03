@@ -14,11 +14,14 @@ package com.powsybl.openloadflow.ac.continuation;
  * @param participatingLoadTargetPMw the sum of the active power targets of the participating loads, in MW
  * @param minVoltage                the lowest bus voltage magnitude in per unit at this point
  * @param minVoltageBusId           the id of the bus carrying the lowest voltage magnitude (the weakest bus)
+ * @param stable                    whether the point is on the upper (stable) branch of the P-V curve; points
+ *                                  traced beyond the nose, on the lower branch, are unstable
  *
  * @author Claude
  */
 public record ContinuationPoint(double loadFactor,
                                 double participatingLoadTargetPMw,
                                 double minVoltage,
-                                String minVoltageBusId) {
+                                String minVoltageBusId,
+                                boolean stable) {
 }
