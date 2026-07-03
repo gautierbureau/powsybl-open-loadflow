@@ -248,9 +248,19 @@ Tests: `SecurityAnalysisPartitionerTest` (partitioner behaviour, coverage, fallb
 `OpenSecurityAnalysisWithActionsTest#testOperatorStrategyParallelization` (parallel results equal the single-threaded
 reference for thread counts 2/3/4, including the extreme single-contingency / many-strategies case).
 
-Still open for later phases: Option B (solve each contingency once and fork the post-contingency state to avoid the
-redundant post-contingency solves), unifying the concurrency budget across both axes, and removing the shared mutable
-`zeroImpedanceMonitoredIndex` field.
+### Composition with the LfNetwork copy (Option B foundation)
+
+The measured few-contingency bottleneck was the serialized network build per partition, not the (warm-started)
+post-contingency re-solves. That bottleneck is addressed by the `LfNetworkCopier` work (`NetworkPerThreadMode.COPY`,
+default): the network is built once and each thread gets a lock-free deep copy instead of rebuilding from IIDM, and a
+`NetworksPresolver` runs the pre-contingency load flow once so the copies skip it. Operator strategy balancing composes
+with it directly — the partitioner still decides which contingencies/strategies go to each partition, while the copy
+mode decides how each partition's network is provisioned. Because copies are cheaper than rebuilds, the
+`PARTITION_FIXED_COST` used by the scheduler is now conservative (it could be lowered for COPY mode to spread more
+aggressively — a possible follow-up).
+
+Still open for later phases: lowering `PARTITION_FIXED_COST` for COPY mode, unifying the concurrency budget across both
+axes, and removing the shared mutable `zeroImpedanceMonitoredIndex` field.
 
 ### Benchmark
 
