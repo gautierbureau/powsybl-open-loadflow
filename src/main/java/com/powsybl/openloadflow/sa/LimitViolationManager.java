@@ -83,7 +83,7 @@ public class LimitViolationManager {
         // Detect violation limits on branches
         network.getBranches().stream().filter(b -> !isBranchDisabled.test(b)).forEach(this::detectBranchViolations);
 
-        detectBusAndVoltageAngleViolations(network);
+        detectBusAndVoltageAngleViolations(network, true);
     }
 
     /**
@@ -94,8 +94,11 @@ public class LimitViolationManager {
      * @param network network on which the violation limits are checked
      * @param isBranchDisabled predicate to evaluate if a branch of the network is disabled or not
      * @param branchesWithLimits the branches carrying at least one limit
+     * @param detectBusVoltageViolations whether bus voltage violations should be looked for; a DC security analysis
+     *                                   leaves the bus voltages undefined, so it can skip the network-wide bus scan
      */
-    public void detectViolations(LfNetwork network, Predicate<LfBranch> isBranchDisabled, List<LfBranch> branchesWithLimits) {
+    public void detectViolations(LfNetwork network, Predicate<LfBranch> isBranchDisabled, List<LfBranch> branchesWithLimits,
+                                 boolean detectBusVoltageViolations) {
         Objects.requireNonNull(network);
 
         // Detect violation limits on the branches carrying limits only
@@ -105,12 +108,14 @@ public class LimitViolationManager {
             }
         }
 
-        detectBusAndVoltageAngleViolations(network);
+        detectBusAndVoltageAngleViolations(network, detectBusVoltageViolations);
     }
 
-    private void detectBusAndVoltageAngleViolations(LfNetwork network) {
+    private void detectBusAndVoltageAngleViolations(LfNetwork network, boolean detectBusVoltageViolations) {
         // Detect violation limits on buses
-        network.getBuses().stream().filter(b -> !b.isDisabled()).forEach(this::detectBusViolations);
+        if (detectBusVoltageViolations) {
+            network.getBuses().stream().filter(b -> !b.isDisabled()).forEach(this::detectBusViolations);
+        }
 
         // Detect voltage angle limits
         network.getVoltageAngleLimits().stream()

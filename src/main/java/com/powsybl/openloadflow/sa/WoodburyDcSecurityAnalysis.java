@@ -209,8 +209,11 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         postContingencyNetworkResult.update(isBranchDisabledDueToContingency);
 
         // detect violations
+        // in DC the bus voltages are left undefined (set to NaN), so bus voltage violations cannot occur and the
+        // network-wide bus scan is skipped
+        boolean detectBusVoltageViolations = !loadFlowContext.getParameters().isSetVToNan();
         var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, woodburyContext.limitReductions, woodburyContext.violationsParameters);
-        postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency, woodburyContext.branchesWithLimits);
+        postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency, woodburyContext.branchesWithLimits, detectBusVoltageViolations);
 
         // connectivity result due to the contingency
         var connectivityResult = new ConnectivityResult(
@@ -263,9 +266,12 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         postActionsNetworkResult.update(isBranchDisabledDueToContingency);
 
         // detect violations
+        // in DC the bus voltages are left undefined (set to NaN), so bus voltage violations cannot occur and the
+        // network-wide bus scan is skipped
+        boolean detectBusVoltageViolations = !loadFlowContext.getParameters().isSetVToNan();
         var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager,
                 woodburyContext.limitReductions, woodburyContext.violationsParameters);
-        postActionsViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency, woodburyContext.branchesWithLimits);
+        postActionsViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency, woodburyContext.branchesWithLimits, detectBusVoltageViolations);
 
         return new OperatorStrategyResult(operatorStrategy,
             List.of(
