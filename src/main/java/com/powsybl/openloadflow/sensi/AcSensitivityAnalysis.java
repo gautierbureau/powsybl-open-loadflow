@@ -44,6 +44,7 @@ import com.powsybl.sensitivity.*;
 import java.util.*;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -328,13 +329,17 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         checkContingencies(contingencies);
         checkLoadFlowParameters(lfParameters);
 
+        Map<String, SensitivityVariableSet> variableSetsById = variableSets.stream().collect(Collectors.toMap(SensitivityVariableSet::getId, Function.identity()));
+
         if (sensitivityAnalysisParametersExt.getThreadCount() == 1) {
             LfTopoConfig topoConfig = new LfTopoConfig();
             List<PropagatedContingency> propagatedContingencies = PropagatedContingency.createList(network, contingencies, topoConfig, creationParameters);
             AcLoadFlowParameters acParameters = makeAcLoadFlowParameters(network, slackBusSelector, lfParameters, lfParametersExt, topoConfig.isBreaker());
             try (LfNetworkList lfNetworks = Networks.loadWithReconnectableElements(network, topoConfig, acParameters.getNetworkParameters(), sensiReportNode)) {
-
-                analyzeContingencySet(network, lfNetworks, propagatedContingencies, acParameters, lfParameters, lfParametersExt, variableSets, factorReader,
+                LfNetwork lfNetwork = lfNetworks.getLargest().orElseThrow(() -> new PowsyblException("Empty network"));
+                SensitivityFactorHolder<AcVariableType, AcEquationType> factorHolder =
+                        readAndCheckFactors(network, variableSetsById, factorReader, lfNetwork, topoConfig.isBreaker());
+                analyzeContingencySet(factorHolder, lfNetworks, propagatedContingencies, acParameters, lfParameters, lfParametersExt, variableSets,
                         topoConfig.isBreaker(), resultWriter, variablesTargetVoltageInfo, sensitivityAnalysisParametersExt);
             }
         } else {
@@ -343,8 +348,26 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                 var contingenciesPartitions = Lists2.partition(contingencies, sensitivityAnalysisParametersExt.getThreadCount());
                 ContingencyMultiThreadHelper.ParameterProvider<AcLoadFlowParameters> parameterProvider = topoConfig ->
                         makeAcLoadFlowParameters(network, slackBusSelector, lfParameters, lfParametersExt, topoConfig.isBreaker());
+                // the factors are resolved from the iidm network once, on the calling thread, against
+                // the originally built networks (see the preparer below); the workers rebind them onto
+                // their own copies without any iidm read, so no need for the variant multi thread
+                // access mode (this lets the copy mode run on iidm implementations that do not
+                // support it, e.g. powsybl-network-store)
+                AtomicReference<SensitivityFactorHolder<AcVariableType, AcEquationType>> resolvedFactorHolder = new AtomicReference<>();
+                ContingencyMultiThreadHelper.NetworksPreparer<AcLoadFlowParameters> networksPreparer = (lfNetworks, acParameters) -> {
+                    LfNetwork lfNetwork = lfNetworks.getLargest().orElseThrow(() -> new PowsyblException("Empty network"));
+                    resolvedFactorHolder.set(readAndCheckFactors(network, variableSetsById, bufferedFactorReader, lfNetwork,
+                            acParameters.getNetworkParameters().isBreakers()));
+                };
                 ContingencyMultiThreadHelper.ContingencyRunner<AcLoadFlowParameters> contingencyRunner = (partitionNum, lfNetworks, propagatedContingencies, acParameters, presolved) -> {
-                    analyzeContingencySet(network, lfNetworks, propagatedContingencies, acParameters, lfParameters, lfParametersExt, variableSets, bufferedFactorReader,
+                    SensitivityFactorHolder<AcVariableType, AcEquationType> factorHolder = resolvedFactorHolder.get();
+                    if (factorHolder == null) {
+                        // rebuild fallback path: no preparer ran, resolve against this partition's own network
+                        LfNetwork lfNetwork = lfNetworks.getLargest().orElseThrow(() -> new PowsyblException("Empty network"));
+                        factorHolder = readAndCheckFactors(network, variableSetsById, bufferedFactorReader, lfNetwork,
+                                acParameters.getNetworkParameters().isBreakers());
+                    }
+                    analyzeContingencySet(factorHolder, lfNetworks, propagatedContingencies, acParameters, lfParameters, lfParametersExt, variableSets,
                         acParameters.getNetworkParameters().isBreakers(), sequentialSensitivityResultWriter, variablesTargetVoltageInfo, sensitivityAnalysisParametersExt);
                     sequentialSensitivityResultWriter.flush(); // flush the batch of data kept in this thread
                 };
@@ -354,10 +377,8 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                     // build the networks once with the topo config covering all the contingencies (like a
                     // single-threaded analysis) and give each partition its own deep copy; no presolver:
                     // the sensitivity base load flow is entangled with the factor states computation
-                    // conservative: the sensitivity worker threads are considered iidm readers (the
-                    // factor processing has not been audited for iidm free execution yet)
                     ContingencyMultiThreadHelper.buildOnceCopyAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, new LfTopoConfig(),
-                            parameterProvider, null, contingencyRunner, sensiReportNode, reportMerger, false, true, executor);
+                            parameterProvider, null, networksPreparer, contingencyRunner, sensiReportNode, reportMerger, false, false, executor);
                 } else {
                     ContingencyMultiThreadHelper.createLFNetworksPerContingencyPartitionAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, new LfTopoConfig(),
                             parameterProvider, contingencyRunner, sensiReportNode, reportMerger, executor);
@@ -450,9 +471,10 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         return acParameters;
     }
 
-    private void analyzeContingencySet(Network network, LfNetworkList lfNetworks, List<PropagatedContingency> contingencies, AcLoadFlowParameters acParameters,
+    private void analyzeContingencySet(SensitivityFactorHolder<AcVariableType, AcEquationType> resolvedFactorHolder, LfNetworkList lfNetworks,
+                                       List<PropagatedContingency> contingencies, AcLoadFlowParameters acParameters,
                                        LoadFlowParameters lfParameters, OpenLoadFlowParameters lfParametersExt, List<SensitivityVariableSet> variableSets,
-                                       SensitivityFactorReader factorReader, boolean breakers, SensitivityResultWriter resultWriter,
+                                       boolean breakers, SensitivityResultWriter resultWriter,
                                        VariablesTargetVoltageInfo variablesTargetVoltageInfo, OpenSensitivityAnalysisParameters sensitivityAnalysisParametersExt) {
 
         if (breakers && variablesTargetVoltageInfo.hasBusTargetVoltage()) {
@@ -468,8 +490,9 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
 
         ReportNode networkReportNode = lfNetwork.getReportNode();
 
-        Map<String, SensitivityVariableSet> variableSetsById = variableSets.stream().collect(Collectors.toMap(SensitivityVariableSet::getId, Function.identity()));
-        SensitivityFactorHolder<AcVariableType, AcEquationType> allFactorHolder = readAndCheckFactors(network, variableSetsById, factorReader, lfNetwork, breakers);
+        // the factors were resolved from the iidm network once, on the calling thread, against the
+        // originally built LF network; rebinding them onto this partition's copy is iidm free
+        SensitivityFactorHolder<AcVariableType, AcEquationType> allFactorHolder = rebindFactorHolder(resolvedFactorHolder, lfNetwork);
         List<LfSensitivityFactor<AcVariableType, AcEquationType>> allLfFactors = allFactorHolder.getAllFactors();
         LOGGER.info("Running AC sensitivity analysis with {} factors and {} contingencies", allLfFactors.size(), contingencies.size());
 
