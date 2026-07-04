@@ -22,6 +22,7 @@ import com.powsybl.contingency.strategy.condition.*;
 import com.powsybl.contingency.violations.LimitViolation;
 import com.powsybl.contingency.violations.LimitViolationType;
 import com.powsybl.iidm.network.ComponentConstants;
+import com.powsybl.iidm.network.LimitType;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
@@ -234,6 +235,13 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                         lfNetwork.setReportNode(networkReportNode);
                     }
                 }
+                // materialize every branch's limits caches on the calling thread, so the partition
+                // copies carry them (shared, immutable) and the workers never read the IIDM network
+                // during the simulations. The lazy limits load was the last IIDM access of the run
+                // phase; it matters for IIDM implementations where reading is expensive or blocking
+                // (e.g. a REST call in powsybl-network-store). Same LimitReductionManager inputs as
+                // the LimitViolationManagers, so the reductions baked in the caches are identical.
+                materializeLimitsCaches(lfNetworks, limitReductions);
             };
             ContingencyMultiThreadHelper.ContingencyRunner<P> contingencyRunner = (partitionNum, lfNetworks, propagatedContingencies, parameters, presolved) ->
                     partitionResults.set(partitionNum, runSimulationsOnAllComponents(
@@ -627,6 +635,28 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         // SA networks are single synchronous component (guarded in runSimulationsOnAllComponents), so
         // the (numCC, numSC) pair uniquely identifies the network and is preserved across copies
         return network.getNumCC() + "_" + network.getSynchronousNetworks().getFirst().getNumSC();
+    }
+
+    /**
+     * Force the creation of the (lazy) limits caches of every branch, for all the limit types the
+     * limit violation detection may request, including disabled branches (an operator strategy can
+     * re-enable them mid-simulation). Called on the thread that built the networks, before the
+     * partition copies are taken, so no worker thread ever goes back to the IIDM network for limits.
+     */
+    private static void materializeLimitsCaches(LfNetworkList lfNetworks, List<LimitReduction> limitReductions) {
+        LimitReductionManager limitReductionManager = LimitReductionManager.create(limitReductions);
+        for (LfNetwork lfNetwork : lfNetworks.getList()) {
+            for (LfBranch branch : lfNetwork.getBranches()) {
+                for (LimitType limitType : List.of(LimitType.CURRENT, LimitType.ACTIVE_POWER, LimitType.APPARENT_POWER)) {
+                    if (branch.getBus1() != null) {
+                        branch.getLimits1(limitType, limitReductionManager);
+                    }
+                    if (branch.getBus2() != null) {
+                        branch.getLimits2(limitType, limitReductionManager);
+                    }
+                }
+            }
+        }
     }
 
     /**
