@@ -114,6 +114,10 @@ class LfNetworkCopyReflectionGuardTest {
             "LfBusImpl#bbsIds",
             "Controller#sectionsB", "Controller#sectionsG",
             "LfLoadImpl#loadModel",
+            // original element data cached at build time, immutable afterwards (iidm free run phase)
+            "LfLoadImpl#loadsInfos", "LfLoadImpl#lccCsIds",
+            "LfShuntImpl#originalIds",
+            "LfTieLineBranch#half1Params", "LfTieLineBranch#half2Params",
             "LfStaticVarCompensatorImpl#standByAutomaton",
             "AbstractLfAcDcConverter#lossFactors",
             // immutable after the load by design

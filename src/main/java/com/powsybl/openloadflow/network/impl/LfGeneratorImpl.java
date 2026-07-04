@@ -31,6 +31,16 @@ public final class LfGeneratorImpl extends AbstractLfGenerator {
 
     private final Ref<Generator> generatorRef;
 
+    private final String id;
+
+    private final double minP;
+
+    private final double maxP;
+
+    private final double initialTargetQ;
+
+    private final ReactiveLimits reactiveLimits;
+
     private final boolean initialParticipating;
 
     private boolean participating;
@@ -54,6 +64,11 @@ public final class LfGeneratorImpl extends AbstractLfGenerator {
     private LfGeneratorImpl(Generator generator, LfNetwork network, LfNetworkParameters parameters, LfNetworkLoadingReport report) {
         super(network, generator.getTargetP() / PerUnit.SB, parameters);
         this.generatorRef = Ref.create(generator, parameters.isCacheEnabled());
+        this.id = generator.getId();
+        this.minP = generator.getMinP();
+        this.maxP = generator.getMaxP();
+        this.initialTargetQ = generator.getTargetQ();
+        this.reactiveLimits = generator.getReactiveLimits();
         // we force voltage control of generators tagged as condensers or tagged as fictitious if the dedicated mode is activated.
         forceVoltageControl = generator.isCondenser() || generator.isFictitious() && parameters.getFictitiousGeneratorVoltageControlCheckMode() == OpenLoadFlowParameters.FictitiousGeneratorVoltageControlCheckMode.FORCED;
         var apcHelper = ActivePowerControlHelper.create(generator, generator.getMinP(), generator.getMaxP());
@@ -97,6 +112,11 @@ public final class LfGeneratorImpl extends AbstractLfGenerator {
     protected LfGeneratorImpl(LfGeneratorImpl other, LfNetwork network) {
         super(other, network);
         this.generatorRef = other.generatorRef;
+        this.id = other.id;
+        this.minP = other.minP;
+        this.maxP = other.maxP;
+        this.initialTargetQ = other.initialTargetQ;
+        this.reactiveLimits = other.reactiveLimits;
         this.initialParticipating = other.initialParticipating;
         this.participating = other.participating;
         this.droop = other.droop;
@@ -112,8 +132,7 @@ public final class LfGeneratorImpl extends AbstractLfGenerator {
     @Override
     public void reApplyActivePowerControlChecks(LfNetworkParameters parameters, LfNetworkLoadingReport report) {
         participating = initialParticipating;
-        var generator = getGenerator();
-        if (!checkActivePowerControl(generator.getId(), targetP * PerUnit.SB, generator.getMaxP(), minTargetP, maxTargetP,
+        if (!checkActivePowerControl(id, targetP * PerUnit.SB, maxP, minTargetP, maxTargetP,
                 parameters, report)) {
             participating = false;
         }
@@ -170,7 +189,7 @@ public final class LfGeneratorImpl extends AbstractLfGenerator {
 
     @Override
     public String getId() {
-        return getGenerator().getId();
+        return id;
     }
 
     @Override
@@ -185,7 +204,7 @@ public final class LfGeneratorImpl extends AbstractLfGenerator {
 
     @Override
     public double getTargetQ() {
-        double targetQ = Networks.zeroIfNan(getGenerator().getTargetQ()) / PerUnit.SB;
+        double targetQ = Networks.zeroIfNan(initialTargetQ) / PerUnit.SB;
         if (forceTargetQInReactiveLimits) {
             double computedTargetQ = targetQ;
             double minQ = getMinQ();
@@ -207,12 +226,12 @@ public final class LfGeneratorImpl extends AbstractLfGenerator {
 
     @Override
     public double getMinP() {
-        return getGenerator().getMinP() / PerUnit.SB;
+        return minP / PerUnit.SB;
     }
 
     @Override
     public double getMaxP() {
-        return getGenerator().getMaxP() / PerUnit.SB;
+        return maxP / PerUnit.SB;
     }
 
     @Override
@@ -227,7 +246,7 @@ public final class LfGeneratorImpl extends AbstractLfGenerator {
 
     @Override
     protected Optional<ReactiveLimits> getReactiveLimits() {
-        return Optional.of(getGenerator().getReactiveLimits());
+        return Optional.of(reactiveLimits);
     }
 
     @Override
