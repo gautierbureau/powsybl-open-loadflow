@@ -250,8 +250,16 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                     ? (rootNode, threadNodes) -> ContingencyMultiThreadHelper.mergeReportThreadResultsOrdered(rootNode, threadNodes, contingencyPositions)
                     : ContingencyMultiThreadHelper::mergeReportThreadResults;
             if (securityAnalysisParametersExt.getNetworkPerThreadMode() == OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY) {
+                // the worker threads only read the iidm network for the actions (converted per
+                // partition network), the state monitors and the result extensions (branch results
+                // read the nominal voltages); without them the run phase works on the copies only:
+                // no need for the variant multi thread access mode, which lets the copy mode run on
+                // iidm implementations that do not support it (e.g. powsybl-network-store)
+                boolean workersAccessIidmNetwork = !actions.isEmpty() || hasStateMonitors()
+                    || securityAnalysisParametersExt.isCreateResultExtension();
                 ContingencyMultiThreadHelper.buildOnceCopyAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
-                        parameterProvider, presolver, contingencyRunner, saReportNode, reportMerger, roundRobinPartitioning, executor);
+                        parameterProvider, presolver, contingencyRunner, saReportNode, reportMerger, roundRobinPartitioning,
+                        workersAccessIidmNetwork, executor);
             } else {
                 ContingencyMultiThreadHelper.createLFNetworksPerContingencyPartitionAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
                         parameterProvider, contingencyRunner, saReportNode, reportMerger, roundRobinPartitioning, executor);
@@ -596,6 +604,18 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         // SA networks are single synchronous component (guarded in runSimulationsOnAllComponents), so
         // the (numCC, numSC) pair uniquely identifies the network and is preserved across copies
         return network.getNumCC() + "_" + network.getSynchronousNetworks().getFirst().getNumSC();
+    }
+
+    private static boolean isEmpty(StateMonitor stateMonitor) {
+        return stateMonitor.getBranchIds().isEmpty()
+            && stateMonitor.getVoltageLevelIds().isEmpty()
+            && stateMonitor.getThreeWindingsTransformerIds().isEmpty();
+    }
+
+    private boolean hasStateMonitors() {
+        return !isEmpty(monitorIndex.getAllStateMonitor())
+            || !isEmpty(monitorIndex.getNoneStateMonitor())
+            || !monitorIndex.getSpecificStateMonitors().isEmpty();
     }
 
     /**
