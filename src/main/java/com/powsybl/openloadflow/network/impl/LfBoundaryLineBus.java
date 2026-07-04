@@ -22,6 +22,8 @@ public class LfBoundaryLineBus extends AbstractLfBus {
 
     private final Ref<BoundaryLine> boundaryLineRef;
 
+    private final String originalId;
+
     private final double nominalV;
 
     // cached at build time so the violations never go back to the iidm network
@@ -31,6 +33,7 @@ public class LfBoundaryLineBus extends AbstractLfBus {
         super(network, Networks.getPropertyV(boundaryLine), Math.toRadians(Networks.getPropertyAngle(boundaryLine)), numSC, parameters);
         this.distributedOnConformLoad = false; // AbstractLfBus sets by default distributedOnConformLoad = true, we set it to false for LfBoundaryLineBus
         this.boundaryLineRef = Ref.create(boundaryLine, parameters.isCacheEnabled());
+        this.originalId = boundaryLine.getId();
         nominalV = boundaryLine.getTerminal().getVoltageLevel().getNominalV();
         voltageLevelId = boundaryLine.getTerminal().getVoltageLevel().getId();
         getOrCreateLfLoad(null, parameters).add(boundaryLine);
@@ -43,6 +46,7 @@ public class LfBoundaryLineBus extends AbstractLfBus {
     protected LfBoundaryLineBus(LfBoundaryLineBus other, LfNetwork network) {
         super(other, network); // loads and generators are copied generically by the super copy constructor
         this.boundaryLineRef = other.boundaryLineRef;
+        this.originalId = other.originalId;
         this.nominalV = other.nominalV;
         this.voltageLevelId = other.voltageLevelId;
     }
@@ -57,12 +61,12 @@ public class LfBoundaryLineBus extends AbstractLfBus {
 
     @Override
     public List<String> getOriginalIds() {
-        return List.of(getBoundaryLine().getId());
+        return List.of(originalId);
     }
 
     @Override
     public String getId() {
-        return getId(getBoundaryLine());
+        return originalId + "_BUS";
     }
 
     @Override

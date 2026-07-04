@@ -13,6 +13,8 @@ import com.powsybl.contingency.LoadContingency;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.network.NodeBreakerNetworkFactory;
+import com.powsybl.openloadflow.network.impl.RefThreadGuardTestUtil;
+import org.junit.jupiter.api.Test;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityAnalysisResult;
 import com.powsybl.sensitivity.SensitivityAnalysisRunParameters;
@@ -25,6 +27,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /**
  * With the network per thread COPY mode, a multi-threaded sensitivity analysis simulates the very
@@ -65,6 +68,28 @@ class AcSensitivityAnalysisMtCopyTest extends AbstractSensitivityAnalysisTest {
                 assertEquals(expectedRef, multiThread.getBranchFlow1FunctionReferenceValue(contingencyId, functionId),
                         0, "function reference mismatch for contingency " + contingencyId + " function " + functionId);
             }
+        }
+    }
+
+    @Test
+    void testCopyModeWorkersNeverReadIidm() {
+        // multi-thread COPY sensitivity with the Ref thread guard armed: any IIDM network
+        // dereference from a worker thread fails the analysis
+        Network network = NodeBreakerNetworkFactory.create();
+        List<Contingency> contingencies = List.of(
+                new Contingency("L1", new BranchContingency("L1")),
+                new Contingency("L2", new BranchContingency("L2")),
+                new Contingency("LD", new LoadContingency("LD")));
+        List<SensitivityFactor> factors = createFactorMatrix(network.getGeneratorStream().collect(Collectors.toList()),
+                network.getLineStream().collect(Collectors.toList()));
+
+        RefThreadGuardTestUtil.arm();
+        try {
+            SensitivityAnalysisResult result = run(network, factors, contingencies, 2,
+                    OpenSensitivityAnalysisParameters.NetworkPerThreadMode.COPY);
+            assertFalse(result.getValues().isEmpty());
+        } finally {
+            RefThreadGuardTestUtil.disarm();
         }
     }
 
