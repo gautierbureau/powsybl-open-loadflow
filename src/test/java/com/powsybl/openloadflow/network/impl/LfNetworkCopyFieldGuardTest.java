@@ -59,9 +59,9 @@ class LfNetworkCopyFieldGuardTest {
         expected.put(AbstractElement.class, Set.of("network", "num", "disabled"));
         expected.put(AbstractPropertyBag.class, Set.of("properties"));
         expected.put(AbstractLfBus.class, Set.of("slack", "reference", "v", "calculatedV", "angle", "hasGeneratorsWithSlope", "generatorVoltageControlEnabled", "generatorReactivePowerControlEnabled", "generationTargetP", "generationTargetQ", "invalidatedGenerationTargetQ", "qLimitType", "generators", "converters", "shunt", "controllerShunt", "svcShunt", "distributedOnConformLoad", "loads", "loadTargetP", "loadTargetQ", "branches", "hvdcs", "generatorVoltageControl", "generatorReactivePowerControl", "transformerVoltageControl", "voltageSourceConverterVoltageControl", "shuntVoltageControl", "p", "q", "remoteControlReactivePercent", "zeroImpedanceNetwork", "asym", "area", "isGenerationTargetQFrozen", "forceTargetQInReactiveLimits", "numSC"));
-        expected.put(LfBusImpl.class, Set.of("busRef", "nominalV", "lowVoltageLimit", "highVoltageLimit", "participating", "breakers", "country", "bbsIds", "fictitiousInjectionTargetP", "fictitiousInjectionTargetQ", "violationLocation"));
-        expected.put(LfStarBus.class, Set.of("t3wtRef", "nominalV"));
-        expected.put(LfBoundaryLineBus.class, Set.of("boundaryLineRef", "nominalV"));
+        expected.put(LfBusImpl.class, Set.of("busRef", "voltageLevelId", "nominalV", "lowVoltageLimit", "highVoltageLimit", "participating", "breakers", "country", "bbsIds", "fictitiousInjectionTargetP", "fictitiousInjectionTargetQ", "violationLocation", "violationLocationComputed", "mergedBusIds"));
+        expected.put(LfStarBus.class, Set.of("t3wtRef", "nominalV", "voltageLevelId"));
+        expected.put(LfBoundaryLineBus.class, Set.of("boundaryLineRef", "nominalV", "voltageLevelId"));
         expected.put(AbstractLfInjection.class, Set.of("initialTargetP", "targetP"));
         expected.put(AbstractLfGenerator.class, Set.of("network", "bus", "calculatedQ", "targetV", "switchedToLocalVoltageRegulation", "generatorControlType", "controlledBusId", "controlledBranchId", "controlledBranchSide", "remoteTargetQ", "disabled", "asym", "referencePriority", "reference", "extrapolateReactiveLimits"));
         expected.put(LfGeneratorImpl.class, Set.of("generatorRef", "initialParticipating", "participating", "droop", "participationFactor", "qPercent", "isTargetQForcedInReactiveLimits", "forceVoltageControl", "maxTargetP", "minTargetP", "forceTargetQInReactiveLimits"));
@@ -75,10 +75,10 @@ class LfNetworkCopyFieldGuardTest {
         expected.put(LfStandbyAutomatonShunt.class, Set.of("svc", "b"));
         expected.put(AbstractLfBranch.class, Set.of("bus1", "bus2", "currentLimits1", "activePowerLimits1", "apparentPowerLimits1", "currentLimits2", "activePowerLimits2", "apparentPowerLimits2", "piModel", "phaseControl", "phaseControlEnabled", "voltageControl", "voltageControlEnabled", "transformerReactivePowerControl", "zeroImpedanceContextByModel", "a1", "generatorReactivePowerControl", "asymLine"));
         expected.put(AbstractImpedantLfBranch.class, Set.of("connectedSide1", "connectedSide2", "disconnectionAllowedSide1", "disconnectionAllowedSide2", "p1", "q1", "i1", "p2", "q2", "i2", "openP1", "openQ1", "openI1", "openP2", "openQ2", "openI2", "closedP1", "closedQ1", "closedI1", "closedP2", "closedQ2", "closedI2", "additionalOpenP1", "additionalClosedP1", "additionalOpenQ1", "additionalClosedQ1", "additionalOpenP2", "additionalClosedP2", "additionalOpenQ2", "additionalClosedQ2"));
-        expected.put(LfBranchImpl.class, Set.of("branchRef"));
-        expected.put(LfLegBranch.class, Set.of("twtRef", "legRef"));
-        expected.put(LfTieLineBranch.class, Set.of("boundaryLine1Ref", "boundaryLine2Ref", "id"));
-        expected.put(LfBoundaryLineBranch.class, Set.of("boundaryLineRef"));
+        expected.put(LfBranchImpl.class, Set.of("branchRef", "nominalV1", "nominalV2"));
+        expected.put(LfLegBranch.class, Set.of("twtRef", "legRef", "nominalV"));
+        expected.put(LfTieLineBranch.class, Set.of("boundaryLine1Ref", "boundaryLine2Ref", "id", "nominalV1", "nominalV2"));
+        expected.put(LfBoundaryLineBranch.class, Set.of("boundaryLineRef", "nominalV"));
         expected.put(LfSwitch.class, Set.of("switchRef"));
         expected.put(LfHvdcImpl.class, Set.of("id", "bus1", "bus2", "p1", "p2", "r", "nominalV", "converterStation1", "converterStation2", "acEmulation", "acEmulationControl"));
         expected.put(AbstractLfDcBus.class, Set.of("v", "nominalV"));

@@ -27,14 +27,23 @@ public class LfLoadAction extends AbstractLfAction<LoadAction> {
     private final PowerShift powerShift;
 
     public LfLoadAction(LoadAction action, Network network, LfNetwork lfNetwork) {
-        super(action);
-        this.loadId = action.getLoadId();
-        Load load = network.getLoad(action.getLoadId());
-        lfLoad = lfNetwork.getLoadById(action.getLoadId());
-        powerShift = createPowerShift(load, action);
+        this(action, network.getLoad(action.getLoadId()) != null ? createPowerShift(network.getLoad(action.getLoadId()), action) : null, lfNetwork);
     }
 
-    private static PowerShift createPowerShift(Load load, LoadAction loadAction) {
+    /**
+     * Variant with the power shift already computed from the iidm load (see
+     * {@link #createPowerShift(Load, LoadAction)}), so the conversion itself never reads the iidm
+     * network: the multi thread copy mode converts the actions on each partition copy from worker
+     * threads that must not go back to the iidm network.
+     */
+    public LfLoadAction(LoadAction action, PowerShift powerShift, LfNetwork lfNetwork) {
+        super(action);
+        this.loadId = action.getLoadId();
+        lfLoad = lfNetwork.getLoadById(action.getLoadId());
+        this.powerShift = powerShift;
+    }
+
+    static PowerShift createPowerShift(Load load, LoadAction loadAction) {
         double activePowerShift = loadAction.getActivePowerValue().stream().map(a -> loadAction.isRelativeValue() ? a : a - load.getP0()).findAny().orElse(0);
         double reactivePowerShift = loadAction.getReactivePowerValue().stream().map(r -> loadAction.isRelativeValue() ? r : r - load.getQ0()).findAny().orElse(0);
 
@@ -61,7 +70,7 @@ public class LfLoadAction extends AbstractLfAction<LoadAction> {
 
     @Override
     public boolean isValid() {
-        return lfLoad != null;
+        return lfLoad != null && powerShift != null;
     }
 
     @Override
