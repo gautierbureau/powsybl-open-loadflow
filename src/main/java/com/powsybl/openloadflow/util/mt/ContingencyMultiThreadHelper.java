@@ -94,6 +94,16 @@ public final class ContingencyMultiThreadHelper {
         void presolve(LfNetworkList lfNetworks, P parameters);
     }
 
+    /**
+     * Optional hook run on the calling thread after the networks are built (and presolved when a
+     * presolver is set), right before the partition copies are taken: the place to materialize
+     * everything the run phase needs from the iidm network (lazy caches, factor resolutions...),
+     * so the worker threads never go back to it.
+     */
+    public interface NetworksPreparer<P extends AbstractLoadFlowParameters<P>> {
+        void prepare(LfNetworkList lfNetworks, P parameters);
+    }
+
     public interface ReportMerger {
         void mergeReportThreadResults(ReportNode rootReportNode, List<ReportNode> threadReportNodes);
     }
@@ -176,6 +186,7 @@ public final class ContingencyMultiThreadHelper {
                                                                                              LfTopoConfig topoConfig,
                                                                                              ParameterProvider<P> parameterProvider,
                                                                                              NetworksPresolver<P> presolver,
+                                                                                             NetworksPreparer<P> networksPreparer,
                                                                                              ContingencyRunner<P> contingencyRunner,
                                                                                              ReportNode rootReportNode,
                                                                                              ReportMerger reportMerger,
@@ -248,6 +259,11 @@ public final class ContingencyMultiThreadHelper {
                     LOGGER.info("COPY mode setup phases: contingency propagation {} ms, parameters {} ms, networks build {} ms, presolve {} ms (presolved={})",
                             propagationMs, parametersMs, buildMs, presolveMs, presolved);
                     if (presolver == null || presolved) {
+                        if (networksPreparer != null) {
+                            // materialize on this thread everything the run phase needs from the
+                            // iidm network, before the copies are taken
+                            networksPreparer.prepare(lfNetworks, partitionParameters.get(0));
+                        }
                         runOnCopies(network, workingVariantId, lfNetworks, propagatedPartitions, partitionParameters,
                                 partitionOpenableSide1, partitionOpenableSide2, contingencyRunner, rootReportNode, reportNodes,
                                 executor, presolved, detachFirstPartitionReporting, workersAccessIidmNetwork);

@@ -237,14 +237,15 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                         lfNetwork.setReportNode(networkReportNode);
                     }
                 }
-                // materialize every branch's limits caches on the calling thread, so the partition
-                // copies carry them (shared, immutable) and the workers never read the IIDM network
-                // during the simulations. The lazy limits load was the last IIDM access of the run
-                // phase; it matters for IIDM implementations where reading is expensive or blocking
-                // (e.g. a REST call in powsybl-network-store). Same LimitReductionManager inputs as
-                // the LimitViolationManagers, so the reductions baked in the caches are identical.
-                materializeIidmDerivedData(lfNetworks, limitReductions);
             };
+            // materialize the limits caches and the bus derived data on the calling thread, so the
+            // partition copies carry them (shared, immutable once computed) and the workers never
+            // read the IIDM network during the simulations. It matters for IIDM implementations
+            // where reading is expensive or blocking (e.g. a REST call in powsybl-network-store).
+            // Same LimitReductionManager inputs as the LimitViolationManagers, so the reductions
+            // baked in the caches are identical.
+            ContingencyMultiThreadHelper.NetworksPreparer<P> networksPreparer =
+                (lfNetworks, parameters) -> materializeIidmDerivedData(lfNetworks, limitReductions);
             ContingencyMultiThreadHelper.ContingencyRunner<P> contingencyRunner = (partitionNum, lfNetworks, propagatedContingencies, parameters, presolved) ->
                     partitionResults.set(partitionNum, runSimulationsOnAllComponents(
                             lfNetworks, propagatedContingencies, parameters, securityAnalysisParameters, operatorStrategies,
@@ -266,7 +267,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 // the variant multi thread access mode, which lets the copy mode run on iidm
                 // implementations that do not support it (e.g. powsybl-network-store)
                 ContingencyMultiThreadHelper.buildOnceCopyAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
-                        parameterProvider, presolver, contingencyRunner, saReportNode, reportMerger, roundRobinPartitioning,
+                        parameterProvider, presolver, networksPreparer, contingencyRunner, saReportNode, reportMerger, roundRobinPartitioning,
                         false, executor);
             } else {
                 ContingencyMultiThreadHelper.createLFNetworksPerContingencyPartitionAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
