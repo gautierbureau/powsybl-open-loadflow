@@ -8,12 +8,11 @@
 package com.powsybl.openloadflow.dc.fastdc;
 
 import com.powsybl.contingency.ContingencyElement;
-import com.powsybl.openloadflow.dc.equations.ClosedBranchSide1DcFlowEquationTerm;
+import com.powsybl.openloadflow.dc.equations.DcEquationSystemCreationParameters;
 import com.powsybl.openloadflow.dc.equations.DcEquationType;
 import com.powsybl.openloadflow.dc.equations.DcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.graph.GraphConnectivity;
-import com.powsybl.openloadflow.network.ElementType;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -26,9 +25,10 @@ public final class ComputedContingencyElement extends AbstractComputedElement im
 
     private final ContingencyElement element;
 
-    public ComputedContingencyElement(final ContingencyElement element, LfNetwork lfNetwork, EquationSystem<DcVariableType, DcEquationType> equationSystem) {
+    public ComputedContingencyElement(final ContingencyElement element, LfNetwork lfNetwork, EquationSystem<DcVariableType, DcEquationType> equationSystem,
+                                      DcEquationSystemCreationParameters creationParameters) {
         super(lfNetwork.getBranchById(element.getId()),
-                equationSystem.getEquationTerm(ElementType.BRANCH, lfNetwork.getBranchById(element.getId()).getNum(), ClosedBranchSide1DcFlowEquationTerm.class));
+                ComputedElement.createBranchEquation(lfNetwork.getBranchById(element.getId()), equationSystem, creationParameters));
         this.element = element;
     }
 

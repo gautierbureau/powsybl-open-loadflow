@@ -99,7 +99,8 @@ class WoodburyEngineTest {
         try (DcLoadFlowContext context = new DcLoadFlowContext(lfNetwork, dcParameters)) {
             new DcLoadFlowEngine(context)
                     .run();
-            List<ComputedContingencyElement> contingencyElements = List.of(new ComputedContingencyElement(new BranchContingency("l23"), lfNetwork, context.getEquationSystem()));
+            List<ComputedContingencyElement> contingencyElements = List.of(new ComputedContingencyElement(new BranchContingency("l23"), lfNetwork, context.getEquationSystem(),
+                    context.getParameters().getEquationSystemCreationParameters()));
             ComputedElement.setComputedElementIndexes(contingencyElements);
 
             DenseMatrix contingenciesStates = ComputedElement.calculateElementsStates(context, contingencyElements);
@@ -122,10 +123,12 @@ class WoodburyEngineTest {
         try (DcLoadFlowContext context = new DcLoadFlowContext(lfNetwork, dcParameters)) {
             new DcLoadFlowEngine(context)
                     .run();
-            List<ComputedContingencyElement> contingencyElements = List.of(new ComputedContingencyElement(new BranchContingency("l23"), lfNetwork, context.getEquationSystem()));
+            List<ComputedContingencyElement> contingencyElements = List.of(new ComputedContingencyElement(new BranchContingency("l23"), lfNetwork, context.getEquationSystem(),
+                    context.getParameters().getEquationSystemCreationParameters()));
             ComputedElement.setComputedElementIndexes(contingencyElements);
 
-            List<ComputedElement> actionElements = List.of(ComputedSwitchBranchElement.create(lfNetwork.getBranchById("l14"), false, context.getEquationSystem()));
+            List<ComputedElement> actionElements = List.of(ComputedSwitchBranchElement.create(lfNetwork.getBranchById("l14"), false, context.getEquationSystem(),
+                    context.getParameters().getEquationSystemCreationParameters()));
             ComputedElement.setComputedElementIndexes(actionElements);
 
             DenseMatrix contingenciesStates = ComputedElement.calculateElementsStates(context, contingencyElements);
@@ -147,10 +150,12 @@ class WoodburyEngineTest {
         try (DcLoadFlowContext context = new DcLoadFlowContext(lfNetwork, dcParameters)) {
             new DcLoadFlowEngine(context)
                     .run();
-            List<ComputedContingencyElement> contingencyElements = List.of(new ComputedContingencyElement(new BranchContingency("l23"), lfNetwork, context.getEquationSystem()));
+            List<ComputedContingencyElement> contingencyElements = List.of(new ComputedContingencyElement(new BranchContingency("l23"), lfNetwork, context.getEquationSystem(),
+                    context.getParameters().getEquationSystemCreationParameters()));
             ComputedElement.setComputedElementIndexes(contingencyElements);
 
-            List<ComputedElement> actionElements = List.of(ComputedSwitchBranchElement.create(lfNetwork.getBranchById("l23"), true, context.getEquationSystem()));
+            List<ComputedElement> actionElements = List.of(ComputedSwitchBranchElement.create(lfNetwork.getBranchById("l23"), true, context.getEquationSystem(),
+                    context.getParameters().getEquationSystemCreationParameters()));
             ComputedElement.setComputedElementIndexes(actionElements);
 
             DenseMatrix contingenciesStates = ComputedElement.calculateElementsStates(context, contingencyElements);
@@ -180,12 +185,14 @@ class WoodburyEngineTest {
             new DcLoadFlowEngine(context)
                     .run();
 
-            List<ComputedContingencyElement> contingencyElements = List.of(new ComputedContingencyElement(new BranchContingency("L1"), lfNetwork, context.getEquationSystem()));
+            List<ComputedContingencyElement> contingencyElements = List.of(new ComputedContingencyElement(new BranchContingency("L1"), lfNetwork, context.getEquationSystem(),
+                    context.getParameters().getEquationSystemCreationParameters()));
             ComputedElement.setComputedElementIndexes(contingencyElements);
 
             List<LfAction> actions = List.of(new LfPhaseTapChangerAction(new PhaseTapChangerTapPositionAction("PS1", "PS1", false, newTapPosition), lfNetwork));
             List<ComputedElement> actionElements = List.of(new ComputedTapPositionChangeElement(new TapPositionChange(lfNetwork.getBranchById("PS1"), newTapPosition, false),
-                context.getEquationSystem()));
+                context.getEquationSystem(),
+                    context.getParameters().getEquationSystemCreationParameters()));
             ComputedElement.setComputedElementIndexes(actionElements);
 
             DenseMatrix contingenciesStates = ComputedElement.calculateElementsStates(context, contingencyElements);
@@ -217,7 +224,8 @@ class WoodburyEngineTest {
             new DcLoadFlowEngine(context)
                     .run();
 
-            List<ComputedContingencyElement> contingencyElements = List.of(new ComputedContingencyElement(new SwitchContingency("C"), lfNetwork, context.getEquationSystem()));
+            List<ComputedContingencyElement> contingencyElements = List.of(new ComputedContingencyElement(new SwitchContingency("C"), lfNetwork, context.getEquationSystem(),
+                    context.getParameters().getEquationSystemCreationParameters()));
             ComputedElement.setComputedElementIndexes(contingencyElements);
 
             List<LfAction> actions = List.of();
@@ -253,7 +261,8 @@ class WoodburyEngineTest {
             List<ComputedContingencyElement> contingencyElements = Collections.emptyList();
 
             List<LfAction> actions = List.of(new LfSwitchAction(new SwitchAction("open C", "C", true), lfNetwork));
-            List<ComputedElement> actionElements = List.of(ComputedSwitchBranchElement.create(lfNetwork.getBranchById("C"), false, context.getEquationSystem()));
+            List<ComputedElement> actionElements = List.of(ComputedSwitchBranchElement.create(lfNetwork.getBranchById("C"), false, context.getEquationSystem(),
+                    context.getParameters().getEquationSystemCreationParameters()));
             ComputedElement.setComputedElementIndexes(actionElements);
 
             DenseMatrix contingenciesStates = ComputedElement.calculateElementsStates(context, contingencyElements);
