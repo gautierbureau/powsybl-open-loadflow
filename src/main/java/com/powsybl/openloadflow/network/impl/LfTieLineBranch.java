@@ -32,11 +32,19 @@ public class LfTieLineBranch extends AbstractImpedantLfBranch {
 
     private final String id;
 
+    // terminal nominal voltages, cached at build time so the branch results never go back to the
+    // iidm network (see the iidm free run phase of the multi thread copy mode)
+    private final double nominalV1;
+
+    private final double nominalV2;
+
     protected LfTieLineBranch(LfNetwork network, LfBus bus1, LfBus bus2, PiModel piModel, TieLine tieLine, LfNetworkParameters parameters) {
         super(network, bus1, bus2, piModel, parameters);
         this.boundaryLine1Ref = Ref.create(tieLine.getBoundaryLine1(), parameters.isCacheEnabled());
         this.boundaryLine2Ref = Ref.create(tieLine.getBoundaryLine2(), parameters.isCacheEnabled());
         this.id = tieLine.getId();
+        this.nominalV1 = tieLine.getBoundaryLine1().getTerminal().getVoltageLevel().getNominalV();
+        this.nominalV2 = tieLine.getBoundaryLine2().getTerminal().getVoltageLevel().getNominalV();
     }
 
     protected LfTieLineBranch(LfTieLineBranch other, LfNetwork network, LfBus bus1, LfBus bus2) {
@@ -44,6 +52,8 @@ public class LfTieLineBranch extends AbstractImpedantLfBranch {
         this.boundaryLine1Ref = other.boundaryLine1Ref;
         this.boundaryLine2Ref = other.boundaryLine2Ref;
         this.id = other.id;
+        this.nominalV1 = other.nominalV1;
+        this.nominalV2 = other.nominalV2;
     }
 
     public static LfTieLineBranch create(TieLine line, LfNetwork network, LfBus bus1, LfBus bus2, LfNetworkParameters parameters) {
@@ -90,8 +100,6 @@ public class LfTieLineBranch extends AbstractImpedantLfBranch {
     public List<BranchResult> createBranchResult(double preContingencyBranchP1, double preContingencyBranchOfContingencyP1,
                                                  boolean createExtension, Map<String, LfBranchResults> zeroImpedanceFlows,
                                                  LoadFlowModel loadFlowModel) {
-        double nominalV1 = getHalf1().getTerminal().getVoltageLevel().getNominalV();
-        double nominalV2 = getHalf2().getTerminal().getVoltageLevel().getNominalV();
         double currentScale1 = PerUnit.ib(nominalV1);
         double currentScale2 = PerUnit.ib(nominalV2);
 

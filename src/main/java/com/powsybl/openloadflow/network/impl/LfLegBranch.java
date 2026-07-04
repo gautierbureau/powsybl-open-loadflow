@@ -29,17 +29,23 @@ public final class LfLegBranch extends AbstractImpedantLfBranch {
 
     private final Ref<ThreeWindingsTransformer.Leg> legRef;
 
+    // leg terminal nominal voltage, cached at build time so the transformer results never go back
+    // to the iidm network (see the iidm free run phase of the multi thread copy mode)
+    private final double nominalV;
+
     private LfLegBranch(LfNetwork network, LfBus bus1, LfBus bus0, PiModel piModel, ThreeWindingsTransformer twt, ThreeWindingsTransformer.Leg leg,
                         LfNetworkParameters parameters) {
         super(network, bus1, bus0, piModel, parameters);
         this.twtRef = Ref.create(twt, parameters.isCacheEnabled());
         this.legRef = Ref.create(leg, parameters.isCacheEnabled());
+        this.nominalV = leg.getTerminal().getVoltageLevel().getNominalV();
     }
 
     protected LfLegBranch(LfLegBranch other, LfNetwork network, LfBus bus1, LfBus bus0) {
         super(other, network, bus1, bus0);
         this.twtRef = other.twtRef;
         this.legRef = other.legRef;
+        this.nominalV = other.nominalV;
     }
 
     public ThreeWindingsTransformer getTwt() {
@@ -230,9 +236,9 @@ public final class LfLegBranch extends AbstractImpedantLfBranch {
         LfLegBranch leg2 = (LfLegBranch) network.getBranchById(LfLegBranch.getId(threeWindingsTransformerId, 2));
         LfLegBranch leg3 = (LfLegBranch) network.getBranchById(LfLegBranch.getId(threeWindingsTransformerId, 3));
 
-        double i1Base = PerUnit.ib(leg1.legRef.get().getTerminal().getVoltageLevel().getNominalV());
-        double i2Base = PerUnit.ib(leg2.legRef.get().getTerminal().getVoltageLevel().getNominalV());
-        double i3Base = PerUnit.ib(leg3.legRef.get().getTerminal().getVoltageLevel().getNominalV());
+        double i1Base = PerUnit.ib(leg1.nominalV);
+        double i2Base = PerUnit.ib(leg2.nominalV);
+        double i3Base = PerUnit.ib(leg3.nominalV);
 
         LfBranchResults legBranchResults1 = leg1.isZeroImpedance(loadFlowModel) ? zeroImpedanceFlows.get(leg1.getId())
                 : extractLegBranchResults(leg1);

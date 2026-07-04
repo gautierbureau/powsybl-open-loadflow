@@ -84,6 +84,13 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
     protected final StateMonitorIndex monitorIndex;
 
+    /**
+     * Load action power shifts, precomputed from the iidm network on the calling thread so the per
+     * network action conversion never reads the iidm network (see the iidm free run phase of the
+     * multi thread copy mode).
+     */
+    protected Map<String, PowerShift> loadActionPowerShifts = Map.of();
+
     protected StateMonitorIndex zeroImpedanceMonitoredIndex;
 
     protected final ReportNode reportNode;
@@ -149,6 +156,11 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
         // check all actions are supported
         checkSupportedActions(actions);
+
+        // precompute, on this thread, the iidm data the action conversion needs (load action power
+        // shifts): the conversions then happen per network without any iidm read, which the multi
+        // thread copy mode requires (its worker threads never go back to the iidm network)
+        loadActionPowerShifts = LfActionUtils.precomputeLoadActionPowerShifts(actions, network);
 
         // check actions validity
         Actions.checkValidity(network, actions);
@@ -234,7 +246,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 // phase; it matters for IIDM implementations where reading is expensive or blocking
                 // (e.g. a REST call in powsybl-network-store). Same LimitReductionManager inputs as
                 // the LimitViolationManagers, so the reductions baked in the caches are identical.
-                materializeLimitsCaches(lfNetworks, limitReductions);
+                materializeIidmDerivedData(lfNetworks, limitReductions);
             };
             ContingencyMultiThreadHelper.ContingencyRunner<P> contingencyRunner = (partitionNum, lfNetworks, propagatedContingencies, parameters, presolved) ->
                     partitionResults.set(partitionNum, runSimulationsOnAllComponents(
@@ -250,16 +262,15 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                     ? (rootNode, threadNodes) -> ContingencyMultiThreadHelper.mergeReportThreadResultsOrdered(rootNode, threadNodes, contingencyPositions)
                     : ContingencyMultiThreadHelper::mergeReportThreadResults;
             if (securityAnalysisParametersExt.getNetworkPerThreadMode() == OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY) {
-                // the worker threads only read the iidm network for the actions (converted per
-                // partition network), the state monitors and the result extensions (branch results
-                // read the nominal voltages); without them the run phase works on the copies only:
-                // no need for the variant multi thread access mode, which lets the copy mode run on
-                // iidm implementations that do not support it (e.g. powsybl-network-store)
-                boolean workersAccessIidmNetwork = !actions.isEmpty() || hasStateMonitors()
-                    || securityAnalysisParametersExt.isCreateResultExtension();
+                // the security analysis run phase never reads the iidm network from the worker
+                // threads: the limits caches and the bus derived data are materialized before the
+                // copies are taken, the branch nominal voltages and voltage level ids are cached at
+                // build time, and the action conversion uses precomputed power shifts. No need for
+                // the variant multi thread access mode, which lets the copy mode run on iidm
+                // implementations that do not support it (e.g. powsybl-network-store)
                 ContingencyMultiThreadHelper.buildOnceCopyAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
                         parameterProvider, presolver, contingencyRunner, saReportNode, reportMerger, roundRobinPartitioning,
-                        workersAccessIidmNetwork, executor);
+                        false, executor);
             } else {
                 ContingencyMultiThreadHelper.createLFNetworksPerContingencyPartitionAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
                         parameterProvider, contingencyRunner, saReportNode, reportMerger, roundRobinPartitioning, executor);
@@ -606,25 +617,15 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         return network.getNumCC() + "_" + network.getSynchronousNetworks().getFirst().getNumSC();
     }
 
-    private static boolean isEmpty(StateMonitor stateMonitor) {
-        return stateMonitor.getBranchIds().isEmpty()
-            && stateMonitor.getVoltageLevelIds().isEmpty()
-            && stateMonitor.getThreeWindingsTransformerIds().isEmpty();
-    }
-
-    private boolean hasStateMonitors() {
-        return !isEmpty(monitorIndex.getAllStateMonitor())
-            || !isEmpty(monitorIndex.getNoneStateMonitor())
-            || !monitorIndex.getSpecificStateMonitors().isEmpty();
-    }
-
     /**
-     * Force the creation of the (lazy) limits caches of every branch, for all the limit types the
-     * limit violation detection may request, including disabled branches (an operator strategy can
-     * re-enable them mid-simulation). Called on the thread that built the networks, before the
-     * partition copies are taken, so no worker thread ever goes back to the IIDM network for limits.
+     * Force the creation of all the lazy iidm derived data the run phase may request: the limits
+     * caches of every branch (for all the limit types the limit violation detection may request,
+     * including disabled branches: an operator strategy can re-enable them mid-simulation), and the
+     * buses result and violation location data. Called on the thread that built the networks,
+     * before the partition copies are taken, so no worker thread ever goes back to the IIDM
+     * network.
      */
-    private static void materializeLimitsCaches(LfNetworkList lfNetworks, List<LimitReduction> limitReductions) {
+    private static void materializeIidmDerivedData(LfNetworkList lfNetworks, List<LimitReduction> limitReductions) {
         LimitReductionManager limitReductionManager = LimitReductionManager.create(limitReductions);
         for (LfNetwork lfNetwork : lfNetworks.getList()) {
             for (LfBranch branch : lfNetwork.getBranches()) {
@@ -636,6 +637,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                         branch.getLimits2(limitType, limitReductionManager);
                     }
                 }
+            }
+            for (LfBus bus : lfNetwork.getBuses()) {
+                bus.materializeIidmDerivedData();
             }
         }
     }
@@ -679,7 +683,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                         checkOperatorStrategies);
         Set<Action> neededActions = OperatorStrategies.getNeededActions(operatorStrategiesByContingencyId, actionsById);
 
-        Map<String, LfAction> lfActionById = LfActionUtils.createLfActions(lfNetwork, neededActions, network); // only convert needed actions
+        Map<String, LfAction> lfActionById = LfActionUtils.createLfActions(lfNetwork, neededActions, loadActionPowerShifts); // only convert needed actions, without any iidm read
 
         LoadFlowParameters loadFlowParameters = securityAnalysisParameters.getLoadFlowParameters();
         OpenLoadFlowParameters openLoadFlowParameters = OpenLoadFlowParameters.get(loadFlowParameters);

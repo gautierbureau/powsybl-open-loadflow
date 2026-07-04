@@ -24,16 +24,21 @@ public class LfStarBus extends AbstractLfBus {
 
     private final double nominalV;
 
+    // cached at build time so the violations never go back to the iidm network
+    private final String voltageLevelId;
+
     public LfStarBus(LfNetwork network, ThreeWindingsTransformer t3wt, int numSC, LfNetworkParameters parameters) {
         super(network, Networks.getPropertyV(t3wt), Math.toRadians(Networks.getPropertyAngle(t3wt)), numSC, parameters);
         this.t3wtRef = Ref.create(t3wt, parameters.isCacheEnabled());
         nominalV = t3wt.getRatedU0();
+        voltageLevelId = t3wt.getLeg1().getTerminal().getVoltageLevel().getId();
     }
 
     protected LfStarBus(LfStarBus other, LfNetwork network) {
         super(other, network);
         this.t3wtRef = other.t3wtRef;
         this.nominalV = other.nominalV;
+        this.voltageLevelId = other.voltageLevelId;
     }
 
     private ThreeWindingsTransformer getT3wt() {
@@ -56,7 +61,7 @@ public class LfStarBus extends AbstractLfBus {
 
     @Override
     public String getVoltageLevelId() {
-        return getT3wt().getLeg1().getTerminal().getVoltageLevel().getId();
+        return voltageLevelId;
     }
 
     @Override
