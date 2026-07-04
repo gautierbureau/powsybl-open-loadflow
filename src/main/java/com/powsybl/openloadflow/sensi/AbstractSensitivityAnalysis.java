@@ -1157,6 +1157,62 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
         }
     }
 
+    private static LfElement rebindElement(LfNetwork lfNetwork, LfElement element) {
+        if (element == null) {
+            return null;
+        }
+        return switch (element.getType()) {
+            case BUS -> lfNetwork.getBusById(element.getId());
+            case BRANCH -> lfNetwork.getBranchById(element.getId());
+            case SHUNT_COMPENSATOR -> lfNetwork.getShuntById(element.getId());
+            case HVDC -> lfNetwork.getHvdcById(element.getId());
+            default -> throw new PowsyblException("Unsupported sensitivity element type to rebind: " + element.getType());
+        };
+    }
+
+    private LfSensitivityFactor<V, E> rebindFactor(LfSensitivityFactor<V, E> factor, LfNetwork lfNetwork) {
+        if (factor instanceof SingleVariableLfSensitivityFactor<V, E> singleVariableFactor) {
+            return new SingleVariableLfSensitivityFactor<>(singleVariableFactor.getIndex(), singleVariableFactor.getVariableId(),
+                singleVariableFactor.getFunctionId(), rebindElement(lfNetwork, singleVariableFactor.getFunctionElement()),
+                singleVariableFactor.functionType, rebindElement(lfNetwork, singleVariableFactor.getVariableElement()),
+                singleVariableFactor.variableType, singleVariableFactor.getContingencyContext());
+        }
+        if (factor instanceof MultiVariablesLfSensitivityFactor<V, E> multiVariablesFactor) {
+            Map<LfElement, Double> reboundWeights = new LinkedHashMap<>();
+            multiVariablesFactor.getWeightedVariableElements().forEach((element, weight) ->
+                reboundWeights.put(rebindElement(lfNetwork, element), weight));
+            return new MultiVariablesLfSensitivityFactor<>(multiVariablesFactor.getIndex(), multiVariablesFactor.getVariableId(),
+                multiVariablesFactor.getFunctionId(), rebindElement(lfNetwork, multiVariablesFactor.getFunctionElement()),
+                multiVariablesFactor.functionType, reboundWeights, multiVariablesFactor.variableType,
+                multiVariablesFactor.getContingencyContext(), multiVariablesFactor.originalVariableSetIds);
+        }
+        throw new PowsyblException("Unsupported sensitivity factor type to rebind: " + factor.getClass().getSimpleName());
+    }
+
+    /**
+     * Rebinds a factor holder, resolved from the iidm network against the originally built LF
+     * network, onto one of its deep copies: every referenced element is looked up by id in the
+     * copy, without any read of the iidm network (see the iidm free run phase of the multi thread
+     * copy mode). Returns the holder itself when it is already bound to the given network.
+     */
+    protected SensitivityFactorHolder<V, E> rebindFactorHolder(SensitivityFactorHolder<V, E> factorHolder, LfNetwork lfNetwork) {
+        List<LfSensitivityFactor<V, E>> allFactors = factorHolder.getAllFactors();
+        boolean alreadyBound = allFactors.stream()
+            .map(LfSensitivityFactor::getFunctionElement)
+            .filter(Objects::nonNull)
+            .findFirst()
+            .map(element -> element.getNetwork() == lfNetwork)
+            .orElse(true);
+        if (alreadyBound) {
+            return factorHolder;
+        }
+        SensitivityFactorHolder<V, E> reboundFactorHolder = new SensitivityFactorHolder<>();
+        for (LfSensitivityFactor<V, E> factor : allFactors) {
+            reboundFactorHolder.addFactor(rebindFactor(factor, lfNetwork));
+        }
+        return reboundFactorHolder;
+    }
+
     private static PowsyblException createFunctionTypeNotSupportedException(SensitivityFunctionType functionType) {
         return new PowsyblException("Function type " + functionType + " not supported");
     }
