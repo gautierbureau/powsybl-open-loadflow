@@ -460,8 +460,8 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
 
         Map<String, SensitivityVariableSet> variableSetsById = variableSets.stream().collect(Collectors.toMap(SensitivityVariableSet::getId, Function.identity()));
         SensitivityFactorHolder<AcVariableType, AcEquationType> allFactorHolder = readAndCheckFactors(network, variableSetsById, factorReader, lfNetwork, breakers);
-        List<LfSensitivityFactor<AcVariableType, AcEquationType>> allLfFactors = allFactorHolder.getAllFactors();
-        LOGGER.info("Running AC sensitivity analysis with {} factors and {} contingencies", allLfFactors.size(), contingencies.size());
+        int allFactorCount = allFactorHolder.getFactorCount();
+        LOGGER.info("Running AC sensitivity analysis with {} factors and {} contingencies", allFactorCount, contingencies.size());
 
         // next we only work with valid and valid only for function factors
         var validFactorHolder = writeInvalidFactors(allFactorHolder, resultWriter, contingencies, new HashMap<>(), parameters);

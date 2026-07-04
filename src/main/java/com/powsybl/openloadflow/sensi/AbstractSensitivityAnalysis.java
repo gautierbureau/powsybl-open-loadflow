@@ -862,6 +862,12 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
                                                                 List<PropagatedContingency> contingencies,
                                                                 Map<String, List<Indexed<OperatorStrategy>>> operatorStrategiesByContingencyId,
                                                                 SensitivityAnalysisParameters parameters) {
+        if (!factorHolder.hasInvalidFactors()) {
+            // No ZERO/SKIP factor: nothing to write out and every factor is kept, so the input holder already is the
+            // valid holder. Avoid copying the whole factor list and rebuilding an identical holder (a large amount of
+            // transient allocation when there are many factors).
+            return factorHolder;
+        }
         Set<String> skippedVariables = new LinkedHashSet<>();
         SensitivityFactorHolder<V, E> validFactorHolder = new SensitivityFactorHolder<>();
         Map<String, Integer> contingencyIndexById = contingencies.stream().collect(Collectors.toMap(
@@ -1050,6 +1056,37 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
             allFactors.addAll(additionalFactorsNoContingency);
             allFactors.addAll(additionalFactorsPerContingency.values().stream().flatMap(List::stream).collect(Collectors.toCollection(LinkedHashSet::new)));
             return allFactors;
+        }
+
+        /**
+         * Total number of factors held, without materializing the {@link #getAllFactors()} list. A factor is added to
+         * exactly one bucket, so summing the bucket sizes matches {@code getAllFactors().size()}.
+         */
+        protected int getFactorCount() {
+            int count = commonFactors.size() + additionalFactorsNoContingency.size();
+            for (List<LfSensitivityFactor<V, E>> factors : additionalFactorsPerContingency.values()) {
+                count += factors.size();
+            }
+            return count;
+        }
+
+        /**
+         * Whether any held factor is invalid for the base case (status {@code ZERO} or {@code SKIP}), i.e. whether
+         * {@link #writeInvalidFactors} would actually have to filter anything. Iterates the buckets without copying.
+         */
+        protected boolean hasInvalidFactors() {
+            return anyInvalid(commonFactors) || anyInvalid(additionalFactorsNoContingency)
+                    || additionalFactorsPerContingency.values().stream().anyMatch(SensitivityFactorHolder::anyInvalid);
+        }
+
+        private static <V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> boolean anyInvalid(List<LfSensitivityFactor<V, E>> factors) {
+            for (LfSensitivityFactor<V, E> factor : factors) {
+                LfSensitivityFactor.Status status = factor.getStatus();
+                if (status == LfSensitivityFactor.Status.ZERO || status == LfSensitivityFactor.Status.SKIP) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         protected List<LfSensitivityFactor<V, E>> getFactorsForContingency(String contingencyId) {
