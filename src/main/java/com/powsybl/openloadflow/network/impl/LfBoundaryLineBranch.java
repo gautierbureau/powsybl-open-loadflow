@@ -28,15 +28,21 @@ public class LfBoundaryLineBranch extends AbstractImpedantLfBranch {
 
     private final Ref<BoundaryLine> boundaryLineRef;
 
+    // terminal nominal voltage, cached at build time so the branch results never go back to the
+    // iidm network (see the iidm free run phase of the multi thread copy mode)
+    private final double nominalV;
+
     protected LfBoundaryLineBranch(LfNetwork network, LfBus bus1, LfBus bus2, PiModel piModel, BoundaryLine boundaryLine,
                                    LfNetworkParameters parameters) {
         super(network, bus1, bus2, piModel, parameters);
         this.boundaryLineRef = Ref.create(boundaryLine, parameters.isCacheEnabled());
+        this.nominalV = boundaryLine.getTerminal().getVoltageLevel().getNominalV();
     }
 
     protected LfBoundaryLineBranch(LfBoundaryLineBranch other, LfNetwork network, LfBus bus1, LfBus bus2) {
         super(other, network, bus1, bus2);
         this.boundaryLineRef = other.boundaryLineRef;
+        this.nominalV = other.nominalV;
     }
 
     public static LfBoundaryLineBranch create(BoundaryLine boundaryLine, LfNetwork network, LfBus bus1, LfBus bus2,
@@ -82,7 +88,7 @@ public class LfBoundaryLineBranch extends AbstractImpedantLfBranch {
                                                  LoadFlowModel loadFlowModel) {
         // in a security analysis, we don't have any way to monitor the flows at boundary side. So in the branch result,
         // we follow the convention side 1 for network side and side 2 for boundary side.
-        double currentScale = PerUnit.ib(getBoundaryLine().getTerminal().getVoltageLevel().getNominalV());
+        double currentScale = PerUnit.ib(nominalV);
         return List.of(buildBranchResult(loadFlowModel, zeroImpedanceFlows, currentScale, currentScale, Double.NaN, Double.NaN));
     }
 
