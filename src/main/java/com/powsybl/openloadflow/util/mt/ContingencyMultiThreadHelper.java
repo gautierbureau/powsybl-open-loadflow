@@ -93,6 +93,16 @@ public final class ContingencyMultiThreadHelper {
         void presolve(LfNetworkList lfNetworks, P parameters);
     }
 
+    /**
+     * Optional hook run on the calling thread after the networks are built (and presolved when a
+     * presolver is set), right before the partition copies are taken: the place to materialize
+     * everything the run phase needs from the iidm network (lazy caches, factor resolutions...),
+     * so the worker threads never go back to it.
+     */
+    public interface NetworksPreparer<P extends AbstractLoadFlowParameters<P>> {
+        void prepare(LfNetworkList lfNetworks, P parameters);
+    }
+
     public interface ReportMerger {
         void mergeReportThreadResults(ReportNode rootReportNode, List<ReportNode> threadReportNodes);
     }
@@ -159,10 +169,13 @@ public final class ContingencyMultiThreadHelper {
      * simulate the same network as a single threaded analysis (built with the topo config covering
      * all the contingencies), so results do not depend on the thread count.
      *
-     * <p>The worker threads only ever read the shared IIDM network (through their LfNetwork copies) on
-     * the single working variant selected on the calling thread, and never mutate it, so IIDM multi
-     * thread variant access is not required. Networks that {@link LfNetworkCopier#canCopy cannot be
-     * copied} are rejected with a {@link PowsyblException}: run them single-threaded instead.
+     * <p>The worker threads never touch the shared IIDM network at all: everything the run phase needs
+     * from it is cached at build time or materialized on the calling thread by the
+     * {@link NetworksPreparer} before the copies are taken. IIDM multi thread variant access is
+     * therefore not required, and the multi-threaded analysis also runs on IIDM implementations that
+     * do not support it (e.g. powsybl-network-store, where a lazy read is a REST call). Networks that
+     * {@link LfNetworkCopier#canCopy cannot be copied} are rejected with a {@link PowsyblException}:
+     * run them single-threaded instead.
      */
     public static <P extends AbstractLoadFlowParameters<P>> void buildOnceCopyAndRunAnalysis(Network network,
                                                                                              String workingVariantId,
@@ -171,6 +184,7 @@ public final class ContingencyMultiThreadHelper {
                                                                                              LfTopoConfig topoConfig,
                                                                                              ParameterProvider<P> parameterProvider,
                                                                                              NetworksPresolver<P> presolver,
+                                                                                             NetworksPreparer<P> networksPreparer,
                                                                                              ContingencyRunner<P> contingencyRunner,
                                                                                              ReportNode rootReportNode,
                                                                                              ReportMerger reportMerger,
@@ -178,11 +192,10 @@ public final class ContingencyMultiThreadHelper {
                                                                                              Executor executor) throws ExecutionException {
         int partitionCount = contingenciesPartitions.size();
         List<ReportNode> reportNodes = Collections.synchronizedList(new ArrayList<>(Collections.nCopies(partitionCount, ReportNode.NO_OP)));
-        // COPY mode only accesses the IIDM network from the calling thread (contingency propagation,
-        // parameters, network build and, when applicable, the single pre-contingency solve below). The
-        // worker threads simulate isolated LfNetwork deep copies and only ever read the shared IIDM
-        // through them, all on the single working variant selected here. No worker ever mutates the
-        // IIDM network or its working variant, so multi thread variant access is not required.
+        // The IIDM network is only accessed from the calling thread (contingency propagation,
+        // parameters, network build, the optional single pre-contingency solve and the preparer
+        // materialization below). The worker threads simulate isolated LfNetwork deep copies and
+        // never read nor mutate the IIDM network, so multi thread variant access is not required.
         network.getVariantManager().setWorkingVariant(workingVariantId);
 
         // Create the propagated contingencies per partition, each with its own topo config, so we
@@ -243,6 +256,11 @@ public final class ContingencyMultiThreadHelper {
                 }
                 presolved = true;
             }
+            if (networksPreparer != null) {
+                // materialize on this thread everything the run phase needs from the IIDM network,
+                // before the copies are taken
+                networksPreparer.prepare(lfNetworks, partitionParameters.get(0));
+            }
             LOGGER.info("COPY mode setup phases: contingency propagation {} ms, parameters {} ms, networks build {} ms, presolve {} ms (presolved={})",
                     propagationMs, parametersMs, buildMs, presolveMs, presolved);
             runOnCopies(network, workingVariantId, lfNetworks, propagatedPartitions, partitionParameters,
@@ -289,9 +307,9 @@ public final class ContingencyMultiThreadHelper {
                                                                               boolean detachFirstPartitionReporting) throws ExecutionException {
         int partitionCount = propagatedPartitions.size();
         // the networks may have been built on a temporary variant (when switches are retained); select it
-        // once here, on the calling thread, for the whole parallel region. The worker threads only read the
-        // shared IIDM (through their LfNetwork copies) on this single working variant and never change it,
-        // so a shared working variant is enough and multi thread variant access is not needed. The working
+        // once here, on the calling thread, so the state the copies were taken from stays the selected one
+        // for the whole parallel region. The worker threads do not read the IIDM network at all, so a
+        // shared working variant is enough and multi thread variant access is not needed. The working
         // variant is reverted when lfNetworks is closed by the caller.
         String builtVariantId = lfNetworks.getVariantCleaner() != null ? lfNetworks.getVariantCleaner().getTmpVariantId() : workingVariantId;
         network.getVariantManager().setWorkingVariant(builtVariantId);
