@@ -161,6 +161,13 @@ public final class ContingencyMultiThreadHelper {
      * all the contingencies), so results do not depend on the thread count. Falls back to
      * {@link #createLFNetworksPerContingencyPartitionAndRunAnalysis} when the network uses features
      * not supported by the copy.
+     *
+     * <p>When {@code workersAccessIidmNetwork} is false, the caller guarantees that the whole run
+     * phase works on the copies only and never reads the iidm network from the worker threads (no
+     * actions, no state monitors, no result extensions: the limits caches are materialized before
+     * the copies). The variant multi thread access mode is then not needed at all, which allows the
+     * copy mode to run on iidm implementations that do not support it (e.g. powsybl-network-store),
+     * and the worker threads skip the per thread working variant selection.
      */
     public static <P extends AbstractLoadFlowParameters<P>> void buildOnceCopyAndRunAnalysis(Network network,
                                                                                              String workingVariantId,
@@ -173,11 +180,15 @@ public final class ContingencyMultiThreadHelper {
                                                                                              ReportNode rootReportNode,
                                                                                              ReportMerger reportMerger,
                                                                                              boolean detachFirstPartitionReporting,
+                                                                                             boolean workersAccessIidmNetwork,
                                                                                              Executor executor) throws ExecutionException {
         int partitionCount = contingenciesPartitions.size();
         List<ReportNode> reportNodes = Collections.synchronizedList(new ArrayList<>(Collections.nCopies(partitionCount, ReportNode.NO_OP)));
-        boolean oldAllowVariantMultiThreadAccess = network.getVariantManager().isVariantMultiThreadAccessAllowed();
-        network.getVariantManager().allowVariantMultiThreadAccess(true);
+        boolean oldAllowVariantMultiThreadAccess = false;
+        if (workersAccessIidmNetwork) {
+            oldAllowVariantMultiThreadAccess = network.getVariantManager().isVariantMultiThreadAccessAllowed();
+            network.getVariantManager().allowVariantMultiThreadAccess(true);
+        }
         boolean fallbackToRebuild = false;
         try {
             network.getVariantManager().setWorkingVariant(workingVariantId);
@@ -239,7 +250,7 @@ public final class ContingencyMultiThreadHelper {
                     if (presolver == null || presolved) {
                         runOnCopies(network, workingVariantId, lfNetworks, propagatedPartitions, partitionParameters,
                                 partitionOpenableSide1, partitionOpenableSide2, contingencyRunner, rootReportNode, reportNodes,
-                                executor, presolved, detachFirstPartitionReporting);
+                                executor, presolved, detachFirstPartitionReporting, workersAccessIidmNetwork);
                     } else {
                         fallbackToRebuild = true;
                     }
@@ -249,7 +260,9 @@ public final class ContingencyMultiThreadHelper {
                 }
             }
         } finally {
-            network.getVariantManager().allowVariantMultiThreadAccess(oldAllowVariantMultiThreadAccess);
+            if (workersAccessIidmNetwork) {
+                network.getVariantManager().allowVariantMultiThreadAccess(oldAllowVariantMultiThreadAccess);
+            }
         }
 
         if (fallbackToRebuild) {
@@ -295,10 +308,12 @@ public final class ContingencyMultiThreadHelper {
                                                                               List<ReportNode> reportNodes,
                                                                               Executor executor,
                                                                               boolean presolved,
-                                                                              boolean detachFirstPartitionReporting) throws ExecutionException {
+                                                                              boolean detachFirstPartitionReporting,
+                                                                              boolean workersAccessIidmNetwork) throws ExecutionException {
         int partitionCount = propagatedPartitions.size();
-        // the networks may have been built on a temporary variant (when switches are retained): worker
-        // threads have their own working variant in multi thread access mode and must select it
+        // the networks may have been built on a temporary variant (when switches are retained): in
+        // multi thread access mode worker threads have their own working variant and must select it;
+        // when the workers never read the iidm network there is nothing to select
         String builtVariantId = lfNetworks.getVariantCleaner() != null ? lfNetworks.getVariantCleaner().getTmpVariantId() : workingVariantId;
         LoadFlowModel loadFlowModel = partitionParameters.get(0).getNetworkParameters().getLoadFlowModel();
 
@@ -323,7 +338,9 @@ public final class ContingencyMultiThreadHelper {
                 continue;
             }
             copyFutures.add(CompletableFutureTask.runAsync(() -> {
-                network.getVariantManager().setWorkingVariant(builtVariantId);
+                if (workersAccessIidmNetwork) {
+                    network.getVariantManager().setWorkingVariant(builtVariantId);
+                }
                 boolean detachedReporting = partitionNum > 0 || detachFirstPartitionReporting;
                 ReportNode threadRootNode = detachedReporting ? Reports.createRootThreadReport(rootReportNode) : null;
                 List<LfNetwork> copies = new ArrayList<>(lfNetworks.getList().size());
@@ -356,7 +373,9 @@ public final class ContingencyMultiThreadHelper {
                 continue;
             }
             runFutures.add(CompletableFutureTask.runAsync(() -> {
-                network.getVariantManager().setWorkingVariant(builtVariantId);
+                if (workersAccessIidmNetwork) {
+                    network.getVariantManager().setWorkingVariant(builtVariantId);
+                }
                 // restrict the (result neutral, AC only) single-side open branch equation terms to the
                 // branches this partition actually opens, so each partition's equation system is as
                 // light as in the legacy one-build-per-thread mode while keeping identical results

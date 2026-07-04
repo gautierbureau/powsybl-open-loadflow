@@ -238,8 +238,10 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                     // build the networks once with the topo config covering all the contingencies (like a
                     // single-threaded analysis) and give each partition its own deep copy; no presolver:
                     // the sensitivity base load flow is entangled with the factor states computation
+                    // conservative: the sensitivity worker threads are considered iidm readers (the
+                    // factor processing has not been audited for iidm free execution yet)
                     ContingencyMultiThreadHelper.buildOnceCopyAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, new LfTopoConfig(),
-                            parameterProvider, null, contingencyRunner, sensiReportNode, reportMerger, false, executor);
+                            parameterProvider, null, contingencyRunner, sensiReportNode, reportMerger, false, true, executor);
                 } else {
                     ContingencyMultiThreadHelper.createLFNetworksPerContingencyPartitionAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, new LfTopoConfig(),
                             parameterProvider, contingencyRunner, sensiReportNode, reportMerger, executor);
