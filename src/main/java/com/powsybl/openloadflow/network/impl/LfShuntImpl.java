@@ -53,6 +53,8 @@ public class LfShuntImpl extends AbstractLfShunt {
 
     private final List<Ref<ShuntCompensator>> shuntCompensatorsRefs;
 
+    private final List<String> originalIds;
+
     private final LfBus bus;
 
     private ShuntVoltageControl voltageControl;
@@ -78,6 +80,7 @@ public class LfShuntImpl extends AbstractLfShunt {
         shuntCompensatorsRefs = Objects.requireNonNull(shuntCompensators).stream()
                 .map(sc -> Ref.create(sc, parameters.isCacheEnabled()))
                 .toList();
+        originalIds = shuntCompensators.stream().map(ShuntCompensator::getId).toList();
         if (shuntCompensators.isEmpty()) {
             throw new IllegalArgumentException("Empty shunt compensator list");
         }
@@ -107,6 +110,7 @@ public class LfShuntImpl extends AbstractLfShunt {
     protected LfShuntImpl(LfShuntImpl other, LfNetwork network, LfBus bus) {
         super(network);
         this.shuntCompensatorsRefs = new ArrayList<>(other.shuntCompensatorsRefs);
+        this.originalIds = other.originalIds;
         this.bus = Objects.requireNonNull(bus);
         this.voltageControlCapability = other.voltageControlCapability;
         this.voltageControlEnabled = other.voltageControlEnabled;
@@ -174,7 +178,7 @@ public class LfShuntImpl extends AbstractLfShunt {
 
     @Override
     public List<String> getOriginalIds() {
-        return shuntCompensatorsRefs.stream().map(scRef -> scRef.get().getId()).toList();
+        return originalIds;
     }
 
     @Override

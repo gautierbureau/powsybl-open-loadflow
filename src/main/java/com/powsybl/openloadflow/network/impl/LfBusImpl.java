@@ -31,6 +31,8 @@ public class LfBusImpl extends AbstractLfBus {
 
     private final Ref<Bus> busRef;
 
+    private final String id;
+
     private final double nominalV;
 
     private final double lowVoltageLimit;
@@ -66,6 +68,7 @@ public class LfBusImpl extends AbstractLfBus {
                         boolean participating) {
         super(network, v, angle, bus.getSynchronousComponent().getNum(), parameters);
         this.busRef = Ref.create(bus, parameters.isCacheEnabled());
+        this.id = bus.getId();
         voltageLevelId = bus.getVoltageLevel().getId();
         nominalV = bus.getVoltageLevel().getNominalV();
         lowVoltageLimit = bus.getVoltageLevel().getLowVoltageLimit();
@@ -90,6 +93,7 @@ public class LfBusImpl extends AbstractLfBus {
     protected LfBusImpl(LfBusImpl other, LfNetwork network) {
         super(other, network);
         this.busRef = other.busRef;
+        this.id = other.id;
         this.voltageLevelId = other.voltageLevelId;
         this.nominalV = other.nominalV;
         this.lowVoltageLimit = other.lowVoltageLimit;
@@ -144,7 +148,7 @@ public class LfBusImpl extends AbstractLfBus {
 
     @Override
     public String getId() {
-        return getBus().getId();
+        return id;
     }
 
     @Override

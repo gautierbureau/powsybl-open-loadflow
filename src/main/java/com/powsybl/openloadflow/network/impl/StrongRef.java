@@ -22,6 +22,7 @@ class StrongRef<T> implements Ref<T> {
 
     @Override
     public T get() {
+        RefThreadGuard.check();
         return value;
     }
 }

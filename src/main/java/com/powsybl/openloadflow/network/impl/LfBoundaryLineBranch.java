@@ -28,6 +28,8 @@ public class LfBoundaryLineBranch extends AbstractImpedantLfBranch {
 
     private final Ref<BoundaryLine> boundaryLineRef;
 
+    private final String id;
+
     // terminal nominal voltage, cached at build time so the branch results never go back to the
     // iidm network (see the iidm free run phase of the multi thread copy mode)
     private final double nominalV;
@@ -36,12 +38,14 @@ public class LfBoundaryLineBranch extends AbstractImpedantLfBranch {
                                    LfNetworkParameters parameters) {
         super(network, bus1, bus2, piModel, parameters);
         this.boundaryLineRef = Ref.create(boundaryLine, parameters.isCacheEnabled());
+        this.id = boundaryLine.getId();
         this.nominalV = boundaryLine.getTerminal().getVoltageLevel().getNominalV();
     }
 
     protected LfBoundaryLineBranch(LfBoundaryLineBranch other, LfNetwork network, LfBus bus1, LfBus bus2) {
         super(other, network, bus1, bus2);
         this.boundaryLineRef = other.boundaryLineRef;
+        this.id = other.id;
         this.nominalV = other.nominalV;
     }
 
@@ -69,7 +73,7 @@ public class LfBoundaryLineBranch extends AbstractImpedantLfBranch {
 
     @Override
     public String getId() {
-        return getBoundaryLine().getId();
+        return id;
     }
 
     @Override
