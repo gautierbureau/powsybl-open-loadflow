@@ -334,10 +334,14 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             }
             EquationTerm<AcVariableType, AcEquationType> functionTerm =
                     (EquationTerm<AcVariableType, AcEquationType>) factor.getFunctionEquationTerm();
+            // scale by the function's per-unit base so θ̄ comes out UNSCALED (physical), the dual of the
+            // forward get_sensitivity_matrix: unscaleSensitivity = funcBase(f) / varBase(v), applied here as
+            // funcBase on the function (x̄) side and varBase on the variable (θ̄) side.
+            double functionBase = getFunctionBaseValue(factor);
             for (Variable<AcVariableType> variable : functionTerm.getVariables()) {
                 int row = variable.getRow();
                 if (row >= 0) {
-                    xBar[row] += yBar * functionTerm.der(variable);
+                    xBar[row] += yBar * functionBase * functionTerm.der(variable);
                 }
             }
         }
@@ -361,10 +365,12 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             for (var factor : group.getFactors()) {
                 Double yBar = cotangents.get(factor);
                 if (yBar != null && yBar != 0.0) {
-                    thetaG += yBar * computeParameterDirectPartial(factor);
+                    thetaG += yBar * getFunctionBaseValue(factor) * computeParameterDirectPartial(factor);
                 }
             }
-            thetaBar[col] = thetaG;
+            // divide by the variable's per-unit base to finish the unscale (see the x̄ scaling above): θ̄ then
+            // equals the forward's unscaled Sᵀ·ȳ in physical units, per variable.
+            thetaBar[col] = thetaG / getVariableBaseValue(group.getFactors().get(0));
         }
         return thetaBar;
     }

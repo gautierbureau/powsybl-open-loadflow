@@ -17,7 +17,6 @@ import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
-import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.sensitivity.SensitivityAnalysis;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityAnalysisResult;
@@ -204,10 +203,6 @@ class AcSensitivityAnalysisAdjointTest {
         return network.getBusBreakerView().getBus(busId).getV();
     }
 
-    private static double nominalV(Network network, String busId) {
-        return network.getBusBreakerView().getBus(busId).getVoltageLevel().getNominalV();
-    }
-
     @Test
     void runAdjointHandlesSvcPilotLeverOnIeee14() {
         // TVC's RST lever: the SVC pilot-point target voltage (SVC_PILOT_POINT_TARGET_VOLTAGE, variableId =
@@ -249,15 +244,14 @@ class AcSensitivityAnalysisAdjointTest {
             // ȳ = e_{f0} -> θ̄[zone] = dV_f0 / dV_pilotTarget (closed loop), raw per-unit
             Map<String, Double> thetaBar = analysis.runAdjoint(network,
                     network.getVariantManager().getWorkingVariantId(), List.of(), factors, Map.of(AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BUS_VOLTAGE, f0), 1.0));
-            double theta = thetaBar.get(zone);
-            double ratio = nominalV(network, pilot) / nominalV(network, f0); // pu/pu = (kV/kV) * Vnom(pilot)/Vnom(f0)
+            double theta = thetaBar.get(zone); // UNSCALED (kV/kV), the dual of get_sensitivity_matrix
 
             double sKv = fwd.getBusVoltageSensitivityValue(zone, f0, SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE);
-            assertEquals(sKv * ratio, theta, 1e-4 * (Math.abs(sKv * ratio) + 1e-3),
+            assertEquals(sKv, theta, 1e-4 * (Math.abs(sKv) + 1e-3),
                     "runAdjoint vs forward closed-loop S for " + f0);
 
             double fdKv = (busVoltage(nAfter, f0) - busVoltage(nBefore, f0)) / (2 * dV);
-            assertEquals(fdKv * ratio, theta, 5e-3 * (Math.abs(fdKv * ratio) + 1e-2),
+            assertEquals(fdKv, theta, 5e-3 * (Math.abs(fdKv) + 1e-2),
                     "runAdjoint vs re-solve FD for " + f0);
 
             if (f0.equals(pilot)) {
@@ -328,10 +322,9 @@ class AcSensitivityAnalysisAdjointTest {
         // this gate validates the adjoint direct-term handling (and its sign). A CROSS factor (function on a
         // different branch) has a zero direct term and checks the indirect term only.
         //
-        // Scaling: runAdjoint returns RAW per-unit; the forward S getter unscales by funcBase/varBase, so
-        // θ̄ = S * varBase/funcBase. For BRANCH_ACTIVE_POWER (funcBase = PerUnit.SB) and BRANCH_ADMITTANCE
-        // (varBase = 1/PerUnit.zb(Vnom_bus2)) that factor is exactly 1/Vnom(bus2)^2. The physical re-solve FD
-        // (MW per physical siemens) equals the unscaled forward S, so the same factor maps it to θ̄.
+        // runAdjoint returns the UNSCALED sensitivity (funcBase(f)/varBase(v) applied inside analyseAdjoint),
+        // i.e. the dual of get_sensitivity_matrix in physical units, so θ̄ equals the forward S and the
+        // physical re-solve FD (MW per physical siemens) directly — no scaling correction.
         String variableLine = "L2-3-1"; // the controllable line -> its series admittance is the lever
         String crossBranch = "L1-5-1";  // a different monitored branch (direct term = 0)
         LoadFlowParameters lfp = cacheEnabledParameters();
@@ -360,13 +353,9 @@ class AcSensitivityAnalysisAdjointTest {
         double sSelf = fwd.getBranchFlow1SensitivityValue(variableLine, variableLine, SensitivityVariableType.BRANCH_ADMITTANCE);
         double sCross = fwd.getBranchFlow1SensitivityValue(variableLine, crossBranch, SensitivityVariableType.BRANCH_ADMITTANCE);
 
-        // raw-per-unit conversion factor varBase/funcBase = 1/Vnom(bus2)^2 (mirrors unscaleSensitivity)
-        double vnom2 = network.getBranch(variableLine).getTerminal2().getVoltageLevel().getNominalV();
-        double toRaw = (1.0 / PerUnit.zb(vnom2)) / PerUnit.SB;
-
-        assertEquals(sSelf * toRaw, thetaSelf, 1e-4 * (Math.abs(sSelf * toRaw) + 1e-6),
+        assertEquals(sSelf, thetaSelf, 1e-4 * (Math.abs(sSelf) + 1e-6),
                 "runAdjoint vs forward S, self (direct term)");
-        assertEquals(sCross * toRaw, thetaCross, 1e-4 * (Math.abs(sCross * toRaw) + 1e-6),
+        assertEquals(sCross, thetaCross, 1e-4 * (Math.abs(sCross) + 1e-6),
                 "runAdjoint vs forward S, cross");
 
         // physical re-solve central finite difference on the admittance modulus
@@ -379,9 +368,9 @@ class AcSensitivityAnalysisAdjointTest {
         double fdSelf = (pPlus[0] - pMinus[0]) / (2 * dY);
         double fdCross = (pPlus[1] - pMinus[1]) / (2 * dY);
 
-        assertEquals(fdSelf * toRaw, thetaSelf, 2e-2 * (Math.abs(fdSelf * toRaw) + 1e-6),
+        assertEquals(fdSelf, thetaSelf, 2e-2 * (Math.abs(fdSelf) + 1e-6),
                 "runAdjoint vs re-solve FD, self (direct term)");
-        assertEquals(fdCross * toRaw, thetaCross, 2e-2 * (Math.abs(fdCross * toRaw) + 1e-6),
+        assertEquals(fdCross, thetaCross, 2e-2 * (Math.abs(fdCross) + 1e-6),
                 "runAdjoint vs re-solve FD, cross");
 
         // the direct term makes the self-sensitivity substantial (and it must have the right sign to match S/FD)
