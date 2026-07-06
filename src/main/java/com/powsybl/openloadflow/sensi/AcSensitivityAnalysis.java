@@ -426,10 +426,13 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                     lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().getFirst(), -1d);
         }
 
-        // cotangent per factor = the cotangent of its monitored function, matched by the caller's id
+        // cotangent per factor = the cotangent of its monitored function, matched by the caller's
+        // (functionType, functionId): a branch can be monitored by several function types (current and
+        // active power, on both sides) that share the same functionId, so the key must include the type.
         Map<LfSensitivityFactor<AcVariableType, AcEquationType>, Double> cotangents = new HashMap<>();
         for (var factor : validLfFactors) {
-            Double yBar = functionCotangentsById.get(factors.get(factor.getIndex()).getFunctionId());
+            SensitivityFactor declared = factors.get(factor.getIndex());
+            Double yBar = functionCotangentsById.get(functionCotangentKey(declared.getFunctionType(), declared.getFunctionId()));
             if (yBar != null && yBar != 0.0) {
                 cotangents.put(factor, yBar);
             }
@@ -442,6 +445,15 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             gradientByVariableId.put(factors.get(group.getFactors().get(0).getIndex()).getVariableId(), thetaBar[group.getIndex()]);
         }
         return gradientByVariableId;
+    }
+
+    /**
+     * Key for the {@code functionCotangentsById} map of {@link #runAdjoint}: a monitored function is a
+     * (functionType, functionId) pair, not just an id (a branch is monitored by several function types
+     * that share its id), so the cotangent must be keyed by both.
+     */
+    public static String functionCotangentKey(SensitivityFunctionType functionType, String functionId) {
+        return functionType.name() + ' ' + functionId;
     }
 
     private static boolean runLoadFlow(AcLoadFlowContext context, boolean isRunningBaseSituation) {

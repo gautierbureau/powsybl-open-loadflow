@@ -72,6 +72,11 @@ class AcSensitivityAnalysisAdjointTest {
                 SensitivityVariableType.INJECTION_ACTIVE_POWER, gen, false, ContingencyContext.all());
     }
 
+    // cotangent-map key for a BRANCH_ACTIVE_POWER_1 monitored function
+    private static String powerKey(String branchId) {
+        return AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, branchId);
+    }
+
     private static double dBranchFlowPerGenFd(Network network, LoadFlowParameters lfp, String branch, String gen) {
         Generator g = network.getGenerator(gen);
         double p0 = g.getTargetP();
@@ -108,7 +113,7 @@ class AcSensitivityAnalysisAdjointTest {
         AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
                 new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
         Map<String, Double> thetaBar = analysis.runAdjoint(network,
-                network.getVariantManager().getWorkingVariantId(), List.of(), factors, Map.of(branch, 1.0));
+                network.getVariantManager().getWorkingVariantId(), List.of(), factors, Map.of(AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, branch), 1.0));
 
         // forward sensitivity matrix S (its own no-cache load flow; unscaled == raw here)
         SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, factors,
@@ -158,7 +163,7 @@ class AcSensitivityAnalysisAdjointTest {
                 new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
         Map<String, Double> thetaBar = analysis.runAdjoint(network,
                 network.getVariantManager().getWorkingVariantId(), List.of(),
-                factors, Map.of(branch, 1.0));
+                factors, Map.of(AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, branch), 1.0));
 
         SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, factors,
                 new SensitivityAnalysisRunParameters().setParameters(sensiParams));
@@ -243,7 +248,7 @@ class AcSensitivityAnalysisAdjointTest {
         for (String f0 : monitored) {
             // ȳ = e_{f0} -> θ̄[zone] = dV_f0 / dV_pilotTarget (closed loop), raw per-unit
             Map<String, Double> thetaBar = analysis.runAdjoint(network,
-                    network.getVariantManager().getWorkingVariantId(), List.of(), factors, Map.of(f0, 1.0));
+                    network.getVariantManager().getWorkingVariantId(), List.of(), factors, Map.of(AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BUS_VOLTAGE, f0), 1.0));
             double theta = thetaBar.get(zone);
             double ratio = nominalV(network, pilot) / nominalV(network, f0); // pu/pu = (kV/kV) * Vnom(pilot)/Vnom(f0)
 
@@ -287,7 +292,7 @@ class AcSensitivityAnalysisAdjointTest {
                 new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
         Map<String, Double> thetaBar = analysis.runAdjoint(network,
                 network.getVariantManager().getWorkingVariantId(), List.of(),
-                factors, Map.of(branchA, wA, branchB, wB));
+                factors, Map.of(powerKey(branchA), wA, powerKey(branchB), wB));
 
         SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, factors,
                 new SensitivityAnalysisRunParameters().setParameters(sensiParams));
@@ -346,8 +351,8 @@ class AcSensitivityAnalysisAdjointTest {
                 new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
 
         String variantId = network.getVariantManager().getWorkingVariantId();
-        double thetaSelf = analysis.runAdjoint(network, variantId, List.of(), factors, Map.of(variableLine, 1.0)).get(variableLine);
-        double thetaCross = analysis.runAdjoint(network, variantId, List.of(), factors, Map.of(crossBranch, 1.0)).get(variableLine);
+        double thetaSelf = analysis.runAdjoint(network, variantId, List.of(), factors, Map.of(powerKey(variableLine), 1.0)).get(variableLine);
+        double thetaCross = analysis.runAdjoint(network, variantId, List.of(), factors, Map.of(powerKey(crossBranch), 1.0)).get(variableLine);
 
         // forward S (unscaled: physical MW per physical siemens)
         SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, factors,
@@ -381,5 +386,46 @@ class AcSensitivityAnalysisAdjointTest {
 
         // the direct term makes the self-sensitivity substantial (and it must have the right sign to match S/FD)
         assertTrue(Math.abs(thetaSelf) > 1e-3, "self-sensitivity (with direct term) must be non-trivial, got " + thetaSelf);
+    }
+
+    @Test
+    void runAdjointKeepsFunctionTypesDistinctOnSharedBranchId() {
+        // A branch monitored by SEVERAL function types (here active power on side 1 AND side 2) shares one
+        // functionId, so the cotangents must be keyed by (functionType, id), not the id alone — otherwise the
+        // two function types' cotangents collide/sum. Distinct weights w1 != w2 expose the bug: θ̄ must be
+        // w1·S[P1,g] + w2·S[P2,g], not (w1+w2)·(S[P1,g] + S[P2,g]).
+        Network network = IeeeCdfNetworkFactory.create14();
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        String branch = "L1-2-1";
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        List<SensitivityFactor> factors = new ArrayList<>();
+        for (String g : GENS) {
+            factors.add(new SensitivityFactor(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, branch,
+                    SensitivityVariableType.INJECTION_ACTIVE_POWER, g, false, ContingencyContext.all()));
+            factors.add(new SensitivityFactor(SensitivityFunctionType.BRANCH_ACTIVE_POWER_2, branch,
+                    SensitivityVariableType.INJECTION_ACTIVE_POWER, g, false, ContingencyContext.all()));
+        }
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+
+        double w1 = 0.7;
+        double w2 = -1.3;
+        Map<String, Double> thetaBar = analysis.runAdjoint(network,
+                network.getVariantManager().getWorkingVariantId(), List.of(), factors,
+                Map.of(AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, branch), w1,
+                       AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BRANCH_ACTIVE_POWER_2, branch), w2));
+
+        SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, factors,
+                new SensitivityAnalysisRunParameters().setParameters(sensiParams));
+        for (String g : GENS) {
+            double s1 = fwd.getBranchFlow1SensitivityValue(g, branch, SensitivityVariableType.INJECTION_ACTIVE_POWER);
+            double s2 = fwd.getBranchFlow2SensitivityValue(g, branch, SensitivityVariableType.INJECTION_ACTIVE_POWER);
+            double expected = w1 * s1 + w2 * s2;
+            assertEquals(expected, thetaBar.get(g), 1e-5 * (Math.abs(expected) + 1e-3),
+                    "runAdjoint must keep the two function types distinct on the shared branch id for " + g);
+        }
     }
 }
