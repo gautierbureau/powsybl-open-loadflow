@@ -7,18 +7,26 @@
  */
 package com.powsybl.openloadflow.sa;
 
+import com.powsybl.action.Action;
+import com.powsybl.action.LoadActionBuilder;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.contingency.BranchContingency;
 import com.powsybl.contingency.ContingenciesProvider;
 import com.powsybl.contingency.Contingency;
+import com.powsybl.contingency.ContingencyContext;
+import com.powsybl.contingency.TwoWindingsTransformerContingency;
+import com.powsybl.contingency.strategy.OperatorStrategy;
+import com.powsybl.contingency.strategy.condition.TrueCondition;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
 import com.powsybl.openloadflow.CommonTestConfig;
+import com.powsybl.openloadflow.network.VoltageControlNetworkFactory;
 import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisReport;
 import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.SecurityAnalysisRunParameters;
 import com.powsybl.security.results.BranchResult;
+import com.powsybl.security.results.OperatorStrategyResult;
 import com.powsybl.security.results.PostContingencyResult;
 import com.powsybl.security.writer.CsvSecurityAnalysisResultWriter;
 import com.powsybl.security.writer.CsvSecurityAnalysisResultWriterFactory;
@@ -86,15 +94,15 @@ class OpenSecurityAnalysisFlowStreamingTest extends AbstractOpenSecurityAnalysis
         String content = csv.toString();
         List<String> lines = content.strip().lines().toList();
 
-        assertEquals("contingencyId;status;branchId;p1;q1;i1;p2;q2;i2;flowTransfer", lines.get(0).strip());
+        assertEquals("contingencyId;operatorStrategyId;status;branchId;p1;q1;i1;p2;q2;i2;flowTransfer", lines.get(0).strip());
 
-        // base case: every one of the 4 branches reported with an empty contingency id
-        long baseCaseRows = lines.stream().skip(1).filter(l -> l.startsWith(";CONVERGED;")).count();
+        // base case: every one of the 4 branches reported with an empty contingency id and operator strategy id
+        long baseCaseRows = lines.stream().skip(1).filter(l -> l.startsWith(";;CONVERGED;")).count();
         assertEquals(4, baseCaseRows);
 
-        // each contingency streamed its (remaining, connected) branches
-        assertTrue(content.contains("NHV1_NHV2_1;CONVERGED;"));
-        assertTrue(content.contains("NHV1_NHV2_2;CONVERGED;"));
+        // each contingency streamed its (remaining, connected) branches (empty operator strategy id)
+        assertTrue(content.contains("NHV1_NHV2_1;;CONVERGED;"));
+        assertTrue(content.contains("NHV1_NHV2_2;;CONVERGED;"));
 
         // in-memory bypass: the streamed post-contingency network results are empty
         for (PostContingencyResult postContingencyResult : result.getPostContingencyResults()) {
@@ -120,7 +128,7 @@ class OpenSecurityAnalysisFlowStreamingTest extends AbstractOpenSecurityAnalysis
         Map<String, Double> streamedP1 = new HashMap<>();
         csv.toString().strip().lines().skip(1).forEach(line -> {
             String[] c = line.split(";");
-            streamedP1.put(c[2], Double.parseDouble(c[3]));
+            streamedP1.put(c[3], Double.parseDouble(c[4])); // branchId, p1
         });
 
         assertEquals(referenceP1.keySet(), streamedP1.keySet());
@@ -146,13 +154,13 @@ class OpenSecurityAnalysisFlowStreamingTest extends AbstractOpenSecurityAnalysis
         assertTrue(Files.exists(part1));
 
         // the base case is streamed by partition 0 only (no duplication across partitions)
-        assertTrue(readRows(part0).stream().anyMatch(l -> l.startsWith(";CONVERGED;")));
-        assertFalse(readRows(part1).stream().anyMatch(l -> l.startsWith(";CONVERGED;")));
+        assertTrue(readRows(part0).stream().anyMatch(l -> l.startsWith(";;CONVERGED;")));
+        assertFalse(readRows(part1).stream().anyMatch(l -> l.startsWith(";;CONVERGED;")));
 
         // both contingencies were streamed, one per partition
         String all = readRows(part0).toString() + readRows(part1);
-        assertTrue(all.contains("NHV1_NHV2_1;CONVERGED;"));
-        assertTrue(all.contains("NHV1_NHV2_2;CONVERGED;"));
+        assertTrue(all.contains("NHV1_NHV2_1;;CONVERGED;"));
+        assertTrue(all.contains("NHV1_NHV2_2;;CONVERGED;"));
     }
 
     @Test
@@ -182,7 +190,7 @@ class OpenSecurityAnalysisFlowStreamingTest extends AbstractOpenSecurityAnalysis
         csv.toString().strip().lines().skip(1).forEach(line -> {
             String[] c = line.split(";");
             if (c[0].isEmpty()) { // base case rows
-                streamedBaseCaseP1.put(c[2], Double.parseDouble(c[3]));
+                streamedBaseCaseP1.put(c[3], Double.parseDouble(c[4])); // branchId, p1
             }
         });
 
@@ -193,6 +201,44 @@ class OpenSecurityAnalysisFlowStreamingTest extends AbstractOpenSecurityAnalysis
         // in-memory bypass in fast DC too
         for (PostContingencyResult postContingencyResult : result.getPostContingencyResults()) {
             assertTrue(postContingencyResult.getNetworkResult().getBranchResults().isEmpty());
+        }
+    }
+
+    @Test
+    void operatorStrategyFlowsAreStreamedAndTagged() {
+        Network network = VoltageControlNetworkFactory.createWithShuntSharedRemoteControl();
+        String trId = network.getTwoWindingsTransformer("tr2").getId();
+        List<Contingency> contingencies = List.of(new Contingency(trId, new TwoWindingsTransformerContingency(trId)));
+        List<Action> actions = List.of(new LoadActionBuilder().withId("action").withLoadId("l4").withRelativeValue(false).withActivePowerValue(260).build());
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("strategy", ContingencyContext.specificContingency(trId), new TrueCondition(), List.of("action")));
+
+        StringWriter csv = new StringWriter();
+        ContingenciesProvider provider = n -> contingencies;
+        SecurityAnalysisRunParameters runParameters = new SecurityAnalysisRunParameters()
+                .setComputationManager(computationManager)
+                .setSecurityAnalysisParameters(monitorAllParameters())
+                .setOperatorStrategies(operatorStrategies)
+                .setActions(actions)
+                .setResultWriterFactory(partitionIndex -> new CsvSecurityAnalysisResultWriter(csv));
+        SecurityAnalysisResult result = securityAnalysisProvider.run(network,
+                network.getVariantManager().getWorkingVariantId(), provider, runParameters).join().getResult();
+
+        // the operator strategy was actually applied
+        assertFalse(result.getOperatorStrategyResults().isEmpty());
+
+        // operator-strategy rows are streamed and tagged with both the contingency id and the operator strategy id
+        long operatorStrategyRows = csv.toString().strip().lines().skip(1)
+                .filter(l -> {
+                    String[] c = l.split(";");
+                    return trId.equals(c[0]) && "strategy".equals(c[1]);
+                }).count();
+        assertTrue(operatorStrategyRows > 0, "expected operator-strategy branch flow rows tagged with the strategy id");
+
+        // in-memory bypass holds for operator strategy results too
+        for (OperatorStrategyResult operatorStrategyResult : result.getOperatorStrategyResults()) {
+            operatorStrategyResult.getConditionalActionsResults().forEach(car ->
+                    assertTrue(car.getNetworkResult().getBranchResults().isEmpty()));
         }
     }
 

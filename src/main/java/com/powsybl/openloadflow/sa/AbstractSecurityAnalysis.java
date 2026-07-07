@@ -605,7 +605,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 // in "monitor all branches" mode, stream all base-case branch flows (only partition 0 writes the base case
                 // to avoid duplicating it across partitions)
                 if (monitorAllBranches && isPartitionWritingPreContingency()) {
-                    streamAllBranchFlows(lfNetwork, "", preContingencyLoadFlowResult.toComponentResultStatus().status().name(),
+                    streamAllBranchFlows(lfNetwork, "", "", preContingencyLoadFlowResult.toComponentResultStatus().status().name(),
                             loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor(), currentPartitionWriter(), LfBranch::isDisabled);
                 }
 
@@ -682,7 +682,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
      * @param isBranchDisabled tells which branches are disabled in the current state (e.g. {@code LfBranch::isDisabled}
      *                         for the base case, or a contingency-specific predicate for the fast-DC path)
      */
-    protected void streamAllBranchFlows(LfNetwork lfNetwork, String contingencyId, String status, LoadFlowModel loadFlowModel,
+    protected void streamAllBranchFlows(LfNetwork lfNetwork, String contingencyId, String operatorStrategyId, String status, LoadFlowModel loadFlowModel,
                                         double dcPowerFactor, SecurityAnalysisResultWriter writer, Predicate<LfBranch> isBranchDisabled) {
         Map<String, LfBranch.LfBranchResults> zeroImpedanceFlows = computeAllZeroImpedanceFlows(lfNetwork, loadFlowModel, dcPowerFactor);
         for (LfBranch branch : lfNetwork.getBranches()) {
@@ -691,7 +691,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 continue;
             }
             for (BranchResult r : branch.createBranchResult(Double.NaN, Double.NaN, false, zeroImpedanceFlows, loadFlowModel)) {
-                writer.writeBranchResult(contingencyId, status, r.getBranchId(),
+                writer.writeBranchResult(contingencyId, operatorStrategyId, status, r.getBranchId(),
                         r.getP1(), r.getQ1(), r.getI1(), r.getP2(), r.getQ2(), r.getI2(), r.getFlowTransfer());
             }
         }
@@ -767,7 +767,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             // memory, bypassing the state monitors entirely
             if (status.equals(PostContingencyComputationStatus.CONVERGED)) {
                 postContingencyLimitViolationManager.detectViolations(network);
-                streamAllBranchFlows(network, contingency.getId(), status.name(), loadFlowModel, dcPowerFactor, currentPartitionWriter(), LfBranch::isDisabled);
+                streamAllBranchFlows(network, contingency.getId(), "", status.name(), loadFlowModel, dcPowerFactor, currentPartitionWriter(), LfBranch::isDisabled);
             }
             networkResult = EMPTY_NETWORK_RESULT;
         } else {
@@ -842,16 +842,33 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         PostContingencyComputationStatus status = postContingencyStatusFromLoadFlowResult(result);
         var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions, securityAnalysisParameters.getIncreasedViolationsParameters());
         LoadFlowModel loadFlowModel = securityAnalysisParameters.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC;
-        var postActionsNetworkResult = new PostContingencyNetworkResult(network, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex), createResultExtension,
-                preContingencyNetworkResult, contingency, loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor(),
-                securityAnalysisParameters.getModifiedMonitoredElementsParameters());
+        double dcPowerFactor = securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor();
 
-        if (status.equals(PostContingencyComputationStatus.CONVERGED)) {
-            // update network result
-            postActionsNetworkResult.update();
+        NetworkResult networkResult;
+        if (monitorAllBranches) {
+            // vectorized: stream all operator-strategy branch flows (tagged with the operator strategy id), keep no
+            // network result in memory
+            if (status.equals(PostContingencyComputationStatus.CONVERGED)) {
+                postActionsViolationManager.detectViolations(network);
+                streamAllBranchFlows(network, contingency.getId(), operatorStrategy.getId(), status.name(), loadFlowModel,
+                        dcPowerFactor, currentPartitionWriter(), LfBranch::isDisabled);
+            }
+            networkResult = EMPTY_NETWORK_RESULT;
+        } else {
+            var postActionsNetworkResult = new PostContingencyNetworkResult(network, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex), createResultExtension,
+                    preContingencyNetworkResult, contingency, loadFlowModel, dcPowerFactor,
+                    securityAnalysisParameters.getModifiedMonitoredElementsParameters());
 
-            // detect violations
-            postActionsViolationManager.detectViolations(network);
+            if (status.equals(PostContingencyComputationStatus.CONVERGED)) {
+                // update network result
+                postActionsNetworkResult.update();
+
+                // detect violations
+                postActionsViolationManager.detectViolations(network);
+            }
+            networkResult = new NetworkResult(postActionsNetworkResult.getBranchResults(),
+                    postActionsNetworkResult.getBusResults(),
+                    postActionsNetworkResult.getThreeWindingsTransformerResults());
         }
 
         stopwatch.stop();
@@ -861,9 +878,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         return new OperatorStrategyResult(operatorStrategy,
                 List.of(new OperatorStrategyResult.ConditionalActionsResult(operatorStrategy.getId(), status,
                                           new LimitViolationsResult(postActionsViolationManager.getLimitViolations()),
-                                          new NetworkResult(postActionsNetworkResult.getBranchResults(),
-                                                            postActionsNetworkResult.getBusResults(),
-                                                            postActionsNetworkResult.getThreeWindingsTransformerResults()),
+                                          networkResult,
                         result.getDistributedActivePower() * PerUnit.SB)
                 ));
     }

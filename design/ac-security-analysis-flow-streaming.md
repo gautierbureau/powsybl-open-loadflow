@@ -178,9 +178,10 @@ One row per (branch, contingency) with a proposed schema:
 
 | column            | type    | notes                                            |
 |-------------------|---------|--------------------------------------------------|
-| `contingency_id`  | string  | `""` / sentinel for the pre‑contingency (N) state|
-| `status`          | string  | post‑contingency computation status              |
-| `branch_id`       | string  |                                                  |
+| `contingencyId`   | string  | `""` for the base (N) state                       |
+| `operatorStrategyId` | string | `""` unless the row is an operator‑strategy state |
+| `status`          | string  | computation status                                |
+| `branchId`        | string  |                                                  |
 | `p1,q1,i1`        | double  | SI, side 1                                       |
 | `p2,q2,i2`        | double  | SI, side 2                                       |
 | `flow_transfer`   | double  | already computed by `buildBranchResult`          |
@@ -345,5 +346,8 @@ Still open:
 3. **Compression / row‑group size:** parquet‑floor defaults today; expose zstd/snappy + row‑group tuning.
 4. **Zero‑allocation branch read:** optional `LfBranch`→primitive‑sink refactor (§5b) to drop the transient
    `BranchResult` per branch.
-5. **Operator‑strategy flows:** post‑contingency states are streamed; operator‑strategy states are not (their in‑memory
-   network results are empty in monitor‑all mode). Stream them too if needed.
+Resolved since:
+- ✅ **Operator‑strategy flows:** operator‑strategy states are now streamed too, tagged with a new `operatorStrategyId`
+   column (empty for base case and post‑contingency rows), on both the base (AC/DC) and Woodbury fast‑DC paths, with the
+   same in‑memory bypass. The three id columns (`contingencyId`, `operatorStrategyId`, `status`) fully identify each
+   state. Verified end‑to‑end; 63 action + 34 Woodbury‑action + 177 AC SA tests still green.
