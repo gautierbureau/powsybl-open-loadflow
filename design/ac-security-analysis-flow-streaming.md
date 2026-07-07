@@ -244,11 +244,15 @@ the solved `p1.eval()/…` and applies SI/current scaling and zero‑impedance/t
 `contains()`, no persistent `NetworkResult`, no diff. Three‑winding‑transformer legs are skipped (not reported as
 branches). This is the dataflow the user asked about: solved state → column rows, nothing in between.
 
-Remaining micro‑optimization (not done): `createBranchResult` still allocates one transient `BranchResult` per branch
-that we immediately read and drop. A fully zero‑allocation path would add an `LfBranch` method that writes its six
-evaluated flows into a primitive sink (refactoring `buildBranchResult` to emit to a callback instead of returning a
-`BranchResult`), touching all `LfBranch` implementations. Deferred — the current path already removes the persistent
-accumulation and the monitor overhead, which are the memory‑bound costs.
+**Zero‑allocation sink (implemented).** The streaming path no longer allocates a `BranchResult`/`List` per branch.
+`LfBranch` gained a primitive `BranchFlowConsumer` and an `emitBranchResults(...)` method; `AbstractImpedantLfBranch`
+factors the SI‑scaling math into a shared `emitBranchFlows(...)` that both the streaming path and `createBranchResult`
+(via a 1‑element holder) call — so the `StateMonitor` path is byte‑identical. The impedant case reads `p1.eval()`…
+directly, dropping the intermediate `LfBranchResults` record too. Branch types not reported as results override
+`emitBranchResults` to emit nothing: this also **fixed a latent bug** where monitor‑all on a node/breaker network with
+retained switches (`LfSwitch`, whose `createBranchResult` throws) would have failed — now switches and 3WT legs are
+skipped. Residual: the **Parquet** writer still boxes doubles (parquet‑floor's `ValueWriter.write(String, Object)`); the
+CSV path is fully primitive. Verified: streamed values unchanged, switches skipped, and 318 `sa` tests green.
 
 ## 5. Parquet library options (decision)
 
@@ -344,8 +348,8 @@ Still open:
    schemas)?
 2. **Extensions:** always include V/angle (`OlfBranchResult`) columns, or gate on `createResultExtension`?
 3. **Compression / row‑group size:** parquet‑floor defaults today; expose zstd/snappy + row‑group tuning.
-4. **Zero‑allocation branch read:** optional `LfBranch`→primitive‑sink refactor (§5b) to drop the transient
-   `BranchResult` per branch.
+4. **Parquet double boxing:** parquet‑floor's `ValueWriter` takes `Object`, so ~10 `Double`s are boxed per row; a
+   lower‑level parquet API would be needed to remove it (CSV is already primitive).
 Resolved since:
 - ✅ **Operator‑strategy flows:** operator‑strategy states are now streamed too, tagged with a new `operatorStrategyId`
    column (empty for base case and post‑contingency rows), on both the base (AC/DC) and Woodbury fast‑DC paths, with the

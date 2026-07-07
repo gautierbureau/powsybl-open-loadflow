@@ -661,9 +661,6 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
     protected static final NetworkResult EMPTY_NETWORK_RESULT =
             new NetworkResult(Collections.emptyList(), Collections.emptyList(), Collections.emptyList());
 
-    private static final List<LfBranch.BranchType> TRANSFO_3_LEG_TYPES =
-            List.of(LfBranch.BranchType.TRANSFO_3_LEG_1, LfBranch.BranchType.TRANSFO_3_LEG_2, LfBranch.BranchType.TRANSFO_3_LEG_3);
-
     /** The streaming writer of the contingency partition currently processed by this thread. */
     protected SecurityAnalysisResultWriter currentPartitionWriter() {
         return partitionWriter.get();
@@ -685,14 +682,13 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
     protected void streamAllBranchFlows(LfNetwork lfNetwork, String contingencyId, String operatorStrategyId, String status, LoadFlowModel loadFlowModel,
                                         double dcPowerFactor, SecurityAnalysisResultWriter writer, Predicate<LfBranch> isBranchDisabled) {
         Map<String, LfBranch.LfBranchResults> zeroImpedanceFlows = computeAllZeroImpedanceFlows(lfNetwork, loadFlowModel, dcPowerFactor);
+        // one consumer per state (not per branch); each branch emits its flows straight to the writer with no BranchResult
+        // allocation. Branch types not reported as results (switches, three-winding transformer legs) emit nothing.
+        LfBranch.BranchFlowConsumer sink = (branchId, p1, q1, i1, p2, q2, i2, flowTransfer) ->
+                writer.writeBranchResult(contingencyId, operatorStrategyId, status, branchId, p1, q1, i1, p2, q2, i2, flowTransfer);
         for (LfBranch branch : lfNetwork.getBranches()) {
-            if (isBranchDisabled.test(branch) || TRANSFO_3_LEG_TYPES.contains(branch.getBranchType())) {
-                // three-winding transformer legs are not reported as branches (handled separately)
-                continue;
-            }
-            for (BranchResult r : branch.createBranchResult(Double.NaN, Double.NaN, false, zeroImpedanceFlows, loadFlowModel)) {
-                writer.writeBranchResult(contingencyId, operatorStrategyId, status, r.getBranchId(),
-                        r.getP1(), r.getQ1(), r.getI1(), r.getP2(), r.getQ2(), r.getI2(), r.getFlowTransfer());
+            if (!isBranchDisabled.test(branch)) {
+                branch.emitBranchResults(Double.NaN, Double.NaN, zeroImpedanceFlows, loadFlowModel, sink);
             }
         }
     }

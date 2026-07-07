@@ -45,6 +45,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -240,6 +241,28 @@ class OpenSecurityAnalysisFlowStreamingTest extends AbstractOpenSecurityAnalysis
             operatorStrategyResult.getConditionalActionsResults().forEach(car ->
                     assertTrue(car.getNetworkResult().getBranchResults().isEmpty()));
         }
+    }
+
+    @Test
+    void monitorAllBranchesSkipsSwitchesOnNodeBreakerNetwork() {
+        // a busbar section contingency forces breaker topology, so the LfNetwork contains LfSwitch branches whose flows
+        // are not reported: streaming must skip them rather than fail.
+        Network network = createNodeBreakerNetwork();
+        SecurityAnalysisParameters saParameters = monitorAllParameters();
+        setSlackBusId(saParameters.getLoadFlowParameters(), "VL1_1");
+        List<Contingency> contingencies = List.of(
+                new Contingency("L1", new BranchContingency("L1")),
+                new Contingency("BBS2", new com.powsybl.contingency.BusbarSectionContingency("BBS2")));
+
+        StringWriter csv = new StringWriter();
+        SecurityAnalysisResult result = run(network, contingencies, saParameters,
+                partitionIndex -> new CsvSecurityAnalysisResultWriter(csv));
+
+        // did not throw, and the real branches are streamed in the base case
+        assertSame(com.powsybl.loadflow.LoadFlowResult.ComponentResult.Status.CONVERGED, result.getPreContingencyResult().getStatus());
+        String content = csv.toString();
+        assertTrue(content.contains(";;CONVERGED;L1;"));
+        assertTrue(content.contains(";;CONVERGED;L2;"));
     }
 
     @Test
