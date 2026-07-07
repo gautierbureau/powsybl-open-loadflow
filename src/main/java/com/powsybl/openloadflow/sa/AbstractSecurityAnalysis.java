@@ -52,6 +52,7 @@ import com.powsybl.security.limitreduction.LimitReduction;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.monitor.StateMonitorIndex;
 import com.powsybl.security.results.*;
+import com.powsybl.security.writer.SecurityAnalysisResultWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.event.Level;
@@ -86,6 +87,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
     protected final ReportNode reportNode;
 
+    // streaming sink for results; defaults to a no-op so that behaviour is unchanged unless a writer is set.
+    protected SecurityAnalysisResultWriter resultWriter = SecurityAnalysisResultWriter.NO_OP;
+
     protected Level logLevel = Level.INFO; // level of the post contingency and action logs
 
     protected AbstractSecurityAnalysis(Network network, MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory,
@@ -95,6 +99,18 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         this.connectivityFactory = Objects.requireNonNull(connectivityFactory);
         this.monitorIndex = new StateMonitorIndex(stateMonitors);
         this.reportNode = Objects.requireNonNull(reportNode);
+    }
+
+    /**
+     * Sets the writer used to stream results (pre-contingency and per-contingency) as they are computed, instead of
+     * keeping the full network results in memory. Defaults to {@link SecurityAnalysisResultWriter#NO_OP}.
+     */
+    public void setResultWriter(SecurityAnalysisResultWriter resultWriter) {
+        this.resultWriter = Objects.requireNonNull(resultWriter);
+    }
+
+    protected boolean isStreaming() {
+        return resultWriter != SecurityAnalysisResultWriter.NO_OP;
     }
 
     protected abstract LoadFlowModel getLoadFlowModel();
@@ -547,6 +563,15 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 // detect violations
                 preContingencyLimitViolationManager.detectViolations(lfNetwork);
 
+                // stream the base case result if a writer is set (kept in memory as it is the baseline for the loop)
+                if (isStreaming()) {
+                    PreContingencyResult preContingencyResult = buildPreContingencyResult(preContingencyLoadFlowResult,
+                            preContingencyLimitViolationManager, preContingencyNetworkResult);
+                    synchronized (resultWriter) {
+                        resultWriter.writePreContingencyResult(preContingencyResult);
+                    }
+                }
+
                 // save base state for later restoration after each contingency
                 NetworkState networkState = NetworkState.save(lfNetwork);
 
@@ -580,14 +605,34 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             }
 
             return new SecurityAnalysisResult(
-                    new PreContingencyResult(
-                            preContingencyLoadFlowResult.toComponentResultStatus().status(),
-                            new LimitViolationsResult(preContingencyLimitViolationManager.getLimitViolations()),
-                            new NetworkResult(preContingencyNetworkResult.getBranchResults(), preContingencyNetworkResult.getBusResults(),
-                            preContingencyNetworkResult.getThreeWindingsTransformerResults()),
-                            preContingencyLoadFlowResult.getDistributedActivePower() * PerUnit.SB),
+                    buildPreContingencyResult(preContingencyLoadFlowResult, preContingencyLimitViolationManager, preContingencyNetworkResult),
                     postContingencyResults, operatorStrategyResults);
         }
+    }
+
+    private PreContingencyResult buildPreContingencyResult(R preContingencyLoadFlowResult,
+                                                           LimitViolationManager preContingencyLimitViolationManager,
+                                                           PreContingencyNetworkResult preContingencyNetworkResult) {
+        return new PreContingencyResult(
+                preContingencyLoadFlowResult.toComponentResultStatus().status(),
+                new LimitViolationsResult(preContingencyLimitViolationManager.getLimitViolations()),
+                new NetworkResult(preContingencyNetworkResult.getBranchResults(), preContingencyNetworkResult.getBusResults(),
+                        preContingencyNetworkResult.getThreeWindingsTransformerResults()),
+                preContingencyLoadFlowResult.getDistributedActivePower() * PerUnit.SB);
+    }
+
+    /**
+     * Returns a copy of the given post-contingency result with an empty {@link NetworkResult}. Used when streaming: the
+     * branch/bus/3wt flows have already been handed to the {@link SecurityAnalysisResultWriter}, so they are dropped from
+     * the in-memory result to keep peak memory independent of the number of contingencies.
+     */
+    private static PostContingencyResult stripNetworkResult(PostContingencyResult postContingencyResult) {
+        return new PostContingencyResult(postContingencyResult.getContingency(),
+                postContingencyResult.getStatus(),
+                postContingencyResult.getLimitViolationsResult(),
+                new NetworkResult(Collections.emptyList(), Collections.emptyList(), Collections.emptyList()),
+                postContingencyResult.getConnectivityResult(),
+                postContingencyResult.getDistributedActivePower());
     }
 
     /**
@@ -774,7 +819,18 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             lfContingency, preContingencyLimitViolationManager,
             securityAnalysisParameters,
             preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
-        postContingencyResults.add(postContingencyResult);
+
+        if (isStreaming()) {
+            // stream the full result (including all branch flows) to the sink, then keep only a lightweight version in
+            // memory (limit violations, status, connectivity) so that peak memory stays bounded whatever the number of
+            // contingencies. The bulk flow data lives in the streamed output.
+            synchronized (resultWriter) {
+                resultWriter.writePostContingencyResult(postContingencyResult);
+            }
+            postContingencyResults.add(stripNetworkResult(postContingencyResult));
+        } else {
+            postContingencyResults.add(postContingencyResult);
+        }
 
         if (contingencyLoadFlowParameters != null &&
             Objects.equals(ContingencyLoadFlowParameters.Scope.CONTINGENCY_ONLY, contingencyLoadFlowParameters.getScope())) {

@@ -32,7 +32,11 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
 
     private boolean startWithFrozenACEmulation = START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE;
 
+    private boolean monitorAllBranches = MONITOR_ALL_BRANCHES_DEFAULT_VALUE;
+
     public static final String CREATE_RESULT_EXTENSION_PARAM_NAME = "createResultExtension";
+    public static final String MONITOR_ALL_BRANCHES_PARAM_NAME = "monitorAllBranches";
+    public static final boolean MONITOR_ALL_BRANCHES_DEFAULT_VALUE = false;
     public static final boolean CREATE_RESULT_EXTENSION_DEFAULT_VALUE = false;
     public static final String CONTINGENCY_PROPAGATION_PARAM_NAME = "contingencyPropagation";
     public static final boolean CONTINGENCY_PROPAGATION_DEFAULT_VALUE = true;
@@ -49,7 +53,8 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
             THREAD_COUNT_PARAM_NAME,
             DC_FAST_MODE_PARAM_NAME,
             CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME,
-            START_WITH_FROZEN_AC_EMULATION_PARAM_NAME);
+            START_WITH_FROZEN_AC_EMULATION_PARAM_NAME,
+            MONITOR_ALL_BRANCHES_PARAM_NAME);
 
     @Override
     public String getName() {
@@ -114,6 +119,21 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
         return this;
     }
 
+    /**
+     * When {@code true}, all branches are monitored for every contingency (and the base case), without having to
+     * enumerate them through {@link com.powsybl.security.monitor.StateMonitor}s. This is intended to be combined
+     * with a {@link com.powsybl.security.writer.SecurityAnalysisResultWriter} so that flows are streamed out rather
+     * than accumulated in memory.
+     */
+    public boolean isMonitorAllBranches() {
+        return monitorAllBranches;
+    }
+
+    public OpenSecurityAnalysisParameters setMonitorAllBranches(boolean monitorAllBranches) {
+        this.monitorAllBranches = monitorAllBranches;
+        return this;
+    }
+
     public static OpenSecurityAnalysisParameters getOrDefault(SecurityAnalysisParameters parameters) {
         OpenSecurityAnalysisParameters parametersExt = parameters.getExtension(OpenSecurityAnalysisParameters.class);
         if (parametersExt == null) {
@@ -136,7 +156,8 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
                         .setDcFastMode(config.getBooleanProperty(DC_FAST_MODE_PARAM_NAME, DC_FAST_MODE_DEFAULT_VALUE))
                         .setContingencyActivePowerLossDistribution(config.getStringProperty(CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME,
                             CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE))
-                        .setStartWithFrozenACEmulation(config.getBooleanProperty(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME, START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE)));
+                        .setStartWithFrozenACEmulation(config.getBooleanProperty(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME, START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE))
+                        .setMonitorAllBranches(config.getBooleanProperty(MONITOR_ALL_BRANCHES_PARAM_NAME, MONITOR_ALL_BRANCHES_DEFAULT_VALUE)));
         return parameters;
     }
 
@@ -158,6 +179,8 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
                 .ifPresent(this::setContingencyActivePowerLossDistribution);
         Optional.ofNullable(properties.get(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME))
                 .ifPresent(value -> this.setStartWithFrozenACEmulation(Boolean.parseBoolean(value)));
+        Optional.ofNullable(properties.get(MONITOR_ALL_BRANCHES_PARAM_NAME))
+                .ifPresent(value -> this.setMonitorAllBranches(Boolean.parseBoolean(value)));
         return this;
     }
 }

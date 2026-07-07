@@ -1,8 +1,20 @@
 # Scoping — Streaming all branch flows during (AC) security analysis
 
-**Status:** Draft / scoping
-**Scope:** `com.powsybl.openloadflow.sa` (AC path primarily; design kept compatible with the DC and Woodbury‑DC paths)
+**Status:** Draft / scoping + **first prototype (CSV) in progress**
+**Scope:** `com.powsybl.openloadflow.sa` (AC path primarily; design kept compatible with the DC and Woodbury‑DC paths) + a small provider‑agnostic seam in powsybl‑core
 **Author:** (design proposal)
+
+> **Prototype status (this branch).** A first CSV‑only slice is implemented across both repos:
+> - **powsybl‑core** (`security-analysis-api`): a provider‑agnostic streaming seam —
+>   `com.powsybl.security.writer.SecurityAnalysisResultWriter` (interface + `NO_OP`), a
+>   `CsvSecurityAnalysisResultWriter`, and a `resultWriter` field on
+>   `AbstractSecurityAnalysisRunParameters` (getter/setter). Requires core `7.4.0‑SNAPSHOT`.
+> - **powsybl‑open‑loadflow**: `OpenSecurityAnalysisParameters.monitorAllBranches`; the provider
+>   synthesizes an all‑branches `StateMonitor` and sets the writer; `AbstractSecurityAnalysis` streams
+>   the pre‑contingency and each post‑contingency result and drops the streamed post‑contingency
+>   `NetworkResult` from memory (bounded‑memory bypass). OLF now targets core `7.4.0‑SNAPSHOT`.
+>
+> Parquet, partitioned/per‑thread output, and DC parity are **not** in this slice — see §7.
 
 ---
 
