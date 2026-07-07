@@ -65,6 +65,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -603,9 +604,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
                 // in "monitor all branches" mode, stream all base-case branch flows (only partition 0 writes the base case
                 // to avoid duplicating it across partitions)
-                if (monitorAllBranches && Boolean.TRUE.equals(partitionWritesPreContingency.get())) {
+                if (monitorAllBranches && isPartitionWritingPreContingency()) {
                     streamAllBranchFlows(lfNetwork, "", preContingencyLoadFlowResult.toComponentResultStatus().status().name(),
-                            loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor(), partitionWriter.get());
+                            loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor(), currentPartitionWriter(), LfBranch::isDisabled);
                 }
 
                 // save base state for later restoration after each contingency
@@ -657,22 +658,35 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 preContingencyLoadFlowResult.getDistributedActivePower() * PerUnit.SB);
     }
 
-    private static final NetworkResult EMPTY_NETWORK_RESULT =
+    protected static final NetworkResult EMPTY_NETWORK_RESULT =
             new NetworkResult(Collections.emptyList(), Collections.emptyList(), Collections.emptyList());
 
     private static final List<LfBranch.BranchType> TRANSFO_3_LEG_TYPES =
             List.of(LfBranch.BranchType.TRANSFO_3_LEG_1, LfBranch.BranchType.TRANSFO_3_LEG_2, LfBranch.BranchType.TRANSFO_3_LEG_3);
 
+    /** The streaming writer of the contingency partition currently processed by this thread. */
+    protected SecurityAnalysisResultWriter currentPartitionWriter() {
+        return partitionWriter.get();
+    }
+
+    /** Whether the current partition is the one responsible for streaming the base-case rows (partition 0 only). */
+    protected boolean isPartitionWritingPreContingency() {
+        return Boolean.TRUE.equals(partitionWritesPreContingency.get());
+    }
+
     /**
-     * Vectorized "monitor all branches" path: iterate all (connected) branches of the solved network and stream one flow
-     * row per branch directly to the writer, without going through the state monitors and without allocating a persistent
+     * Vectorized "monitor all branches" path: iterate all branches of the solved network and stream one flow row per
+     * branch directly to the writer, without going through the state monitors and without allocating a persistent
      * {@link NetworkResult}. This is used for both the base case and each post-contingency state.
+     *
+     * @param isBranchDisabled tells which branches are disabled in the current state (e.g. {@code LfBranch::isDisabled}
+     *                         for the base case, or a contingency-specific predicate for the fast-DC path)
      */
-    private void streamAllBranchFlows(LfNetwork lfNetwork, String contingencyId, String status, LoadFlowModel loadFlowModel,
-                                      double dcPowerFactor, SecurityAnalysisResultWriter writer) {
+    protected void streamAllBranchFlows(LfNetwork lfNetwork, String contingencyId, String status, LoadFlowModel loadFlowModel,
+                                        double dcPowerFactor, SecurityAnalysisResultWriter writer, Predicate<LfBranch> isBranchDisabled) {
         Map<String, LfBranch.LfBranchResults> zeroImpedanceFlows = computeAllZeroImpedanceFlows(lfNetwork, loadFlowModel, dcPowerFactor);
         for (LfBranch branch : lfNetwork.getBranches()) {
-            if (branch.isDisabled() || TRANSFO_3_LEG_TYPES.contains(branch.getBranchType())) {
+            if (isBranchDisabled.test(branch) || TRANSFO_3_LEG_TYPES.contains(branch.getBranchType())) {
                 // three-winding transformer legs are not reported as branches (handled separately)
                 continue;
             }
@@ -753,7 +767,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             // memory, bypassing the state monitors entirely
             if (status.equals(PostContingencyComputationStatus.CONVERGED)) {
                 postContingencyLimitViolationManager.detectViolations(network);
-                streamAllBranchFlows(network, contingency.getId(), status.name(), loadFlowModel, dcPowerFactor, partitionWriter.get());
+                streamAllBranchFlows(network, contingency.getId(), status.name(), loadFlowModel, dcPowerFactor, currentPartitionWriter(), LfBranch::isDisabled);
             }
             networkResult = EMPTY_NETWORK_RESULT;
         } else {

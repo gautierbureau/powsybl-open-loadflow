@@ -156,6 +156,47 @@ class OpenSecurityAnalysisFlowStreamingTest extends AbstractOpenSecurityAnalysis
     }
 
     @Test
+    void monitorAllBranchesStreamsInFastDcMode() {
+        Network network = EurostagTutorialExample1Factory.create();
+        List<Contingency> contingencies = List.of(
+                new Contingency("NHV1_NHV2_1", new BranchContingency("NHV1_NHV2_1")),
+                new Contingency("NHV1_NHV2_2", new BranchContingency("NHV1_NHV2_2")));
+
+        // fast DC (Woodbury) mode
+        SecurityAnalysisParameters saParameters = monitorAllParameters();
+        saParameters.getLoadFlowParameters().setDc(true);
+        saParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(true);
+
+        // reference: Woodbury with the state-monitor path (all branches), values kept in memory
+        SecurityAnalysisResult reference = runSecurityAnalysis(network, contingencies, createAllBranchesMonitors(network), saParameters.getLoadFlowParameters());
+        Map<String, Double> referenceP1 = new HashMap<>();
+        for (BranchResult branchResult : reference.getPreContingencyResult().getNetworkResult().getBranchResults()) {
+            referenceP1.put(branchResult.getBranchId(), branchResult.getP1());
+        }
+
+        StringWriter csv = new StringWriter();
+        SecurityAnalysisResult result = run(network, contingencies, saParameters,
+                partitionIndex -> new CsvSecurityAnalysisResultWriter(csv));
+
+        Map<String, Double> streamedBaseCaseP1 = new HashMap<>();
+        csv.toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            if (c[0].isEmpty()) { // base case rows
+                streamedBaseCaseP1.put(c[2], Double.parseDouble(c[3]));
+            }
+        });
+
+        assertEquals(referenceP1.keySet(), streamedBaseCaseP1.keySet());
+        referenceP1.forEach((branchId, p1) -> assertEquals(p1, streamedBaseCaseP1.get(branchId), 1e-3,
+                "fast-DC p1 mismatch on branch " + branchId));
+
+        // in-memory bypass in fast DC too
+        for (PostContingencyResult postContingencyResult : result.getPostContingencyResults()) {
+            assertTrue(postContingencyResult.getNetworkResult().getBranchResults().isEmpty());
+        }
+    }
+
+    @Test
     void monitorAllBranchesWithoutWriterFactoryThrows() {
         Network network = EurostagTutorialExample1Factory.create();
         PowsyblException e = assertThrows(PowsyblException.class,

@@ -330,12 +330,20 @@ Resolved in this prototype:
 - ✅ **Diff filtering:** the monitor‑all/vectorized path emits the **full matrix** (no `changed()` filter).
 - ✅ **State‑monitor vs. vectorize:** vectorized (§5b).
 
+Resolved since:
+- ✅ **DC / Woodbury‑DC parity:** the vectorized streaming hooks are now wired on all three engines — AC and plain DC
+  (base `runSimulations`/`runPostContingencySimulation`) and fast‑DC Woodbury (its own `runSimulations` +
+  `computePostContingencyResultFromPostContingencyStates`). Woodbury uses its contingency‑specific
+  `isBranchDisabledDueToContingency` predicate rather than `LfBranch::isDisabled`, since fast DC does not physically
+  modify the network. Verified: fast‑DC streamed base‑case values match the Woodbury `StateMonitor` path; 34 Woodbury
+  tests still green.
+
 Still open:
 1. **Monitored granularity:** branches only (current), or add buses + 3WTs (would be sibling datasets with their own
    schemas)?
 2. **Extensions:** always include V/angle (`OlfBranchResult`) columns, or gate on `createResultExtension`?
-3. **DC / Woodbury‑DC:** the vectorized streaming hooks are wired on the base (AC + plain DC) path; the fast‑DC
-   Woodbury engine overrides `runSimulations`/`processContingency` and needs the same hooks added.
-4. **Compression / row‑group size:** parquet‑floor defaults today; expose zstd/snappy + row‑group tuning.
-5. **Zero‑allocation branch read:** optional `LfBranch`→primitive‑sink refactor (§5b) to drop the transient
+3. **Compression / row‑group size:** parquet‑floor defaults today; expose zstd/snappy + row‑group tuning.
+4. **Zero‑allocation branch read:** optional `LfBranch`→primitive‑sink refactor (§5b) to drop the transient
    `BranchResult` per branch.
+5. **Operator‑strategy flows:** post‑contingency states are streamed; operator‑strategy states are not (their in‑memory
+   network results are empty in monitor‑all mode). Stream them too if needed.
