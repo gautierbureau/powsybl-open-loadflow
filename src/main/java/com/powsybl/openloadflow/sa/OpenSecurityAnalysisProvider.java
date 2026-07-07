@@ -8,12 +8,11 @@
 package com.powsybl.openloadflow.sa;
 
 import com.google.auto.service.AutoService;
+import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.config.PlatformConfig;
 import com.powsybl.commons.extensions.Extension;
 import com.powsybl.commons.extensions.ExtensionJsonSerializer;
 import com.powsybl.contingency.ContingenciesProvider;
-import com.powsybl.contingency.ContingencyContext;
-import com.powsybl.iidm.network.Identifiable;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.MatrixFactory;
@@ -30,21 +29,15 @@ import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisProvider;
 import com.powsybl.security.SecurityAnalysisReport;
 import com.powsybl.security.SecurityAnalysisRunParameters;
-import com.powsybl.security.monitor.StateMonitor;
-import com.powsybl.security.writer.SecurityAnalysisResultWriter;
+import com.powsybl.security.writer.SecurityAnalysisResultWriterFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.stream.Collectors;
 
 /**
  * @author Florian Dupuy {@literal <florian.dupuy at rte-france.com>}
@@ -95,43 +88,31 @@ public class OpenSecurityAnalysisProvider implements SecurityAnalysisProvider {
         OpenSecurityAnalysisParameters openSecurityAnalysisParameters =
                 OpenSecurityAnalysisParameters.getOrDefault(runParameters.getSecurityAnalysisParameters());
 
-        // when "monitor all branches" is requested, synthesize a single state monitor covering all branches for the base
-        // case and every contingency, instead of forcing the caller to enumerate them.
-        List<StateMonitor> monitors = runParameters.getMonitors();
-        if (openSecurityAnalysisParameters.isMonitorAllBranches()) {
-            monitors = new ArrayList<>(monitors);
-            Set<String> allBranchIds = network.getBranchStream()
-                    .map(Identifiable::getId)
-                    .collect(Collectors.toCollection(LinkedHashSet::new));
-            monitors.add(new StateMonitor(ContingencyContext.all(), allBranchIds, Collections.emptySet(), Collections.emptySet()));
+        SecurityAnalysisResultWriterFactory resultWriterFactory = runParameters.getResultWriterFactory();
+        boolean monitorAllBranches = openSecurityAnalysisParameters.isMonitorAllBranches();
+        if (monitorAllBranches && resultWriterFactory == SecurityAnalysisResultWriterFactory.NO_OP) {
+            throw new PowsyblException("monitorAllBranches requires a result writer factory to stream the flows "
+                    + "(set SecurityAnalysisRunParameters.resultWriterFactory)");
         }
 
         AbstractSecurityAnalysis<?, ?, ?, ?, ?> securityAnalysis;
         if (loadFlowParameters.isDc()) {
             if (openSecurityAnalysisParameters.isDcFastMode()) {
-                securityAnalysis = new WoodburyDcSecurityAnalysis(network, matrixFactory, selectedConnectivityFactory, monitors, runParameters.getReportNode());
+                securityAnalysis = new WoodburyDcSecurityAnalysis(network, matrixFactory, selectedConnectivityFactory, runParameters.getMonitors(), runParameters.getReportNode());
             } else {
-                securityAnalysis = new DcSecurityAnalysis(network, matrixFactory, selectedConnectivityFactory, monitors, runParameters.getReportNode());
+                securityAnalysis = new DcSecurityAnalysis(network, matrixFactory, selectedConnectivityFactory, runParameters.getMonitors(), runParameters.getReportNode());
             }
         } else {
-            securityAnalysis = new AcSecurityAnalysis(network, matrixFactory, selectedConnectivityFactory, monitors, runParameters.getReportNode());
+            securityAnalysis = new AcSecurityAnalysis(network, matrixFactory, selectedConnectivityFactory, runParameters.getMonitors(), runParameters.getReportNode());
         }
 
-        // streaming sink for results (default is a no-op). The run takes ownership and closes it once finished.
-        SecurityAnalysisResultWriter resultWriter = runParameters.getResultWriter();
-        securityAnalysis.setResultWriter(resultWriter);
+        // per-partition streaming sinks (default is a no-op factory). Each partition closes its own writer, so writing is
+        // lock-free even when contingencies run on several threads.
+        securityAnalysis.setResultWriterFactory(resultWriterFactory);
+        securityAnalysis.setMonitorAllBranches(monitorAllBranches);
 
         return securityAnalysis.run(workingVariantId, runParameters.getSecurityAnalysisParameters(), contingenciesProvider,
-                runParameters.getComputationManager(), runParameters.getOperatorStrategies(), runParameters.getActions(), runParameters.getLimitReductions())
-                .whenComplete((report, throwable) -> closeQuietly(resultWriter));
-    }
-
-    private static void closeQuietly(SecurityAnalysisResultWriter resultWriter) {
-        try {
-            resultWriter.close();
-        } catch (Exception e) {
-            LOGGER.error("Failed to close the security analysis result writer", e);
-        }
+                runParameters.getComputationManager(), runParameters.getOperatorStrategies(), runParameters.getActions(), runParameters.getLimitReductions());
     }
 
     @Override

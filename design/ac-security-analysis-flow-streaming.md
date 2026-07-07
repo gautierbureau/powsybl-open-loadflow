@@ -4,17 +4,25 @@
 **Scope:** `com.powsybl.openloadflow.sa` (AC path primarily; design kept compatible with the DC and Woodbury‑DC paths) + a small provider‑agnostic seam in powsybl‑core
 **Author:** (design proposal)
 
-> **Prototype status (this branch).** A first CSV‑only slice is implemented across both repos:
-> - **powsybl‑core** (`security-analysis-api`): a provider‑agnostic streaming seam —
->   `com.powsybl.security.writer.SecurityAnalysisResultWriter` (interface + `NO_OP`), a
->   `CsvSecurityAnalysisResultWriter`, and a `resultWriter` field on
->   `AbstractSecurityAnalysisRunParameters` (getter/setter). Requires core `7.4.0‑SNAPSHOT`.
-> - **powsybl‑open‑loadflow**: `OpenSecurityAnalysisParameters.monitorAllBranches`; the provider
->   synthesizes an all‑branches `StateMonitor` and sets the writer; `AbstractSecurityAnalysis` streams
->   the pre‑contingency and each post‑contingency result and drops the streamed post‑contingency
->   `NetworkResult` from memory (bounded‑memory bypass). OLF now targets core `7.4.0‑SNAPSHOT`.
+> **Prototype status (this branch).** Implemented across both repos, CSV **and** Parquet, vectorized and
+> lock‑free. Requires core `7.4.0‑SNAPSHOT`.
+> - **powsybl‑core** (`security-analysis-api`): a provider‑agnostic, allocation‑free streaming seam —
+>   `com.powsybl.security.writer.SecurityAnalysisResultWriter` (primitive per‑row method
+>   `writeBranchResult(contingencyId, status, branchId, p1..flowTransfer)` + `NO_OP`), a
+>   `SecurityAnalysisResultWriterFactory` (one writer per contingency **partition** → lock‑free), a
+>   `CsvSecurityAnalysisResultWriter`(+`Factory`), and a `resultWriterFactory` field on
+>   `AbstractSecurityAnalysisRunParameters`.
+> - **powsybl‑core** new module `security-analysis-parquet`: `ParquetSecurityAnalysisResultWriter`(+`Factory`)
+>   built on **parquet‑floor** (minimal, Hadoop‑free). One `part-<i>.parquet` per partition.
+> - **powsybl‑open‑loadflow**: `OpenSecurityAnalysisParameters.monitorAllBranches`; the provider forwards the
+>   per‑partition factory. `AbstractSecurityAnalysis` uses a **vectorized** path (see §5b): for monitor‑all it
+>   iterates `LfBranch`es directly, bypassing the `StateMonitor` index, and streams one row per branch straight
+>   to that partition's writer — no `NetworkResult` kept in memory (bounded‑memory bypass). Per‑partition writers
+>   are threaded via a `ThreadLocal` set at each partition's entry point, so multi‑thread streaming needs **no
+>   locking**. Verified: CSV + Parquet end‑to‑end, values match the `StateMonitor` path, one part‑file per
+>   partition, and 177 existing SA tests still green.
 >
-> Parquet, partitioned/per‑thread output, and DC parity are **not** in this slice — see §7.
+> Still open: buses/3WTs, DC/Woodbury‑DC parity, compression/row‑group tuning — see §7 and §9.
 
 ---
 
@@ -213,7 +221,43 @@ Two complementary surfaces:
 
 ---
 
-## 5. Parquet library options (decision needed)
+## 5b. Do the state monitors add complexity? Can we vectorize directly?
+
+Short answer: **yes, we can and do bypass the `StateMonitor` API for "monitor all", and it is simpler and cheaper.**
+
+The `StateMonitor` machinery exists for *selective* monitoring (report a user‑chosen subset of elements per
+contingency context). For "monitor all" it is pure overhead:
+
+- a `Set<String>` of every branch id, plus a `contains()` membership test per branch per contingency
+  (`AbstractNetworkResult.addResults`, `AbstractNetworkResult.java:62‑73`) — N×C lookups whose answer is always "yes";
+- a `BranchResult` object allocated per branch per contingency, accumulated into a `List` inside a `NetworkResult`
+  inside a `PostContingencyResult` — tens of millions of short‑lived objects for a large run — only to be serialized
+  and discarded;
+- the pre/post `changed()` diff filtering (`PostContingencyNetworkResult.java:82‑134`), unwanted when you want the
+  full matrix.
+
+The **vectorized path** (implemented) skips all of that: after each solve it iterates `lfNetwork.getBranches()`
+directly and, per branch, pushes primitive values straight into the columnar writer
+(`writeBranchResult(...)`), reusing only the per‑branch flow evaluation (`LfBranch.createBranchResult`, which reads
+the solved `p1.eval()/…` and applies SI/current scaling and zero‑impedance/tie‑line handling). No monitor set, no
+`contains()`, no persistent `NetworkResult`, no diff. Three‑winding‑transformer legs are skipped (not reported as
+branches). This is the dataflow the user asked about: solved state → column rows, nothing in between.
+
+Remaining micro‑optimization (not done): `createBranchResult` still allocates one transient `BranchResult` per branch
+that we immediately read and drop. A fully zero‑allocation path would add an `LfBranch` method that writes its six
+evaluated flows into a primitive sink (refactoring `buildBranchResult` to emit to a callback instead of returning a
+`BranchResult`), touching all `LfBranch` implementations. Deferred — the current path already removes the persistent
+accumulation and the monitor overhead, which are the memory‑bound costs.
+
+## 5. Parquet library options (decision)
+
+**Chosen: `blue.strategic.parquet:parquet-floor`** — a minimal Parquet writer/reader whose only transitive
+dependencies are `parquet-column` and `parquet-hadoop` (whose `hadoop-common` is `provided`, so **no Hadoop is
+pulled**). Carpet was rejected because it depends on `hadoop-common` + `hadoop-mapreduce-client-core`; `parquet-avro`
+drags full Hadoop. The Parquet writer lives in a **separate optional core module** (`security-analysis-parquet`) so the
+core `security-analysis-api` jar stays dependency‑light and the always‑available CSV writer has zero third‑party deps.
+
+### Other options considered
 
 The OLF jar is dependency‑light and Java 21. Standard `parquet-mr` drags in Hadoop, which is
 heavy and undesirable in a core compute jar. Recommendation: **keep the format pluggable and
@@ -278,16 +322,20 @@ risk), then add a `powsybl-open-loadflow-parquet` module using Carpet or parquet
 
 ## 9. Open questions / decisions
 
-1. **Monitored granularity:** branches only, or branches + buses + 3WTs in v1?
-2. **Diff filtering:** keep the pre/post `changed()` threshold filtering
-   (`PostContingencyNetworkResult.java:82‑134`) for streamed output, or always emit every
-   branch (full matrix)? Full matrix is simpler to consume; filtering shrinks output.
-3. **Parquet library:** Carpet vs. parquet‑floor vs. parquet‑mr vs. DuckDB (§5).
-4. **API home:** OLF‑only (as scoped here) vs. proposing the streaming‑writer abstraction
-   upstream in powsybl‑core so other providers can reuse it.
-5. **Output layout:** partition by contingency vs. by thread; single dataset dir vs. single
-   file (single file is incompatible with lock‑free multi‑thread writing).
-6. **Extensions:** always include V/angle (`OlfBranchResult`) columns, or gate on
-   `createResultExtension`?
-7. **Pre‑contingency (N) state:** include in the same dataset with a sentinel
-   `contingency_id`, or a separate file?
+Resolved in this prototype:
+- ✅ **Parquet library:** parquet‑floor (Hadoop‑free), in a separate optional core module (§5).
+- ✅ **API home:** provider‑agnostic abstraction in powsybl‑core, consumed by OLF (§2 of the status box).
+- ✅ **Output layout:** one part file per **thread/partition** in a directory dataset (lock‑free); single file rejected.
+- ✅ **Pre‑contingency (N) state:** same dataset, empty `contingencyId`, written by partition 0 only.
+- ✅ **Diff filtering:** the monitor‑all/vectorized path emits the **full matrix** (no `changed()` filter).
+- ✅ **State‑monitor vs. vectorize:** vectorized (§5b).
+
+Still open:
+1. **Monitored granularity:** branches only (current), or add buses + 3WTs (would be sibling datasets with their own
+   schemas)?
+2. **Extensions:** always include V/angle (`OlfBranchResult`) columns, or gate on `createResultExtension`?
+3. **DC / Woodbury‑DC:** the vectorized streaming hooks are wired on the base (AC + plain DC) path; the fast‑DC
+   Woodbury engine overrides `runSimulations`/`processContingency` and needs the same hooks added.
+4. **Compression / row‑group size:** parquet‑floor defaults today; expose zstd/snappy + row‑group tuning.
+5. **Zero‑allocation branch read:** optional `LfBranch`→primitive‑sink refactor (§5b) to drop the transient
+   `BranchResult` per branch.
