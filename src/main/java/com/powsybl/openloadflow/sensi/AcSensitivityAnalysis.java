@@ -459,7 +459,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      * that share its id), so the cotangent must be keyed by both.
      */
     public static String functionCotangentKey(SensitivityFunctionType functionType, String functionId) {
-        return functionType.name() + ' ' + functionId;
+        return functionType.name() + ' ' + functionId;
     }
 
     private static boolean runLoadFlow(AcLoadFlowContext context, boolean isRunningBaseSituation) {

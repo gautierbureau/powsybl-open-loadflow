@@ -27,8 +27,11 @@ import com.powsybl.sensitivity.SensitivityVariableType;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -415,6 +418,152 @@ class AcSensitivityAnalysisAdjointTest {
             double expected = w1 * s1 + w2 * s2;
             assertEquals(expected, thetaBar.get(g), 1e-5 * (Math.abs(expected) + 1e-3),
                     "runAdjoint must keep the two function types distinct on the shared branch id for " + g);
+        }
+    }
+
+    // Builds the MINIMAL O(F+V) factor set that reverse mode actually needs: one factor per function (feeds
+    // x̄ through the cotangent map), plus one factor per variable (creates its θ̄ group) — using the self
+    // function-on-the-variable's-element when the variable is itself monitored (so the direct term is
+    // present), else a filler function. This is what the pypowsybl runAdjoint should emit instead of the
+    // functions×variables cross product.
+    private static List<SensitivityFactor> minimalAdjointFactors(SensitivityFunctionType ft, List<String> functions,
+                                                                 SensitivityVariableType vt, List<String> variables) {
+        List<SensitivityFactor> factors = new ArrayList<>();
+        Set<String> added = new HashSet<>(); // "functionId|variableId" pairs already emitted (avoid dup direct term)
+        for (String f : functions) { // x̄: each function once (paired with the first variable)
+            if (added.add(f + '|' + variables.get(0))) {
+                factors.add(new SensitivityFactor(ft, f, vt, variables.get(0), false, ContingencyContext.all()));
+            }
+        }
+        Set<String> functionSet = new HashSet<>(functions);
+        for (String v : variables) { // θ̄ group + direct term: self-pair if v is monitored, else a filler
+            String fn = functionSet.contains(v) ? v : functions.get(0);
+            if (added.add(fn + '|' + v)) { // skip if already emitted (e.g. variables[0]'s self, from x̄)
+                factors.add(new SensitivityFactor(ft, fn, vt, v, false, ContingencyContext.all()));
+            }
+        }
+        return factors;
+    }
+
+    @Test
+    void runAdjointMinimalFactorSetMatchesFullCrossProduct() {
+        // The full adjoint declares functions×variables factors; reverse mode only needs O(F+V). This gate
+        // proves the minimal set reproduces the full θ̄ to machine precision on branch admittance — the case
+        // with a non-zero direct term (self) AND cross sensitivities (which must come from the single solve,
+        // not from per-pair factors). Distinct cotangent weights make every cross term matter.
+        Network network = IeeeCdfNetworkFactory.create14();
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        SensitivityFunctionType ft = SensitivityFunctionType.BRANCH_ACTIVE_POWER_1;
+        SensitivityVariableType vt = SensitivityVariableType.BRANCH_ADMITTANCE;
+        List<String> functions = List.of("L1-2-1", "L2-3-1", "L1-5-1", "L2-4-1", "L3-4-1");
+        List<String> variables = List.of("L2-3-1", "L1-5-1"); // both monitored -> self direct term exercised
+        double[] w = {0.7, -1.3, 0.4, 1.1, -0.6};
+        Map<String, Double> cot = new HashMap<>();
+        for (int i = 0; i < functions.size(); i++) {
+            cot.put(AcSensitivityAnalysis.functionCotangentKey(ft, functions.get(i)), w[i]);
+        }
+
+        List<SensitivityFactor> full = new ArrayList<>();
+        for (String v : variables) {
+            for (String f : functions) {
+                full.add(new SensitivityFactor(ft, f, vt, v, false, ContingencyContext.all()));
+            }
+        }
+        List<SensitivityFactor> minimal = minimalAdjointFactors(ft, functions, vt, variables);
+        assertTrue(minimal.size() < full.size(), "minimal set must be smaller than the cross product");
+
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+        String variantId = network.getVariantManager().getWorkingVariantId();
+
+        Map<String, Double> thetaFull = analysis.runAdjoint(network, variantId, List.of(), full, cot);
+        Map<String, Double> thetaMin = analysis.runAdjoint(network, variantId, List.of(), minimal, cot);
+
+        for (String v : variables) {
+            assertEquals(thetaFull.get(v), thetaMin.get(v), 1e-9 * (Math.abs(thetaFull.get(v)) + 1e-9),
+                    "minimal O(F+V) factor set must match the full cross product for " + v);
+        }
+    }
+
+    // Multi-function-type generalisation (what pypowsybl emits over its v/i1/i2/p1/p2 matrices): x̄ per type,
+    // self-pairs in each type where the variable is monitored, and a group-guarantee (a fixed function paired
+    // with every variable) so a variable that is NEVER a monitored function still gets a θ̄ group. The
+    // group-guarantee is safe: its direct term is 0 (function not on the variable's element) or the deduped self.
+    private static List<SensitivityFactor> minimalAdjointFactorsMulti(List<SensitivityFunctionType> fts,
+            List<List<String>> functionsPerType, SensitivityVariableType vt, List<String> variables) {
+        List<SensitivityFactor> factors = new ArrayList<>();
+        Set<String> added = new HashSet<>();
+        String v0 = variables.get(0);
+        for (int t = 0; t < fts.size(); t++) {
+            SensitivityFunctionType ft = fts.get(t);
+            for (String f : functionsPerType.get(t)) { // x̄: each function once, paired with v0
+                if (added.add(ft.name() + '|' + f + '|' + v0)) {
+                    factors.add(new SensitivityFactor(ft, f, vt, v0, false, ContingencyContext.all()));
+                }
+            }
+            Set<String> fset = new HashSet<>(functionsPerType.get(t));
+            for (String v : variables) { // self-pair (direct term) where the variable is a monitored function
+                if (fset.contains(v) && added.add(ft.name() + '|' + v + '|' + v)) {
+                    factors.add(new SensitivityFactor(ft, v, vt, v, false, ContingencyContext.all()));
+                }
+            }
+        }
+        SensitivityFunctionType ft0 = fts.get(0); // group guarantee for every variable
+        String f0 = functionsPerType.get(0).get(0);
+        for (String v : variables) {
+            if (added.add(ft0.name() + '|' + f0 + '|' + v)) {
+                factors.add(new SensitivityFactor(ft0, f0, vt, v, false, ContingencyContext.all()));
+            }
+        }
+        return factors;
+    }
+
+    @Test
+    void runAdjointMinimalFactorSetMatchesFullMultiFunctionType() {
+        Network network = IeeeCdfNetworkFactory.create14();
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        List<SensitivityFunctionType> fts = List.of(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1,
+                SensitivityFunctionType.BRANCH_CURRENT_1);
+        List<String> branches = List.of("L1-2-1", "L2-3-1", "L1-5-1");
+        List<List<String>> functionsPerType = List.of(branches, branches);
+        SensitivityVariableType vt = SensitivityVariableType.BRANCH_ADMITTANCE;
+        List<String> variables = List.of("L2-3-1", "L2-4-1"); // L2-3-1 monitored (self), L2-4-1 not (group-guarantee)
+
+        Map<String, Double> cot = new HashMap<>();
+        double[] wp = {0.7, -1.3, 0.4};
+        double[] wi = {0.5, 0.9, -0.2};
+        for (int i = 0; i < branches.size(); i++) {
+            cot.put(AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, branches.get(i)), wp[i]);
+            cot.put(AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BRANCH_CURRENT_1, branches.get(i)), wi[i]);
+        }
+
+        List<SensitivityFactor> full = new ArrayList<>();
+        for (String v : variables) {
+            for (int t = 0; t < fts.size(); t++) {
+                for (String f : functionsPerType.get(t)) {
+                    full.add(new SensitivityFactor(fts.get(t), f, vt, v, false, ContingencyContext.all()));
+                }
+            }
+        }
+        List<SensitivityFactor> minimal = minimalAdjointFactorsMulti(fts, functionsPerType, vt, variables);
+        assertTrue(minimal.size() < full.size(), "minimal set must be smaller than the cross product");
+
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+        String variantId = network.getVariantManager().getWorkingVariantId();
+        Map<String, Double> thetaFull = analysis.runAdjoint(network, variantId, List.of(), full, cot);
+        Map<String, Double> thetaMin = analysis.runAdjoint(network, variantId, List.of(), minimal, cot);
+        for (String v : variables) {
+            assertEquals(thetaFull.get(v), thetaMin.get(v), 1e-9 * (Math.abs(thetaFull.get(v)) + 1e-9),
+                    "minimal multi-type factor set must match the full cross product for " + v);
         }
     }
 }
