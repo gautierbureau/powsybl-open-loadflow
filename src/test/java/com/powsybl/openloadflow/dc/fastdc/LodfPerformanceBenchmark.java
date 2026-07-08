@@ -67,6 +67,47 @@ class LodfPerformanceBenchmark {
     // a DenseMatrix is backed by a single double[], so its number of elements cannot exceed this value
     private static final int MAX_DENSE_MATRIX_ELEMENTS = 268_435_455;
 
+    /**
+     * Measures the impact of the vectorized DC equation system (the pr/vectorized-dc contribution) on the LODF
+     * computation: all branches monitored x 1000 outaged, single threaded, with the scalar then the vectorized system.
+     */
+    @Test
+    void benchmarkLodfVectorization() {
+        System.out.println("\n============ FAST LODF: scalar vs vectorized DC ============");
+        System.out.printf("%-22s %10s %10s %12s %12s %10s%n", "case", "monitored", "outaged", "scalar(ms)", "vector(ms)", "speedup");
+        String only = System.getProperty("pegase.case", "");
+        for (String caseName : CASES) {
+            if (!only.isEmpty() && !caseName.contains(only)) {
+                continue;
+            }
+            Path file = caseDir().resolve(caseName);
+            if (!Files.exists(file)) {
+                System.out.printf("%-22s  (missing, skipped)%n", caseName);
+                continue;
+            }
+            Network network = MatpowerCaseLoader.readDotM(file);
+            double[] times = new double[2];
+            int[] dims = new int[2];
+            boolean[] vectorizedValues = {false, true};
+            for (int i = 0; i < vectorizedValues.length; i++) {
+                DcLoadFlowParameters dcParameters = new DcLoadFlowParameters().setVectorized(vectorizedValues[i]);
+                LfNetwork lfNetwork = LfNetwork.load(network, new LfNetworkLoaderImpl(), dcParameters.getNetworkParameters()).getFirst();
+                try (DcLoadFlowContext context = new DcLoadFlowContext(lfNetwork, dcParameters, false)) {
+                    List<LfBranch> monitoredBranches = lfNetwork.getBranches();
+                    List<LfBranch> outagedBranches = lfNetwork.getBranches().stream()
+                            .filter(b -> b.getBus1() != null && b.getBus2() != null && !b.isZeroImpedance(LoadFlowModel.DC))
+                            .limit(1000)
+                            .toList();
+                    dims[0] = monitoredBranches.size();
+                    dims[1] = outagedBranches.size();
+                    times[i] = timeMedian(2, 5, () -> LodfCalculator.computeLodfMatrix(context, monitoredBranches, outagedBranches));
+                }
+            }
+            System.out.printf("%-22s %10d %10d %12.1f %12.1f %10.2f%n",
+                    caseName, dims[0], dims[1], times[0], times[1], times[0] / times[1]);
+        }
+    }
+
     @Test
     void benchmarkLodf() {
         System.out.println("\n==================== FAST LODF ====================");
