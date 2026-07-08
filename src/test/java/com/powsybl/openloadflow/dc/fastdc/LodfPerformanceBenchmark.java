@@ -64,12 +64,14 @@ class LodfPerformanceBenchmark {
         return times[runs / 2];
     }
 
+    // a DenseMatrix is backed by a single double[], so its number of elements cannot exceed this value
+    private static final int MAX_DENSE_MATRIX_ELEMENTS = 268_435_455;
+
     @Test
     void benchmarkLodf() {
         System.out.println("\n==================== FAST LODF ====================");
-        System.out.printf("%-22s %10s %10s %10s %12s%n", "case", "monitored", "outaged", "cells", "lodf(ms)");
+        System.out.printf("%-22s %10s %10s %12s %12s%n", "case", "monitored", "outaged", "cells", "lodf(ms)");
         String only = System.getProperty("pegase.case", "");
-        int[] outageCounts = {100, 1000, Integer.MAX_VALUE}; // MAX_VALUE means all outageable branches
         for (String caseName : CASES) {
             if (!only.isEmpty() && !caseName.contains(only)) {
                 continue;
@@ -87,22 +89,28 @@ class LodfPerformanceBenchmark {
                 List<LfBranch> outageableBranches = lfNetwork.getBranches().stream()
                         .filter(b -> b.getBus1() != null && b.getBus2() != null && !b.isZeroImpedance(LoadFlowModel.DC))
                         .toList();
-                for (int requested : outageCounts) {
-                    int n = Math.min(requested, outageableBranches.size());
-                    List<LfBranch> outagedBranches = outageableBranches.subList(0, n);
-                    long cells = (long) monitoredBranches.size() * n;
+                // a few outage counts (all branches monitored), then the largest feasible matrix: all outageable
+                // branches, with monitored branches capped so that the result fits in a single DenseMatrix
+                int maxOutaged = outageableBranches.size();
+                int maxMonitoredForAll = Math.min(monitoredBranches.size(), MAX_DENSE_MATRIX_ELEMENTS / maxOutaged);
+                int[][] cases = {
+                    {monitoredBranches.size(), Math.min(100, maxOutaged)},
+                    {monitoredBranches.size(), Math.min(1000, maxOutaged)},
+                    {maxMonitoredForAll, maxOutaged},
+                };
+                for (int[] c : cases) {
+                    List<LfBranch> monitored = monitoredBranches.subList(0, c[0]);
+                    List<LfBranch> outaged = outageableBranches.subList(0, c[1]);
+                    long cells = (long) monitored.size() * outaged.size();
                     // one warmup (also triggers the Jacobian factorization), then median of 3 timed runs
                     double ms = timeMedian(1, 3, () -> {
-                        DenseMatrix lodf = LodfCalculator.computeLodfMatrix(context, monitoredBranches, outagedBranches);
-                        if (lodf.getRowCount() != monitoredBranches.size()) {
+                        DenseMatrix lodf = LodfCalculator.computeLodfMatrix(context, monitored, outaged);
+                        if (lodf.getRowCount() != monitored.size()) {
                             throw new IllegalStateException("unexpected matrix size");
                         }
                     });
-                    System.out.printf("%-22s %10d %10d %10d %12.1f%n",
-                            caseName, monitoredBranches.size(), n, cells, ms);
-                    if (requested == Integer.MAX_VALUE) {
-                        break; // 'all' already covered
-                    }
+                    System.out.printf("%-22s %10d %10d %12d %12.1f%n",
+                            caseName, monitored.size(), outaged.size(), cells, ms);
                 }
             }
         }
