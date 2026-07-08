@@ -1,7 +1,7 @@
 From cc7de14039092c169674911fefddf8388c9cadc7 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 3 Jul 2026 18:13:29 +0000
-Subject: [PATCH 1/4] Add LODF matrix computation API wired to
+Subject: [PATCH 1/5] Add LODF matrix computation API wired to
  powsybl-open-loadflow
 
 Expose pypowsybl.sensitivity.compute_lodf_matrix(network,
@@ -255,7 +255,7 @@ index d572024..d9da3fc 100644
 From 9fb220b3a8fa8149c94ccd9238e059511bcb5556 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 3 Jul 2026 18:13:29 +0000
-Subject: [PATCH 2/4] Temporarily use powsybl-open-loadflow 2.4.0-SNAPSHOT for
+Subject: [PATCH 2/5] Temporarily use powsybl-open-loadflow 2.4.0-SNAPSHOT for
  LODF API
 
 To remove once a powsybl-open-loadflow release including the LODF
@@ -335,7 +335,7 @@ index 2a8ebb8..34242ef 100644
 From ae0d5266bb90f39509e9267fde2964c30c09e089 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 8 Jul 2026 07:38:46 +0000
-Subject: [PATCH 3/4] Chunk LODF outaged branches to support full N-1 of large
+Subject: [PATCH 3/5] Chunk LODF outaged branches to support full N-1 of large
  networks
 
 A single native LODF call returns a dense buffer capped at ~268M elements,
@@ -449,7 +449,7 @@ index d9da3fc..9f7c66d 100644
 From 523bb9601442ad9b1287e2dae362203489e9055f Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 8 Jul 2026 09:59:53 +0000
-Subject: [PATCH 4/4] Reuse a native LODF context across outage chunks for full
+Subject: [PATCH 4/5] Reuse a native LODF context across outage chunks for full
  N-1 performance
 
 Chunking on the Python side previously called the stateless native LODF
@@ -659,6 +659,226 @@ index cc85f17..eefda39 100644
 +        return pd.concat(chunks, axis=1)
 +    finally:
 +        _pypowsybl.free_lodf_matrix_context(context)
+-- 
+2.43.0
+
+
+From c31fb6a52e1ea5aa4f09dd0b6f7c50a95ee20f6c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 8 Jul 2026 12:47:34 +0000
+Subject: [PATCH 5/5] Expose thread_count in the pypowsybl LODF API (Phase 2
+ multithreading)
+
+Thread the LODF threadCount through the native LODF entry points (one-shot
+and from-context), the C++ wrappers, the pybind11 bindings and the Python
+compute_lodf_matrix. The factor fill is parallelized across outaged
+branches while the result stays identical whatever the thread count.
+Verified from Python: thread_count 2 and 4 give bit-identical results and
+speed up the fill (16049 x 2000 on case9241pegase: 3.8 s -> 2.2 s on 4
+threads).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01U4QG5WNJWFjqfFxQHvDcga
+---
+ cpp/powsybl-cpp/powsybl-cpp.cpp                     |  8 ++++----
+ cpp/powsybl-cpp/powsybl-cpp.h                       |  4 ++--
+ cpp/pypowsybl-cpp/bindings.cpp                      |  4 ++--
+ .../sensitivity/SensitivityAnalysisCFunctions.java  |  8 ++++----
+ pypowsybl/_pypowsybl.pyi                            |  4 ++--
+ pypowsybl/sensitivity/impl/util.py                  |  9 ++++++---
+ tests/test_sensitivity_analysis.py                  | 13 +++++++++++++
+ 7 files changed, 33 insertions(+), 17 deletions(-)
+
+diff --git a/cpp/powsybl-cpp/powsybl-cpp.cpp b/cpp/powsybl-cpp/powsybl-cpp.cpp
+index e5f4a1b..6cc16e0 100644
+--- a/cpp/powsybl-cpp/powsybl-cpp.cpp
++++ b/cpp/powsybl-cpp/powsybl-cpp.cpp
+@@ -1280,14 +1280,14 @@ matrix* getReferenceMatrix(const JavaHandle& sensitivityAnalysisResultContext, c
+ }
+ 
+ matrix* computeLodfMatrix(const JavaHandle& network, const std::vector<std::string>& monitoredBranchIds,
+-                          const std::vector<std::string>& outagedBranchIds, const LoadFlowParameters& parameters) {
++                          const std::vector<std::string>& outagedBranchIds, const LoadFlowParameters& parameters, int threadCount) {
+     auto c_parameters = parameters.to_c_struct();
+     ToCharPtrPtr monitoredBranchIdsPtr(monitoredBranchIds);
+     ToCharPtrPtr outagedBranchIdsPtr(outagedBranchIds);
+     return PowsyblCaller::get()->callJava<matrix*>(::computeLodfMatrix, network,
+                                 monitoredBranchIdsPtr.get(), monitoredBranchIds.size(),
+                                 outagedBranchIdsPtr.get(), outagedBranchIds.size(),
+-                                c_parameters.get());
++                                c_parameters.get(), threadCount);
+ }
+ 
+ JavaHandle createLodfMatrixContext(const JavaHandle& network, const LoadFlowParameters& parameters) {
+@@ -1296,12 +1296,12 @@ JavaHandle createLodfMatrixContext(const JavaHandle& network, const LoadFlowPara
+ }
+ 
+ matrix* computeLodfMatrixFromContext(const JavaHandle& lodfContext, const std::vector<std::string>& monitoredBranchIds,
+-                                     const std::vector<std::string>& outagedBranchIds) {
++                                     const std::vector<std::string>& outagedBranchIds, int threadCount) {
+     ToCharPtrPtr monitoredBranchIdsPtr(monitoredBranchIds);
+     ToCharPtrPtr outagedBranchIdsPtr(outagedBranchIds);
+     return PowsyblCaller::get()->callJava<matrix*>(::computeLodfMatrixFromContext, lodfContext,
+                                 monitoredBranchIdsPtr.get(), monitoredBranchIds.size(),
+-                                outagedBranchIdsPtr.get(), outagedBranchIds.size());
++                                outagedBranchIdsPtr.get(), outagedBranchIds.size(), threadCount);
+ }
+ 
+ void freeLodfMatrixContext(const JavaHandle& lodfContext) {
+diff --git a/cpp/powsybl-cpp/powsybl-cpp.h b/cpp/powsybl-cpp/powsybl-cpp.h
+index 5e83e30..f76a960 100644
+--- a/cpp/powsybl-cpp/powsybl-cpp.h
++++ b/cpp/powsybl-cpp/powsybl-cpp.h
+@@ -846,10 +846,10 @@ matrix* getSensitivityMatrix(const JavaHandle& sensitivityAnalysisResultContext,
+ 
+ matrix* getReferenceMatrix(const JavaHandle& sensitivityAnalysisResultContext, const std::string& matrixId, const std::string& contingencyId);
+ 
+-matrix* computeLodfMatrix(const JavaHandle& network, const std::vector<std::string>& monitoredBranchIds, const std::vector<std::string>& outagedBranchIds, const LoadFlowParameters& parameters);
++matrix* computeLodfMatrix(const JavaHandle& network, const std::vector<std::string>& monitoredBranchIds, const std::vector<std::string>& outagedBranchIds, const LoadFlowParameters& parameters, int threadCount);
+ 
+ JavaHandle createLodfMatrixContext(const JavaHandle& network, const LoadFlowParameters& parameters);
+-matrix* computeLodfMatrixFromContext(const JavaHandle& lodfContext, const std::vector<std::string>& monitoredBranchIds, const std::vector<std::string>& outagedBranchIds);
++matrix* computeLodfMatrixFromContext(const JavaHandle& lodfContext, const std::vector<std::string>& monitoredBranchIds, const std::vector<std::string>& outagedBranchIds, int threadCount);
+ void freeLodfMatrixContext(const JavaHandle& lodfContext);
+ 
+ SeriesArray* createNetworkElementsSeriesArray(const JavaHandle& network, element_type elementType, filter_attributes_type filterAttributesType, const std::vector<std::string>& attributes, dataframe* dataframe, bool perUnit, double nominalApparentPower);
+diff --git a/cpp/pypowsybl-cpp/bindings.cpp b/cpp/pypowsybl-cpp/bindings.cpp
+index fb46dab..ce6a39f 100644
+--- a/cpp/pypowsybl-cpp/bindings.cpp
++++ b/cpp/pypowsybl-cpp/bindings.cpp
+@@ -1029,13 +1029,13 @@ PYBIND11_MODULE(_pypowsybl, m) {
+           py::arg("sensitivity_analysis_result_context"), py::arg("matrix_id"), py::arg("contingency_id"));
+ 
+     m.def("compute_lodf_matrix", &pypowsybl::computeLodfMatrix, "Compute the LODF matrix of monitored branches for single outages of branches",
+-          py::arg("network"), py::arg("monitored_branch_ids"), py::arg("outaged_branch_ids"), py::arg("parameters"));
++          py::arg("network"), py::arg("monitored_branch_ids"), py::arg("outaged_branch_ids"), py::arg("parameters"), py::arg("thread_count"));
+ 
+     m.def("create_lodf_matrix_context", &pypowsybl::createLodfMatrixContext, "Create a reusable LODF context loading and factorizing the network once",
+           py::arg("network"), py::arg("parameters"));
+ 
+     m.def("compute_lodf_matrix_from_context", &pypowsybl::computeLodfMatrixFromContext, "Compute a LODF matrix reusing a LODF context",
+-          py::arg("lodf_context"), py::arg("monitored_branch_ids"), py::arg("outaged_branch_ids"));
++          py::arg("lodf_context"), py::arg("monitored_branch_ids"), py::arg("outaged_branch_ids"), py::arg("thread_count"));
+ 
+     m.def("free_lodf_matrix_context", &pypowsybl::freeLodfMatrixContext, "Free a LODF context",
+           py::arg("lodf_context"));
+diff --git a/java/pypowsybl/src/main/java/com/powsybl/python/sensitivity/SensitivityAnalysisCFunctions.java b/java/pypowsybl/src/main/java/com/powsybl/python/sensitivity/SensitivityAnalysisCFunctions.java
+index 6a17217..ed0bbe3 100644
+--- a/java/pypowsybl/src/main/java/com/powsybl/python/sensitivity/SensitivityAnalysisCFunctions.java
++++ b/java/pypowsybl/src/main/java/com/powsybl/python/sensitivity/SensitivityAnalysisCFunctions.java
+@@ -261,7 +261,7 @@ public final class SensitivityAnalysisCFunctions {
+     public static PyPowsyblApiHeader.MatrixPointer computeLodfMatrix(IsolateThread thread, ObjectHandle networkHandle,
+                                                                      CCharPointerPointer monitoredBranchIdsPtrPtr, int monitoredBranchIdsCount,
+                                                                      CCharPointerPointer outagedBranchIdsPtrPtr, int outagedBranchIdsCount,
+-                                                                     LoadFlowParametersPointer loadFlowParametersPtr,
++                                                                     LoadFlowParametersPointer loadFlowParametersPtr, int threadCount,
+                                                                      ExceptionHandlerPointer exceptionHandlerPtr) {
+         return doCatch(exceptionHandlerPtr, new PointerProvider<>() {
+             @Override
+@@ -271,7 +271,7 @@ public final class SensitivityAnalysisCFunctions {
+                 List<String> outagedBranchIds = toStringList(outagedBranchIdsPtrPtr, outagedBranchIdsCount);
+                 LoadFlowParameters parameters = LoadFlowCUtils.createLoadFlowParameters(loadFlowParametersPtr,
+                         LoadFlowCUtils.getLoadFlowProvider(PyPowsyblConfiguration.getDefaultLoadFlowProvider()));
+-                DenseMatrix lodfMatrix = LodfComputer.computeLodfMatrix(network, monitoredBranchIds, outagedBranchIds, parameters);
++                DenseMatrix lodfMatrix = LodfComputer.computeLodfMatrix(network, monitoredBranchIds, outagedBranchIds, parameters, threadCount);
+                 return denseMatrixToMatrixPointer(lodfMatrix);
+             }
+         });
+@@ -298,14 +298,14 @@ public final class SensitivityAnalysisCFunctions {
+     public static PyPowsyblApiHeader.MatrixPointer computeLodfMatrixFromContext(IsolateThread thread, ObjectHandle lodfContextHandle,
+                                                                                 CCharPointerPointer monitoredBranchIdsPtrPtr, int monitoredBranchIdsCount,
+                                                                                 CCharPointerPointer outagedBranchIdsPtrPtr, int outagedBranchIdsCount,
+-                                                                                ExceptionHandlerPointer exceptionHandlerPtr) {
++                                                                                int threadCount, ExceptionHandlerPointer exceptionHandlerPtr) {
+         return doCatch(exceptionHandlerPtr, new PointerProvider<>() {
+             @Override
+             public PyPowsyblApiHeader.MatrixPointer get() {
+                 LodfComputer.Context context = ObjectHandles.getGlobal().get(lodfContextHandle);
+                 List<String> monitoredBranchIds = toStringList(monitoredBranchIdsPtrPtr, monitoredBranchIdsCount);
+                 List<String> outagedBranchIds = toStringList(outagedBranchIdsPtrPtr, outagedBranchIdsCount);
+-                return denseMatrixToMatrixPointer(context.computeLodfMatrix(monitoredBranchIds, outagedBranchIds));
++                return denseMatrixToMatrixPointer(context.computeLodfMatrix(monitoredBranchIds, outagedBranchIds, threadCount));
+             }
+         });
+     }
+diff --git a/pypowsybl/_pypowsybl.pyi b/pypowsybl/_pypowsybl.pyi
+index 4c69428..e2bba92 100644
+--- a/pypowsybl/_pypowsybl.pyi
++++ b/pypowsybl/_pypowsybl.pyi
+@@ -992,9 +992,9 @@ def save_network(network: JavaHandle, file: str, format: str, parameters: Dict[s
+ def save_network_to_string(network: JavaHandle, format: str, parameters: Dict[str,str], report: Optional[JavaHandle]) -> str: ...
+ def save_network_to_binary_buffer(network: JavaHandle, format: str, parameters: Dict[str,str], report: Optional[JavaHandle]) -> bytes: ...
+ def get_sensitivity_matrix(sensitivity_analysis_result_context: JavaHandle, matrix_id: str, contingency_id: str) -> Matrix: ...
+-def compute_lodf_matrix(network: JavaHandle, monitored_branch_ids: List[str], outaged_branch_ids: List[str], parameters: LoadFlowParameters) -> Matrix: ...
++def compute_lodf_matrix(network: JavaHandle, monitored_branch_ids: List[str], outaged_branch_ids: List[str], parameters: LoadFlowParameters, thread_count: int) -> Matrix: ...
+ def create_lodf_matrix_context(network: JavaHandle, parameters: LoadFlowParameters) -> JavaHandle: ...
+-def compute_lodf_matrix_from_context(lodf_context: JavaHandle, monitored_branch_ids: List[str], outaged_branch_ids: List[str]) -> Matrix: ...
++def compute_lodf_matrix_from_context(lodf_context: JavaHandle, monitored_branch_ids: List[str], outaged_branch_ids: List[str], thread_count: int) -> Matrix: ...
+ def free_lodf_matrix_context(lodf_context: JavaHandle) -> None: ...
+ def get_branch_results(result: JavaHandle) -> SeriesArray: ...
+ def get_bus_breaker_view_buses(network: JavaHandle, voltage_level: str) -> SeriesArray: ...
+diff --git a/pypowsybl/sensitivity/impl/util.py b/pypowsybl/sensitivity/impl/util.py
+index eefda39..9358931 100644
+--- a/pypowsybl/sensitivity/impl/util.py
++++ b/pypowsybl/sensitivity/impl/util.py
+@@ -162,7 +162,8 @@ _MAX_LODF_MATRIX_ELEMENTS = 268_435_455
+ 
+ 
+ def compute_lodf_matrix(network: Network, monitored_branch_ids: List[str], outaged_branch_ids: List[str],
+-                        parameters: Optional[LfParameters] = None, max_columns_per_chunk: Optional[int] = None) -> pd.DataFrame:
++                        parameters: Optional[LfParameters] = None, thread_count: int = 1,
++                        max_columns_per_chunk: Optional[int] = None) -> pd.DataFrame:
+     """
+     Computes the LODF (Line Outage Distribution Factor) matrix of monitored branches for single branch outages,
+     using a fast DC computation (a single sparse resolution, whatever the number of branches and outages).
+@@ -182,6 +183,8 @@ def compute_lodf_matrix(network: Network, monitored_branch_ids: List[str], outag
+         monitored_branch_ids:  ids of the branches on which the flow change is observed
+         outaged_branch_ids:    ids of the branches whose outages are simulated
+         parameters:            the load flow parameters, used to build the DC equation system
++        thread_count:          number of threads used to compute the factors (1 for a sequential computation); the
++                               result is identical whatever the thread count
+         max_columns_per_chunk: maximum number of outaged branches per native call; defaults to the largest value
+                                keeping each chunk within the dense matrix element limit
+ 
+@@ -194,7 +197,7 @@ def compute_lodf_matrix(network: Network, monitored_branch_ids: List[str], outag
+ 
+     if len(outaged_branch_ids) <= max_columns:
+         m = _pypowsybl.compute_lodf_matrix(network._handle, monitored_branch_ids, outaged_branch_ids,
+-                                           p._to_c_parameters())  # pylint: disable=protected-access
++                                           p._to_c_parameters(), thread_count)  # pylint: disable=protected-access
+         return pd.DataFrame(data=np.array(m, copy=False), index=monitored_branch_ids, columns=outaged_branch_ids)
+ 
+     # the full matrix would exceed the dense matrix limit: process the outaged branches in column chunks. A reusable
+@@ -205,7 +208,7 @@ def compute_lodf_matrix(network: Network, monitored_branch_ids: List[str], outag
+         chunks = []
+         for start in range(0, len(outaged_branch_ids), max_columns):
+             chunk_ids = outaged_branch_ids[start:start + max_columns]
+-            m = _pypowsybl.compute_lodf_matrix_from_context(context, monitored_branch_ids, chunk_ids)
++            m = _pypowsybl.compute_lodf_matrix_from_context(context, monitored_branch_ids, chunk_ids, thread_count)
+             chunks.append(pd.DataFrame(data=np.array(m, copy=True), index=monitored_branch_ids, columns=chunk_ids))
+         return pd.concat(chunks, axis=1)
+     finally:
+diff --git a/tests/test_sensitivity_analysis.py b/tests/test_sensitivity_analysis.py
+index 9f7c66d..5449d55 100644
+--- a/tests/test_sensitivity_analysis.py
++++ b/tests/test_sensitivity_analysis.py
+@@ -388,3 +388,16 @@ def test_lodf_matrix_chunked():
+         assert list(chunked.index) == list(reference.index)
+         assert list(chunked.columns) == list(reference.columns)
+         assert np.allclose(chunked.to_numpy(), reference.to_numpy(), equal_nan=True, atol=1e-12)
++
++
++def test_lodf_matrix_thread_count():
++    # thread_count must not change the result
++    network = pp.network.create_ieee14()
++    branch_ids = list(network.get_branches().index)
++    reference = pp.sensitivity.compute_lodf_matrix(network, branch_ids, branch_ids, thread_count=1)
++    for thread_count in (2, 4):
++        result = pp.sensitivity.compute_lodf_matrix(network, branch_ids, branch_ids, thread_count=thread_count)
++        assert np.allclose(result.to_numpy(), reference.to_numpy(), equal_nan=True, atol=1e-12)
++    # also exercised together with chunking
++    chunked = pp.sensitivity.compute_lodf_matrix(network, branch_ids, branch_ids, thread_count=2, max_columns_per_chunk=3)
++    assert np.allclose(chunked.to_numpy(), reference.to_numpy(), equal_nan=True, atol=1e-12)
 -- 
 2.43.0
 
