@@ -17,6 +17,7 @@ import com.powsybl.contingency.LoadContingency;
 import com.powsybl.contingency.strategy.OperatorStrategy;
 import com.powsybl.contingency.strategy.condition.TrueCondition;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.VariantManagerConstants;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.network.NodeBreakerNetworkFactory;
@@ -34,6 +35,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
  * With the network per thread COPY mode, a multi-threaded security analysis simulates the very same
@@ -100,6 +102,43 @@ class MtNetworkCopyTest extends AbstractOpenSecurityAnalysisTest {
         SecurityAnalysisResult singleThread = run(network, contingencies, 1, dc, dcFastMode, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY);
         SecurityAnalysisResult multiThread = run(network, contingencies, threadCount, dc, dcFastMode, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY);
         assertSameResults(singleThread, multiThread);
+    }
+
+    @Test
+    void testCopyModeFromNonInitialVariant() {
+        // gridsuite / pypowsybl pattern: the caller clones the network to a process variant, modifies
+        // it and launches the security analysis from that variant; the LfNetwork (and its per-thread
+        // copies) must capture the selected variant's state on the calling thread, and the workers
+        // must not fall back to iidm reads (which could observe another variant)
+        Network network = createNodeBreakerNetwork();
+        List<Contingency> contingencies = List.of(
+                new Contingency("L1", new BranchContingency("L1")),
+                new Contingency("L2", new BranchContingency("L2")));
+
+        SecurityAnalysisResult initialVariant = run(network, contingencies, 1, false, false, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY);
+
+        network.getVariantManager().cloneVariant(VariantManagerConstants.INITIAL_VARIANT_ID, "processVariant");
+        network.getVariantManager().setWorkingVariant("processVariant");
+        network.getLoad("LD").setP0(network.getLoad("LD").getP0() * 1.2); // modified in the variant only
+
+        SecurityAnalysisResult singleThread = run(network, contingencies, 1, false, false, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY);
+        RefThreadGuardTestUtil.arm();
+        SecurityAnalysisResult multiThread;
+        try {
+            multiThread = run(network, contingencies, 4, false, false, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY);
+        } finally {
+            RefThreadGuardTestUtil.disarm();
+        }
+        assertSameResults(singleThread, multiThread);
+
+        // the analysis really simulated the variant state, not the initial one
+        double initialP1 = initialVariant.getPreContingencyResult().getNetworkResult().getBranchResult("L1").getP1();
+        double variantP1 = multiThread.getPreContingencyResult().getNetworkResult().getBranchResult("L1").getP1();
+        assertNotEquals(initialP1, variantP1, 1e-3);
+
+        // switching back to the initial variant still gives the original results
+        network.getVariantManager().setWorkingVariant(VariantManagerConstants.INITIAL_VARIANT_ID);
+        assertSameResults(initialVariant, run(network, contingencies, 4, false, false, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY));
     }
 
     @Test
