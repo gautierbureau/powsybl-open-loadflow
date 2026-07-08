@@ -47,7 +47,12 @@ public final class LodfComputer {
 
     public static DenseMatrix computeLodfMatrix(Network network, List<String> monitoredBranchIds, List<String> outagedBranchIds,
                                                 LoadFlowParameters parameters) {
-        return computeLodfMatrix(network, monitoredBranchIds, outagedBranchIds, parameters, new SparseMatrixFactory(), ReportNode.NO_OP);
+        return computeLodfMatrix(network, monitoredBranchIds, outagedBranchIds, parameters, 1);
+    }
+
+    public static DenseMatrix computeLodfMatrix(Network network, List<String> monitoredBranchIds, List<String> outagedBranchIds,
+                                                LoadFlowParameters parameters, int threadCount) {
+        return computeLodfMatrix(network, monitoredBranchIds, outagedBranchIds, parameters, new SparseMatrixFactory(), ReportNode.NO_OP, threadCount);
     }
 
     /**
@@ -69,9 +74,9 @@ public final class LodfComputer {
      * @return the LODF matrix, with one row per monitored branch and one column per outaged branch
      */
     public static DenseMatrix computeLodfMatrix(Network network, List<String> monitoredBranchIds, List<String> outagedBranchIds,
-                                                LoadFlowParameters parameters, MatrixFactory matrixFactory, ReportNode reportNode) {
+                                                LoadFlowParameters parameters, MatrixFactory matrixFactory, ReportNode reportNode, int threadCount) {
         try (Context context = createContext(network, parameters, matrixFactory, reportNode)) {
-            return context.computeLodfMatrix(monitoredBranchIds, outagedBranchIds);
+            return context.computeLodfMatrix(monitoredBranchIds, outagedBranchIds, threadCount);
         }
     }
 
@@ -120,10 +125,17 @@ public final class LodfComputer {
          * the network and Jacobian factorization of this context. See {@link LodfComputer#computeLodfMatrix}.
          */
         public DenseMatrix computeLodfMatrix(List<String> monitoredBranchIds, List<String> outagedBranchIds) {
+            return computeLodfMatrix(monitoredBranchIds, outagedBranchIds, 1);
+        }
+
+        /**
+         * Same as {@link #computeLodfMatrix(List, List)}, computing the matrix with the given number of threads.
+         */
+        public DenseMatrix computeLodfMatrix(List<String> monitoredBranchIds, List<String> outagedBranchIds, int threadCount) {
             LfNetwork lfNetwork = loadFlowContext.getNetwork();
             List<LfBranch> monitoredBranches = getLfBranches(lfNetwork, monitoredBranchIds);
             List<LfBranch> outagedBranches = getLfBranches(lfNetwork, outagedBranchIds);
-            return LodfCalculator.computeLodfMatrix(loadFlowContext, monitoredBranches, outagedBranches);
+            return LodfCalculator.computeLodfMatrix(loadFlowContext, monitoredBranches, outagedBranches, threadCount);
         }
 
         /**
@@ -131,10 +143,17 @@ public final class LodfComputer {
          * given writer, reusing the network and Jacobian factorization of this context. See {@link LodfCalculator#computeLodf}.
          */
         public void computeLodf(List<String> monitoredBranchIds, List<String> outagedBranchIds, LodfResultWriter writer) {
+            computeLodf(monitoredBranchIds, outagedBranchIds, writer, 1);
+        }
+
+        /**
+         * Same as {@link #computeLodf(List, List, LodfResultWriter)}, streaming the factors with the given number of threads.
+         */
+        public void computeLodf(List<String> monitoredBranchIds, List<String> outagedBranchIds, LodfResultWriter writer, int threadCount) {
             LfNetwork lfNetwork = loadFlowContext.getNetwork();
             List<LfBranch> monitoredBranches = getLfBranches(lfNetwork, monitoredBranchIds);
             List<LfBranch> outagedBranches = getLfBranches(lfNetwork, outagedBranchIds);
-            LodfCalculator.computeLodf(loadFlowContext, monitoredBranches, outagedBranches, writer);
+            LodfCalculator.computeLodf(loadFlowContext, monitoredBranches, outagedBranches, writer, threadCount);
         }
 
         @Override
