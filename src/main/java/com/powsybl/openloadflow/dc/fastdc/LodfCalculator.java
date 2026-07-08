@@ -38,10 +38,10 @@ import java.util.Objects;
  *
  * <p>Note that LODF factors only depend on the network topology and impedances: no load flow needs to be run beforehand.
  *
- * <p>The result is returned as a single {@link DenseMatrix}, so the number of monitored branches times the number of
- * outaged branches must not exceed {@link DenseMatrix#MAX_ELEMENT_COUNT}. For a full N-1 analysis of a very large
- * network (where all branches are both monitored and outaged), the caller must split the monitored or the outaged
- * branches into groups.
+ * <p>{@link #computeLodfMatrix} returns the result as a single {@link DenseMatrix}, so the number of monitored branches
+ * times the number of outaged branches must not exceed {@link DenseMatrix#MAX_ELEMENT_COUNT}. For a full N-1 analysis of
+ * a very large network (where all branches are both monitored and outaged), the matrix would not fit: use
+ * {@link #computeLodf} instead, which streams the factors to a {@link LodfResultWriter} without materializing the matrix.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at gmail.com>}
  */
@@ -74,33 +74,53 @@ public final class LodfCalculator {
      * @return the LODF matrix, with one row per monitored branch and one column per outaged branch
      */
     public static DenseMatrix computeLodfMatrix(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches, List<LfBranch> outagedBranches) {
-        Objects.requireNonNull(loadFlowContext);
-        int outageBatchSize = computeOutageBatchSize(loadFlowContext.getEquationSystem());
-        return computeLodfMatrix(loadFlowContext, monitoredBranches, outagedBranches, outageBatchSize);
-    }
-
-    /**
-     * Same as {@link #computeLodfMatrix(DcLoadFlowContext, List, List)}, with an explicit number of outages processed
-     * per batch. Package-private, mainly to let tests exercise the batching with small batch sizes.
-     */
-    static DenseMatrix computeLodfMatrix(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches,
-                                         List<LfBranch> outagedBranches, int outageBatchSize) {
-        Objects.requireNonNull(loadFlowContext);
         Objects.requireNonNull(monitoredBranches);
         Objects.requireNonNull(outagedBranches);
-        EquationSystem<DcVariableType, DcEquationType> equationSystem = loadFlowContext.getEquationSystem();
-        DcEquationSystemCreationParameters creationParameters = loadFlowContext.getParameters().getEquationSystemCreationParameters();
-
-        // validate all outaged branches up front, so we fail before doing any computation
-        outagedBranches.forEach(LodfCalculator::checkOutagedBranch);
-
         // the result is a single DenseMatrix: check its size up front to fail with an explicit message
         long resultSize = (long) monitoredBranches.size() * outagedBranches.size();
         if (resultSize > DenseMatrix.MAX_ELEMENT_COUNT) {
             throw new PowsyblException("LODF matrix is too large (" + monitoredBranches.size() + " monitored branches x "
                     + outagedBranches.size() + " outaged branches = " + resultSize + " elements, maximum is "
-                    + DenseMatrix.MAX_ELEMENT_COUNT + "): split the monitored or the outaged branches into groups");
+                    + DenseMatrix.MAX_ELEMENT_COUNT + "): use computeLodf with a streaming LodfResultWriter, or split the "
+                    + "monitored or the outaged branches into groups");
         }
+        DenseMatrix lodfMatrix = new DenseMatrix(monitoredBranches.size(), outagedBranches.size());
+        computeLodf(loadFlowContext, monitoredBranches, outagedBranches, lodfMatrix::set);
+        return lodfMatrix;
+    }
+
+    /**
+     * Streams the LODF factors of the given monitored branches for single outages of the given branches to the given
+     * writer, one factor per (monitored branch, outaged branch) pair, without ever materializing the full matrix. This
+     * is the way to run a full N-1 analysis of a very large network, whose matrix would exceed
+     * {@link DenseMatrix#MAX_ELEMENT_COUNT}. See {@link #computeLodfMatrix} for the value conventions.
+     *
+     * @param loadFlowContext the DC load flow context, whose Jacobian matrix is reused (and factorized only once)
+     * @param monitoredBranches the branches on which the flow change is observed
+     * @param outagedBranches the branches whose outages are simulated, which must be connected on both sides and of non-zero impedance
+     * @param writer the consumer of the streamed LODF factors
+     */
+    public static void computeLodf(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches,
+                                   List<LfBranch> outagedBranches, LodfResultWriter writer) {
+        Objects.requireNonNull(loadFlowContext);
+        computeLodf(loadFlowContext, monitoredBranches, outagedBranches, writer, computeOutageBatchSize(loadFlowContext.getEquationSystem()));
+    }
+
+    /**
+     * Same as {@link #computeLodf(DcLoadFlowContext, List, List, LodfResultWriter)}, with an explicit number of outages
+     * processed per batch. Package-private, mainly to let tests exercise the batching with small batch sizes.
+     */
+    static void computeLodf(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches,
+                            List<LfBranch> outagedBranches, LodfResultWriter writer, int outageBatchSize) {
+        Objects.requireNonNull(loadFlowContext);
+        Objects.requireNonNull(monitoredBranches);
+        Objects.requireNonNull(outagedBranches);
+        Objects.requireNonNull(writer);
+        EquationSystem<DcVariableType, DcEquationType> equationSystem = loadFlowContext.getEquationSystem();
+        DcEquationSystemCreationParameters creationParameters = loadFlowContext.getParameters().getEquationSystemCreationParameters();
+
+        // validate all outaged branches up front, so we fail before doing any computation
+        outagedBranches.forEach(LodfCalculator::checkOutagedBranch);
 
         // flow equation terms of the monitored branches, built once and shared (read-only) across batches; work with
         // both the scalar and the vectorized DC equation systems; null for branches without a closed DC flow term
@@ -108,27 +128,24 @@ public final class LodfCalculator {
                 .map(branch -> ComputedElement.createBranchEquation(branch, equationSystem, creationParameters))
                 .toList();
 
-        DenseMatrix lodfMatrix = new DenseMatrix(monitoredBranches.size(), outagedBranches.size());
-
         // The injection states of all outages cannot always be solved in a single pass: the +1/-1 right-hand side is a
         // dense (equationCount x outages) matrix, whose size in bytes must fit in an int (see ComputedElement.initRhs)
         // and whose memory footprint grows with the number of outages. We therefore process the outages in batches,
         // reusing the Jacobian factorization (cached in the context) so that only the cheap per-batch resolution is redone.
         for (int batchStart = 0; batchStart < outagedBranches.size(); batchStart += outageBatchSize) {
             int batchEnd = Math.min(batchStart + outageBatchSize, outagedBranches.size());
-            computeLodfColumns(loadFlowContext, monitoredBranches, monitoredBranchEquations,
-                    outagedBranches.subList(batchStart, batchEnd), batchStart, lodfMatrix);
+            streamLodfColumns(loadFlowContext, monitoredBranches, monitoredBranchEquations,
+                    outagedBranches.subList(batchStart, batchEnd), batchStart, writer);
         }
-        return lodfMatrix;
     }
 
     /**
-     * Fills the columns {@code [batchStart, batchStart + batch.size())} of the LODF matrix for the given batch of
+     * Streams the LODF factors of the columns {@code [batchStart, batchStart + batch.size())} for the given batch of
      * outaged branches, from a single multiple right-hand side resolution of the DC linear system.
      */
-    private static void computeLodfColumns(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches,
-                                           List<ClosedBranchSide1DcFlowEquationTerm> monitoredBranchEquations,
-                                           List<LfBranch> outagedBranchesBatch, int batchStart, DenseMatrix lodfMatrix) {
+    private static void streamLodfColumns(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches,
+                                          List<ClosedBranchSide1DcFlowEquationTerm> monitoredBranchEquations,
+                                          List<LfBranch> outagedBranchesBatch, int batchStart, LodfResultWriter writer) {
         LfNetwork lfNetwork = loadFlowContext.getNetwork();
         EquationSystem<DcVariableType, DcEquationType> equationSystem = loadFlowContext.getEquationSystem();
         DcEquationSystemCreationParameters creationParameters = loadFlowContext.getParameters().getEquationSystemCreationParameters();
@@ -148,9 +165,9 @@ public final class LodfCalculator {
             // a self-PTDF of 1 means that all the flow of the outaged branch goes through itself,
             // i.e. that its outage breaks the network connectivity: LODF factors are undefined
             boolean breaksConnectivity = Math.abs(selfPtdf) > 1d - CONNECTIVITY_LOSS_THRESHOLD;
-            int lodfColumn = batchStart + j;
+            int outagedIndex = batchStart + j;
             for (int row = 0; row < monitoredBranches.size(); row++) {
-                lodfMatrix.set(row, lodfColumn, computeLodfValue(injectionStates, outageElement, monitoredBranches.get(row),
+                writer.writeLodf(row, outagedIndex, computeLodfValue(injectionStates, outageElement, monitoredBranches.get(row),
                         monitoredBranchEquations.get(row), selfPtdf, breaksConnectivity));
             }
         }

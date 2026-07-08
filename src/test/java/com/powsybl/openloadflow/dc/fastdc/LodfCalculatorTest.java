@@ -201,7 +201,7 @@ class LodfCalculatorTest {
     @ParameterizedTest(name = "vectorized={0}")
     @ValueSource(booleans = {false, true})
     void testOutageBatchingGivesSameResult(boolean vectorized) {
-        // processing the outages in several small batches must give exactly the same matrix as a single batch
+        // processing the outages in several small batches must give exactly the same result as a single batch
         dcParameters.setVectorized(vectorized);
         Network network = FourBusNetworkFactory.create();
         LfNetwork lfNetwork = LfNetwork.load(network, new LfNetworkLoaderImpl(), dcParameters.getNetworkParameters()).getFirst();
@@ -211,9 +211,8 @@ class LodfCalculatorTest {
                     .toList();
             DenseMatrix reference = LodfCalculator.computeLodfMatrix(context, branches, branches);
             for (int batchSize : new int[] {1, 2, 3, branches.size()}) {
-                DenseMatrix batched = LodfCalculator.computeLodfMatrix(context, branches, branches, batchSize);
-                assertEquals(reference.getRowCount(), batched.getRowCount());
-                assertEquals(reference.getColumnCount(), batched.getColumnCount());
+                DenseMatrix batched = new DenseMatrix(branches.size(), branches.size());
+                LodfCalculator.computeLodf(context, branches, branches, batched::set, batchSize);
                 for (int row = 0; row < reference.getRowCount(); row++) {
                     for (int column = 0; column < reference.getColumnCount(); column++) {
                         assertEquals(reference.get(row, column), batched.get(row, column), 0d,
@@ -221,6 +220,31 @@ class LodfCalculatorTest {
                     }
                 }
             }
+        }
+    }
+
+    @ParameterizedTest(name = "vectorized={0}")
+    @ValueSource(booleans = {false, true})
+    void testStreamingGivesSameValuesAsMatrix(boolean vectorized) {
+        // the streaming computeLodf must report exactly the same values as the materialized matrix, and must work
+        // even when the (monitored x outaged) product would exceed the DenseMatrix element limit
+        dcParameters.setVectorized(vectorized);
+        Network network = FourBusNetworkFactory.create();
+        LfNetwork lfNetwork = LfNetwork.load(network, new LfNetworkLoaderImpl(), dcParameters.getNetworkParameters()).getFirst();
+        try (DcLoadFlowContext context = new DcLoadFlowContext(lfNetwork, dcParameters)) {
+            List<LfBranch> monitored = List.of("l14", "l12", "l23", "l34", "l13").stream().map(lfNetwork::getBranchById).toList();
+            List<LfBranch> outaged = List.of("l12", "l34").stream().map(lfNetwork::getBranchById).toList();
+            DenseMatrix reference = LodfCalculator.computeLodfMatrix(context, monitored, outaged);
+
+            int[] writeCount = {0};
+            LodfResultWriter writer = (monitoredIndex, outagedIndex, lodf) -> {
+                assertEquals(reference.get(monitoredIndex, outagedIndex), lodf, 0d,
+                        "row=" + monitoredIndex + " column=" + outagedIndex);
+                writeCount[0]++;
+            };
+            LodfCalculator.computeLodf(context, monitored, outaged, writer);
+            // every (monitored, outaged) pair must be reported exactly once
+            assertEquals(monitored.size() * outaged.size(), writeCount[0]);
         }
     }
 }
