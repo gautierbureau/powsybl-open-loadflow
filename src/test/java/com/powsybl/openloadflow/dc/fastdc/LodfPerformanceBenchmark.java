@@ -112,6 +112,22 @@ class LodfPerformanceBenchmark {
                     System.out.printf("%-22s %10d %10d %12d %12.1f%n",
                             caseName, monitored.size(), outaged.size(), cells, ms);
                 }
+
+                // full N-1 (all branches monitored and outaged) through the streaming API, which does not materialize
+                // the matrix: this is the only way to run it when monitored x outaged exceeds the DenseMatrix limit
+                long fullCells = (long) monitoredBranches.size() * outageableBranches.size();
+                double streamMs = timeMedian(1, 3, () -> {
+                    long[] checksum = {0L};
+                    LodfCalculator.computeLodf(context, monitoredBranches, outageableBranches,
+                            (monitoredIndex, outagedIndex, lodf) -> {
+                                // accumulate something to prevent the computation from being optimized away
+                                if (!Double.isNaN(lodf)) {
+                                    checksum[0] += Double.doubleToRawLongBits(lodf);
+                                }
+                            });
+                });
+                System.out.printf("%-22s %10d %10d %12d %12.1f  (streaming, full N-1)%n",
+                        caseName, monitoredBranches.size(), outageableBranches.size(), fullCells, streamMs);
             }
         }
     }
