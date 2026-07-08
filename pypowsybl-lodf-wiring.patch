@@ -1,7 +1,7 @@
 From cc7de14039092c169674911fefddf8388c9cadc7 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 3 Jul 2026 18:13:29 +0000
-Subject: [PATCH 1/5] Add LODF matrix computation API wired to
+Subject: [PATCH 1/6] Add LODF matrix computation API wired to
  powsybl-open-loadflow
 
 Expose pypowsybl.sensitivity.compute_lodf_matrix(network,
@@ -255,7 +255,7 @@ index d572024..d9da3fc 100644
 From 9fb220b3a8fa8149c94ccd9238e059511bcb5556 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 3 Jul 2026 18:13:29 +0000
-Subject: [PATCH 2/5] Temporarily use powsybl-open-loadflow 2.4.0-SNAPSHOT for
+Subject: [PATCH 2/6] Temporarily use powsybl-open-loadflow 2.4.0-SNAPSHOT for
  LODF API
 
 To remove once a powsybl-open-loadflow release including the LODF
@@ -335,7 +335,7 @@ index 2a8ebb8..34242ef 100644
 From ae0d5266bb90f39509e9267fde2964c30c09e089 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 8 Jul 2026 07:38:46 +0000
-Subject: [PATCH 3/5] Chunk LODF outaged branches to support full N-1 of large
+Subject: [PATCH 3/6] Chunk LODF outaged branches to support full N-1 of large
  networks
 
 A single native LODF call returns a dense buffer capped at ~268M elements,
@@ -449,7 +449,7 @@ index d9da3fc..9f7c66d 100644
 From 523bb9601442ad9b1287e2dae362203489e9055f Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 8 Jul 2026 09:59:53 +0000
-Subject: [PATCH 4/5] Reuse a native LODF context across outage chunks for full
+Subject: [PATCH 4/6] Reuse a native LODF context across outage chunks for full
  N-1 performance
 
 Chunking on the Python side previously called the stateless native LODF
@@ -666,7 +666,7 @@ index cc85f17..eefda39 100644
 From c31fb6a52e1ea5aa4f09dd0b6f7c50a95ee20f6c Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 8 Jul 2026 12:47:34 +0000
-Subject: [PATCH 5/5] Expose thread_count in the pypowsybl LODF API (Phase 2
+Subject: [PATCH 5/6] Expose thread_count in the pypowsybl LODF API (Phase 2
  multithreading)
 
 Thread the LODF threadCount through the native LODF entry points (one-shot
@@ -879,6 +879,52 @@ index 9f7c66d..5449d55 100644
 +    # also exercised together with chunking
 +    chunked = pp.sensitivity.compute_lodf_matrix(network, branch_ids, branch_ids, thread_count=2, max_columns_per_chunk=3)
 +    assert np.allclose(chunked.to_numpy(), reference.to_numpy(), equal_nan=True, atol=1e-12)
+-- 
+2.43.0
+
+
+From 2345bf454829c686bce46073d851ec7287eb548c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 8 Jul 2026 20:06:47 +0000
+Subject: [PATCH 6/6] Release the GIL during LODF native calls (Phase 3
+ multithreading)
+
+Add py::call_guard<py::gil_scoped_release> to the LODF bindings (matching
+load_network and the other heavy native calls), so multiple Python threads
+can run LODF concurrently on independent networks (shared-nothing Axis B).
+Verified: two compute_lodf_matrix calls on two Python threads overlap
+(2.04x speedup vs sequential on case9241pegase).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01U4QG5WNJWFjqfFxQHvDcga
+---
+ cpp/pypowsybl-cpp/bindings.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/cpp/pypowsybl-cpp/bindings.cpp b/cpp/pypowsybl-cpp/bindings.cpp
+index ce6a39f..6a9ea09 100644
+--- a/cpp/pypowsybl-cpp/bindings.cpp
++++ b/cpp/pypowsybl-cpp/bindings.cpp
+@@ -1029,15 +1029,19 @@ PYBIND11_MODULE(_pypowsybl, m) {
+           py::arg("sensitivity_analysis_result_context"), py::arg("matrix_id"), py::arg("contingency_id"));
+ 
+     m.def("compute_lodf_matrix", &pypowsybl::computeLodfMatrix, "Compute the LODF matrix of monitored branches for single outages of branches",
++          py::call_guard<py::gil_scoped_release>(),
+           py::arg("network"), py::arg("monitored_branch_ids"), py::arg("outaged_branch_ids"), py::arg("parameters"), py::arg("thread_count"));
+ 
+     m.def("create_lodf_matrix_context", &pypowsybl::createLodfMatrixContext, "Create a reusable LODF context loading and factorizing the network once",
++          py::call_guard<py::gil_scoped_release>(),
+           py::arg("network"), py::arg("parameters"));
+ 
+     m.def("compute_lodf_matrix_from_context", &pypowsybl::computeLodfMatrixFromContext, "Compute a LODF matrix reusing a LODF context",
++          py::call_guard<py::gil_scoped_release>(),
+           py::arg("lodf_context"), py::arg("monitored_branch_ids"), py::arg("outaged_branch_ids"), py::arg("thread_count"));
+ 
+     m.def("free_lodf_matrix_context", &pypowsybl::freeLodfMatrixContext, "Free a LODF context",
++          py::call_guard<py::gil_scoped_release>(),
+           py::arg("lodf_context"));
+ 
+     py::class_<series>(m, "Series")
 -- 
 2.43.0
 
