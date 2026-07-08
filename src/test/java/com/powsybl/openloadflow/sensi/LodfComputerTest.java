@@ -8,10 +8,12 @@
 package com.powsybl.openloadflow.sensi;
 
 import com.powsybl.commons.PowsyblException;
+import com.powsybl.commons.report.ReportNode;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.DenseMatrix;
+import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.network.EurostagFactory;
 import com.powsybl.openloadflow.network.FourBusNetworkFactory;
 import org.junit.jupiter.api.Test;
@@ -67,5 +69,30 @@ class LodfComputerTest {
         PowsyblException e = assertThrows(PowsyblException.class,
                 () -> LodfComputer.computeLodfMatrix(network, monitoredBranchIds, outagedBranchIds, parameters));
         assertEquals("Branch 'unknown' not found in the main connected component", e.getMessage());
+    }
+
+    @Test
+    void testReusableContext() {
+        // several queries on a reused context (loaded and factorized once) must give the same results as the one-shot
+        Network network = FourBusNetworkFactory.create();
+        LoadFlowParameters parameters = new LoadFlowParameters();
+        List<String> all = List.of("l14", "l12", "l23", "l34", "l13");
+        List<String> someOutages = List.of("l12", "l34");
+        DenseMatrix oneShot = LodfComputer.computeLodfMatrix(network, all, someOutages, parameters);
+        try (LodfComputer.Context context = LodfComputer.createContext(network, parameters, new SparseMatrixFactory(), ReportNode.NO_OP)) {
+            // repeated queries on the same context return consistent results
+            for (int i = 0; i < 3; i++) {
+                DenseMatrix reused = context.computeLodfMatrix(all, someOutages);
+                assertEquals(oneShot.getRowCount(), reused.getRowCount());
+                assertEquals(oneShot.getColumnCount(), reused.getColumnCount());
+                for (int row = 0; row < oneShot.getRowCount(); row++) {
+                    for (int column = 0; column < oneShot.getColumnCount(); column++) {
+                        assertEquals(oneShot.get(row, column), reused.get(row, column), 0d);
+                    }
+                }
+            }
+            // a different query on the same context is also valid
+            assertEquals(-1d, context.computeLodfMatrix(List.of("l14"), List.of("l14")).get(0, 0));
+        }
     }
 }
