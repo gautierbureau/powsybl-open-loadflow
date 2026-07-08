@@ -1,7 +1,7 @@
 From cc7de14039092c169674911fefddf8388c9cadc7 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 3 Jul 2026 18:13:29 +0000
-Subject: [PATCH 1/2] Add LODF matrix computation API wired to
+Subject: [PATCH 1/3] Add LODF matrix computation API wired to
  powsybl-open-loadflow
 
 Expose pypowsybl.sensitivity.compute_lodf_matrix(network,
@@ -255,7 +255,7 @@ index d572024..d9da3fc 100644
 From 9fb220b3a8fa8149c94ccd9238e059511bcb5556 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 3 Jul 2026 18:13:29 +0000
-Subject: [PATCH 2/2] Temporarily use powsybl-open-loadflow 2.4.0-SNAPSHOT for
+Subject: [PATCH 2/3] Temporarily use powsybl-open-loadflow 2.4.0-SNAPSHOT for
  LODF API
 
 To remove once a powsybl-open-loadflow release including the LODF
@@ -328,6 +328,120 @@ index 2a8ebb8..34242ef 100644
                  return branch.getAllSelectedOperationalLimitsGroups(side);
              }
  
+-- 
+2.43.0
+
+
+From ae0d5266bb90f39509e9267fde2964c30c09e089 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 8 Jul 2026 07:38:46 +0000
+Subject: [PATCH 3/3] Chunk LODF outaged branches to support full N-1 of large
+ networks
+
+A single native LODF call returns a dense buffer capped at ~268M elements,
+so a full N-1 of a large network (monitored x outaged over the limit)
+could not be returned. compute_lodf_matrix now automatically processes the
+outaged branches in column chunks that each stay within the limit, and
+concatenates them, with an optional max_columns_per_chunk override.
+Verified that chunked results are identical to a single call.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01U4QG5WNJWFjqfFxQHvDcga
+---
+ pypowsybl/sensitivity/impl/util.py | 40 ++++++++++++++++++++++++------
+ tests/test_sensitivity_analysis.py | 13 ++++++++++
+ 2 files changed, 45 insertions(+), 8 deletions(-)
+
+diff --git a/pypowsybl/sensitivity/impl/util.py b/pypowsybl/sensitivity/impl/util.py
+index fc01d14..cc85f17 100644
+--- a/pypowsybl/sensitivity/impl/util.py
++++ b/pypowsybl/sensitivity/impl/util.py
+@@ -157,8 +157,12 @@ def get_provider_parameters_names(provider: str = '') -> List[str]:
+     return _pypowsybl.get_sensitivity_analysis_provider_parameters_names(provider)
+ 
+ 
++# a DenseMatrix is backed by a single double[], so a single native call cannot return more than this many elements
++_MAX_LODF_MATRIX_ELEMENTS = 268_435_455
++
++
+ def compute_lodf_matrix(network: Network, monitored_branch_ids: List[str], outaged_branch_ids: List[str],
+-                        parameters: Optional[LfParameters] = None) -> pd.DataFrame:
++                        parameters: Optional[LfParameters] = None, max_columns_per_chunk: Optional[int] = None) -> pd.DataFrame:
+     """
+     Computes the LODF (Line Outage Distribution Factor) matrix of monitored branches for single branch outages,
+     using a fast DC computation (a single sparse resolution, whatever the number of branches and outages).
+@@ -168,16 +172,36 @@ def compute_lodf_matrix(network: Network, monitored_branch_ids: List[str], outag
+     its own outage is -1. The LODF factors of an outage breaking the network connectivity are undefined and
+     reported as NaN. The computation is done on the main connected component, at fixed phase tap positions.
+ 
++    A single native call returns the matrix as a dense buffer, whose number of elements cannot exceed about 268
++    million. When the monitored x outaged product is larger (a full N-1 of a large network), the outaged branches
++    are automatically processed in column chunks and the chunks are concatenated. Note that each chunk reloads and
++    refactorizes the network, so keeping the chunks as large as possible (the default) minimizes the overhead.
++
+     Args:
+-        network:              the network
+-        monitored_branch_ids: ids of the branches on which the flow change is observed
+-        outaged_branch_ids:   ids of the branches whose outages are simulated
+-        parameters:           the load flow parameters, used to build the DC equation system
++        network:               the network
++        monitored_branch_ids:  ids of the branches on which the flow change is observed
++        outaged_branch_ids:    ids of the branches whose outages are simulated
++        parameters:            the load flow parameters, used to build the DC equation system
++        max_columns_per_chunk: maximum number of outaged branches per native call; defaults to the largest value
++                               keeping each chunk within the dense matrix element limit
+ 
+     Returns:
+         the LODF matrix as a dataframe, with one row per monitored branch and one column per outaged branch
+     """
+     p = parameters if parameters is not None else LfParameters()
+-    m = _pypowsybl.compute_lodf_matrix(network._handle, monitored_branch_ids, outaged_branch_ids,
+-                                       p._to_c_parameters())  # pylint: disable=protected-access
+-    return pd.DataFrame(data=np.array(m, copy=False), index=monitored_branch_ids, columns=outaged_branch_ids)
++    n_monitored = max(1, len(monitored_branch_ids))
++    max_columns = max_columns_per_chunk if max_columns_per_chunk is not None else max(1, _MAX_LODF_MATRIX_ELEMENTS // n_monitored)
++
++    if len(outaged_branch_ids) <= max_columns:
++        m = _pypowsybl.compute_lodf_matrix(network._handle, monitored_branch_ids, outaged_branch_ids,
++                                           p._to_c_parameters())  # pylint: disable=protected-access
++        return pd.DataFrame(data=np.array(m, copy=False), index=monitored_branch_ids, columns=outaged_branch_ids)
++
++    # the full matrix would exceed the dense matrix limit: process the outaged branches in column chunks
++    chunks = []
++    for start in range(0, len(outaged_branch_ids), max_columns):
++        chunk_ids = outaged_branch_ids[start:start + max_columns]
++        m = _pypowsybl.compute_lodf_matrix(network._handle, monitored_branch_ids, chunk_ids,
++                                           p._to_c_parameters())  # pylint: disable=protected-access
++        chunks.append(pd.DataFrame(data=np.array(m, copy=True), index=monitored_branch_ids, columns=chunk_ids))
++    return pd.concat(chunks, axis=1)
+diff --git a/tests/test_sensitivity_analysis.py b/tests/test_sensitivity_analysis.py
+index d9da3fc..9f7c66d 100644
+--- a/tests/test_sensitivity_analysis.py
++++ b/tests/test_sensitivity_analysis.py
+@@ -8,6 +8,7 @@ import pathlib
+ import pytest
+ import pypowsybl as pp
+ import pandas as pd
++import numpy as np
+ import re
+ from pypowsybl import PyPowsyblError
+ import pypowsybl.report as rp
+@@ -375,3 +376,15 @@ def test_lodf_matrix_unknown_branch():
+     network = pp.network.create_eurostag_tutorial_example1_network()
+     with pytest.raises(PyPowsyblError, match="Branch 'unknown' not found in the main connected component"):
+         pp.sensitivity.compute_lodf_matrix(network, ['NHV1_NHV2_1'], ['unknown'])
++
++
++def test_lodf_matrix_chunked():
++    # forcing small column chunks must give exactly the same matrix as a single native call
++    network = pp.network.create_ieee14()
++    branch_ids = list(network.get_branches().index)
++    reference = pp.sensitivity.compute_lodf_matrix(network, branch_ids, branch_ids)
++    for max_columns in (1, 3, len(branch_ids)):
++        chunked = pp.sensitivity.compute_lodf_matrix(network, branch_ids, branch_ids, max_columns_per_chunk=max_columns)
++        assert list(chunked.index) == list(reference.index)
++        assert list(chunked.columns) == list(reference.columns)
++        assert np.allclose(chunked.to_numpy(), reference.to_numpy(), equal_nan=True, atol=1e-12)
 -- 
 2.43.0
 

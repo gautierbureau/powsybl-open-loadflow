@@ -24,6 +24,10 @@ Wired through all layers:
 Delegates to open-loadflow's `LodfComputer`: all factors from a single multiple right-hand side
 sparse solve of the DC system (a 16049x1000 matrix on the 9241-bus Pegase case computes in ~1 s).
 
+For a full N-1 of a large network, whose matrix exceeds the ~268M dense buffer limit, `compute_lodf_matrix`
+automatically processes the outaged branches in column chunks and concatenates them (optional
+`max_columns_per_chunk` override); chunked results are identical to a single call.
+
 ## Verified
 
 Full GraalVM native build; all 162 pypowsybl Java tests and all 20 Python sensitivity tests pass,
