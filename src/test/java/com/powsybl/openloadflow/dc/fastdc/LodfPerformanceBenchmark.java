@@ -70,6 +70,11 @@ class LodfPerformanceBenchmark {
     /**
      * Measures the impact of the vectorized DC equation system (the pr/vectorized-dc contribution) on the LODF
      * computation: all branches monitored x 1000 outaged, single threaded, with the scalar then the vectorized system.
+     *
+     * <p>Run one case per JVM (with {@code -Dpegase.case=...}): loading several large cases in the same JVM lets garbage
+     * collection of one case contaminate the timings of the next. Measured in isolated JVMs, the vectorized DC system
+     * gives the LODF computation essentially no steady-state speedup (~1.0x), because the dominant cost is the dense
+     * factor fill, which uses standalone flow equation terms that are identical in the scalar and vectorized systems.
      */
     @Test
     void benchmarkLodfVectorization() {
