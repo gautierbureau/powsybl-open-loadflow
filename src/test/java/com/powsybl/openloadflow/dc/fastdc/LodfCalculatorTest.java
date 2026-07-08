@@ -212,11 +212,35 @@ class LodfCalculatorTest {
             DenseMatrix reference = LodfCalculator.computeLodfMatrix(context, branches, branches);
             for (int batchSize : new int[] {1, 2, 3, branches.size()}) {
                 DenseMatrix batched = new DenseMatrix(branches.size(), branches.size());
-                LodfCalculator.computeLodf(context, branches, branches, batched::set, batchSize);
+                LodfCalculator.computeLodf(context, branches, branches, batched::set, batchSize, 1);
                 for (int row = 0; row < reference.getRowCount(); row++) {
                     for (int column = 0; column < reference.getColumnCount(); column++) {
                         assertEquals(reference.get(row, column), batched.get(row, column), 0d,
                                 "batchSize=" + batchSize + " row=" + row + " column=" + column);
+                    }
+                }
+            }
+        }
+    }
+
+    @ParameterizedTest(name = "vectorized={0}")
+    @ValueSource(booleans = {false, true})
+    void testParallelGivesSameResultAsSequential(boolean vectorized) {
+        // the matrix must be bit-for-bit identical whatever the thread count
+        dcParameters.setVectorized(vectorized);
+        Network network = FourBusNetworkFactory.create();
+        LfNetwork lfNetwork = LfNetwork.load(network, new LfNetworkLoaderImpl(), dcParameters.getNetworkParameters()).getFirst();
+        try (DcLoadFlowContext context = new DcLoadFlowContext(lfNetwork, dcParameters)) {
+            List<LfBranch> branches = List.of("l14", "l12", "l23", "l34", "l13").stream()
+                    .map(lfNetwork::getBranchById)
+                    .toList();
+            DenseMatrix sequential = LodfCalculator.computeLodfMatrix(context, branches, branches, 1);
+            for (int threadCount : new int[] {2, 4}) {
+                DenseMatrix parallel = LodfCalculator.computeLodfMatrix(context, branches, branches, threadCount);
+                for (int row = 0; row < sequential.getRowCount(); row++) {
+                    for (int column = 0; column < sequential.getColumnCount(); column++) {
+                        assertEquals(sequential.get(row, column), parallel.get(row, column), 0d,
+                                "threadCount=" + threadCount + " row=" + row + " column=" + column);
                     }
                 }
             }

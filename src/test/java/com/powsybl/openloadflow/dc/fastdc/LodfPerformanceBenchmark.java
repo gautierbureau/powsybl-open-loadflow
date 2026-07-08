@@ -114,20 +114,24 @@ class LodfPerformanceBenchmark {
                 }
 
                 // full N-1 (all branches monitored and outaged) through the streaming API, which does not materialize
-                // the matrix: this is the only way to run it when monitored x outaged exceeds the DenseMatrix limit
+                // the matrix: this is the only way to run it when monitored x outaged exceeds the DenseMatrix limit.
+                // Swept over thread counts (the writer just accumulates a per-thread-safe checksum) to show the speedup.
                 long fullCells = (long) monitoredBranches.size() * outageableBranches.size();
-                double streamMs = timeMedian(1, 3, () -> {
-                    long[] checksum = {0L};
-                    LodfCalculator.computeLodf(context, monitoredBranches, outageableBranches,
-                            (monitoredIndex, outagedIndex, lodf) -> {
-                                // accumulate something to prevent the computation from being optimized away
-                                if (!Double.isNaN(lodf)) {
-                                    checksum[0] += Double.doubleToRawLongBits(lodf);
-                                }
-                            });
-                });
-                System.out.printf("%-22s %10d %10d %12d %12.1f  (streaming, full N-1)%n",
-                        caseName, monitoredBranches.size(), outageableBranches.size(), fullCells, streamMs);
+                for (int threadCount : new int[] {1, 2, 4}) {
+                    double streamMs = timeMedian(1, 3, () -> {
+                        java.util.concurrent.atomic.LongAdder checksum = new java.util.concurrent.atomic.LongAdder();
+                        LodfCalculator.computeLodf(context, monitoredBranches, outageableBranches,
+                                (monitoredIndex, outagedIndex, lodf) -> {
+                                    // accumulate something (thread-safely) to prevent the computation from being optimized away
+                                    if (!Double.isNaN(lodf)) {
+                                        checksum.add(Double.doubleToRawLongBits(lodf));
+                                    }
+                                }, threadCount);
+                    });
+                    System.out.printf("%-22s %10d %10d %12d %12.1f  (streaming, full N-1, %d thread%s)%n",
+                            caseName, monitoredBranches.size(), outageableBranches.size(), fullCells, streamMs,
+                            threadCount, threadCount > 1 ? "s" : "");
+                }
             }
         }
     }

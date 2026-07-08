@@ -22,6 +22,9 @@ import com.powsybl.openloadflow.network.LoadFlowModel;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ForkJoinPool;
+import java.util.stream.IntStream;
 
 /**
  * Fast computation of LODF (Line Outage Distribution Factor) matrices, based on the same building blocks as the
@@ -74,6 +77,17 @@ public final class LodfCalculator {
      * @return the LODF matrix, with one row per monitored branch and one column per outaged branch
      */
     public static DenseMatrix computeLodfMatrix(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches, List<LfBranch> outagedBranches) {
+        return computeLodfMatrix(loadFlowContext, monitoredBranches, outagedBranches, 1);
+    }
+
+    /**
+     * Same as {@link #computeLodfMatrix(DcLoadFlowContext, List, List)}, computing the matrix with the given number of
+     * threads. The result is bit-for-bit identical whatever the thread count.
+     *
+     * @param threadCount the number of threads used to fill the matrix (1 for a sequential computation)
+     */
+    public static DenseMatrix computeLodfMatrix(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches,
+                                                List<LfBranch> outagedBranches, int threadCount) {
         Objects.requireNonNull(monitoredBranches);
         Objects.requireNonNull(outagedBranches);
         // the result is a single DenseMatrix: check its size up front to fail with an explicit message
@@ -85,7 +99,8 @@ public final class LodfCalculator {
                     + "monitored or the outaged branches into groups");
         }
         DenseMatrix lodfMatrix = new DenseMatrix(monitoredBranches.size(), outagedBranches.size());
-        computeLodf(loadFlowContext, monitoredBranches, outagedBranches, lodfMatrix::set);
+        // DenseMatrix.set on distinct (row, column) cells is thread-safe, so the parallel fill can write it directly
+        computeLodf(loadFlowContext, monitoredBranches, outagedBranches, lodfMatrix::set, threadCount);
         return lodfMatrix;
     }
 
@@ -102,20 +117,38 @@ public final class LodfCalculator {
      */
     public static void computeLodf(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches,
                                    List<LfBranch> outagedBranches, LodfResultWriter writer) {
-        Objects.requireNonNull(loadFlowContext);
-        computeLodf(loadFlowContext, monitoredBranches, outagedBranches, writer, computeOutageBatchSize(loadFlowContext.getEquationSystem()));
+        computeLodf(loadFlowContext, monitoredBranches, outagedBranches, writer, 1);
     }
 
     /**
-     * Same as {@link #computeLodf(DcLoadFlowContext, List, List, LodfResultWriter)}, with an explicit number of outages
-     * processed per batch. Package-private, mainly to let tests exercise the batching with small batch sizes.
+     * Same as {@link #computeLodf(DcLoadFlowContext, List, List, LodfResultWriter)}, streaming the factors with the
+     * given number of threads. The injection states are still solved sequentially (they share the Jacobian
+     * factorization), but the factors of each batch are computed in parallel. With more than one thread the writer may
+     * be called concurrently for different outaged branches, so it must be thread-safe (this holds for the
+     * {@link DenseMatrix} filled by {@link #computeLodfMatrix}).
+     *
+     * @param threadCount the number of threads used to compute the factors (1 for a sequential computation)
+     */
+    public static void computeLodf(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches,
+                                   List<LfBranch> outagedBranches, LodfResultWriter writer, int threadCount) {
+        Objects.requireNonNull(loadFlowContext);
+        computeLodf(loadFlowContext, monitoredBranches, outagedBranches, writer,
+                computeOutageBatchSize(loadFlowContext.getEquationSystem()), threadCount);
+    }
+
+    /**
+     * Core implementation, with an explicit number of outages processed per batch. Package-private, mainly to let tests
+     * exercise the batching with small batch sizes.
      */
     static void computeLodf(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches,
-                            List<LfBranch> outagedBranches, LodfResultWriter writer, int outageBatchSize) {
+                            List<LfBranch> outagedBranches, LodfResultWriter writer, int outageBatchSize, int threadCount) {
         Objects.requireNonNull(loadFlowContext);
         Objects.requireNonNull(monitoredBranches);
         Objects.requireNonNull(outagedBranches);
         Objects.requireNonNull(writer);
+        if (threadCount < 1) {
+            throw new PowsyblException("Thread count must be at least 1, was " + threadCount);
+        }
         EquationSystem<DcVariableType, DcEquationType> equationSystem = loadFlowContext.getEquationSystem();
         DcEquationSystemCreationParameters creationParameters = loadFlowContext.getParameters().getEquationSystemCreationParameters();
 
@@ -128,24 +161,33 @@ public final class LodfCalculator {
                 .map(branch -> ComputedElement.createBranchEquation(branch, equationSystem, creationParameters))
                 .toList();
 
-        // The injection states of all outages cannot always be solved in a single pass: the +1/-1 right-hand side is a
-        // dense (equationCount x outages) matrix, whose size in bytes must fit in an int (see ComputedElement.initRhs)
-        // and whose memory footprint grows with the number of outages. We therefore process the outages in batches,
-        // reusing the Jacobian factorization (cached in the context) so that only the cheap per-batch resolution is redone.
-        for (int batchStart = 0; batchStart < outagedBranches.size(); batchStart += outageBatchSize) {
-            int batchEnd = Math.min(batchStart + outageBatchSize, outagedBranches.size());
-            streamLodfColumns(loadFlowContext, monitoredBranches, monitoredBranchEquations,
-                    outagedBranches.subList(batchStart, batchEnd), batchStart, writer);
+        // pool used to fill each batch in parallel; the injection states solves stay sequential (shared factorization)
+        ForkJoinPool pool = threadCount > 1 ? new ForkJoinPool(threadCount) : null;
+        try {
+            // The injection states of all outages cannot always be solved in a single pass: the +1/-1 right-hand side is a
+            // dense (equationCount x outages) matrix, whose size in bytes must fit in an int (see ComputedElement.initRhs)
+            // and whose memory footprint grows with the number of outages. We therefore process the outages in batches,
+            // reusing the Jacobian factorization (cached in the context) so that only the cheap per-batch resolution is redone.
+            for (int batchStart = 0; batchStart < outagedBranches.size(); batchStart += outageBatchSize) {
+                int batchEnd = Math.min(batchStart + outageBatchSize, outagedBranches.size());
+                streamLodfColumns(loadFlowContext, monitoredBranches, monitoredBranchEquations,
+                        outagedBranches.subList(batchStart, batchEnd), batchStart, writer, pool);
+            }
+        } finally {
+            if (pool != null) {
+                pool.shutdown();
+            }
         }
     }
 
     /**
      * Streams the LODF factors of the columns {@code [batchStart, batchStart + batch.size())} for the given batch of
-     * outaged branches, from a single multiple right-hand side resolution of the DC linear system.
+     * outaged branches, from a single multiple right-hand side resolution of the DC linear system. When a pool is
+     * given, the columns of the batch are filled in parallel (each column writes a disjoint set of outaged indices).
      */
     private static void streamLodfColumns(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches,
                                           List<ClosedBranchSide1DcFlowEquationTerm> monitoredBranchEquations,
-                                          List<LfBranch> outagedBranchesBatch, int batchStart, LodfResultWriter writer) {
+                                          List<LfBranch> outagedBranchesBatch, int batchStart, LodfResultWriter writer, ForkJoinPool pool) {
         LfNetwork lfNetwork = loadFlowContext.getNetwork();
         EquationSystem<DcVariableType, DcEquationType> equationSystem = loadFlowContext.getEquationSystem();
         DcEquationSystemCreationParameters creationParameters = loadFlowContext.getParameters().getEquationSystemCreationParameters();
@@ -159,17 +201,40 @@ public final class LodfCalculator {
         // to a +1/-1 active power injection at the terminals of each outaged branch
         DenseMatrix injectionStates = ComputedElement.calculateElementsStates(loadFlowContext, outageElements);
 
-        for (int j = 0; j < outageElements.size(); j++) {
-            ComputedContingencyElement outageElement = outageElements.get(j);
-            double selfPtdf = outageElement.getLfBranchEquation().calculateSensi(injectionStates, outageElement.getComputedElementIndex());
-            // a self-PTDF of 1 means that all the flow of the outaged branch goes through itself,
-            // i.e. that its outage breaks the network connectivity: LODF factors are undefined
-            boolean breaksConnectivity = Math.abs(selfPtdf) > 1d - CONNECTIVITY_LOSS_THRESHOLD;
-            int outagedIndex = batchStart + j;
-            for (int row = 0; row < monitoredBranches.size(); row++) {
-                writer.writeLodf(row, outagedIndex, computeLodfValue(injectionStates, outageElement, monitoredBranches.get(row),
-                        monitoredBranchEquations.get(row), selfPtdf, breaksConnectivity));
+        if (pool == null) {
+            for (int j = 0; j < outageElements.size(); j++) {
+                streamLodfColumn(j, outageElements, monitoredBranches, monitoredBranchEquations, injectionStates, batchStart, writer);
             }
+        } else {
+            // the fill of the batch columns is embarrassingly parallel: each column reads the shared read-only injection
+            // states and writes a disjoint set of outaged indices, so the result is deterministic
+            try {
+                pool.submit(() -> IntStream.range(0, outageElements.size()).parallel().forEach(j ->
+                        streamLodfColumn(j, outageElements, monitoredBranches, monitoredBranchEquations, injectionStates, batchStart, writer))).get();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new PowsyblException("LODF computation was interrupted", e);
+            } catch (ExecutionException e) {
+                throw new PowsyblException("LODF computation failed", e.getCause());
+            }
+        }
+    }
+
+    /**
+     * Streams the LODF factors of a single outaged branch (the {@code j}-th of the current batch) for all monitored branches.
+     */
+    private static void streamLodfColumn(int j, List<ComputedContingencyElement> outageElements, List<LfBranch> monitoredBranches,
+                                         List<ClosedBranchSide1DcFlowEquationTerm> monitoredBranchEquations, DenseMatrix injectionStates,
+                                         int batchStart, LodfResultWriter writer) {
+        ComputedContingencyElement outageElement = outageElements.get(j);
+        double selfPtdf = outageElement.getLfBranchEquation().calculateSensi(injectionStates, outageElement.getComputedElementIndex());
+        // a self-PTDF of 1 means that all the flow of the outaged branch goes through itself,
+        // i.e. that its outage breaks the network connectivity: LODF factors are undefined
+        boolean breaksConnectivity = Math.abs(selfPtdf) > 1d - CONNECTIVITY_LOSS_THRESHOLD;
+        int outagedIndex = batchStart + j;
+        for (int row = 0; row < monitoredBranches.size(); row++) {
+            writer.writeLodf(row, outagedIndex, computeLodfValue(injectionStates, outageElement, monitoredBranches.get(row),
+                    monitoredBranchEquations.get(row), selfPtdf, breaksConnectivity));
         }
     }
 
