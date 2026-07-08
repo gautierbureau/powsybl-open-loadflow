@@ -22,9 +22,11 @@ import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.PhaseControlFactory;
 import com.powsybl.openloadflow.network.impl.LfNetworkLoaderImpl;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -173,6 +175,26 @@ class LodfCalculatorTest {
             assertTrue(Double.isNaN(lodfMatrix.get(2, 0)));
             // l12 radially feeds b2, so its flow is not impacted by the outage of l14
             assertEquals(0d, lodfMatrix.get(3, 0), DELTA_LODF);
+        }
+    }
+
+    @Test
+    void testResultMatrixTooLarge() {
+        // a monitored x outaged product exceeding the DenseMatrix element limit must fail with an explicit message,
+        // not a cryptic matrix allocation error; use a stub list to reach the guard without allocating real branches
+        Network network = FourBusNetworkFactory.create();
+        LfNetwork lfNetwork = LfNetwork.load(network, new LfNetworkLoaderImpl(), dcParameters.getNetworkParameters()).getFirst();
+        try (DcLoadFlowContext context = new DcLoadFlowContext(lfNetwork, dcParameters)) {
+            LfBranch l12 = lfNetwork.getBranchById("l12");
+            List<LfBranch> monitored = Collections.nCopies(20000, l12);
+            List<LfBranch> outaged = List.of(l12);
+            // 20000 x 20000 = 400M > DenseMatrix.MAX_ELEMENT_COUNT (268435455)
+            List<LfBranch> manyOutaged = Collections.nCopies(20000, l12);
+            PowsyblException e = assertThrows(PowsyblException.class,
+                    () -> LodfCalculator.computeLodfMatrix(context, monitored, manyOutaged));
+            assertTrue(e.getMessage().contains("LODF matrix is too large"), e.getMessage());
+            // a small enough matrix is fine
+            assertEquals(20000, LodfCalculator.computeLodfMatrix(context, monitored, outaged).getRowCount());
         }
     }
 

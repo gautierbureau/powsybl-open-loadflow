@@ -38,6 +38,11 @@ import java.util.Objects;
  *
  * <p>Note that LODF factors only depend on the network topology and impedances: no load flow needs to be run beforehand.
  *
+ * <p>The result is returned as a single {@link DenseMatrix}, so the number of monitored branches times the number of
+ * outaged branches must not exceed {@link DenseMatrix#MAX_ELEMENT_COUNT}. For a full N-1 analysis of a very large
+ * network (where all branches are both monitored and outaged), the caller must split the monitored or the outaged
+ * branches into groups.
+ *
  * @author Gautier Bureau {@literal <gautier.bureau at gmail.com>}
  */
 public final class LodfCalculator {
@@ -88,6 +93,14 @@ public final class LodfCalculator {
 
         // validate all outaged branches up front, so we fail before doing any computation
         outagedBranches.forEach(LodfCalculator::checkOutagedBranch);
+
+        // the result is a single DenseMatrix: check its size up front to fail with an explicit message
+        long resultSize = (long) monitoredBranches.size() * outagedBranches.size();
+        if (resultSize > DenseMatrix.MAX_ELEMENT_COUNT) {
+            throw new PowsyblException("LODF matrix is too large (" + monitoredBranches.size() + " monitored branches x "
+                    + outagedBranches.size() + " outaged branches = " + resultSize + " elements, maximum is "
+                    + DenseMatrix.MAX_ELEMENT_COUNT + "): split the monitored or the outaged branches into groups");
+        }
 
         // flow equation terms of the monitored branches, built once and shared (read-only) across batches; work with
         // both the scalar and the vectorized DC equation systems; null for branches without a closed DC flow term
