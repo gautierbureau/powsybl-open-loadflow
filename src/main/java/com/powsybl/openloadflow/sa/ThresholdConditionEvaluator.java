@@ -108,7 +108,7 @@ public final class ThresholdConditionEvaluator {
         switch (condition.getVariable()) {
             case ACTIVE_POWER -> value = leg.getP1().eval() * PerUnit.SB;
             case REACTIVE_POWER -> value = leg.getQ1().eval() * PerUnit.SB;
-            case CURRENT -> value = leg.getI1().eval() * PerUnit.ib(leg.getTwt().getLeg(condition.getSide()).getTerminal().getVoltageLevel().getNominalV());
+            case CURRENT -> value = leg.getI1().eval() * PerUnit.ib(leg.getLegNominalV());
             default -> throw new PowsyblException(String.format("Unsupported variable %s for threshold condition on transformer %s", condition.getVariable().name(), condition.getEquipmentId()));
         }
         return evaluateThreshold(value, condition.getThreshold(), condition.getComparisonType());

@@ -117,7 +117,7 @@ public abstract class AbstractNetworkResult {
         for (LfBranch lfBranch : zeroImpedanceNetwork.getGraph().edgeSet()) {
             if (isATransfo3WBranch(lfBranch)) {
                 LfLegBranch lfLegBranch = (LfLegBranch) lfBranch;
-                if (monitor.getThreeWindingsTransformerIds().contains(lfLegBranch.getTwt().getId())) {
+                if (monitor.getThreeWindingsTransformerIds().contains(lfLegBranch.getMainOriginalId())) {
                     return true;
                 }
             } else {
