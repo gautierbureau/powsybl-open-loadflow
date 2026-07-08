@@ -202,10 +202,9 @@ public class LfBusImpl extends AbstractLfBus {
 
     @Override
     public List<BusResult> createBusResults() {
-        var bus = getBus();
         if (breakers) {
             if (bbsIds.isEmpty()) {
-                return List.of(new BusResult(getVoltageLevelId(), bus.getId(), v, Math.toDegrees(angle)));
+                return List.of(new BusResult(getVoltageLevelId(), id, v, Math.toDegrees(angle)));
             } else {
                 return bbsIds.stream()
                         .map(bbsId -> new BusResult(getVoltageLevelId(), bbsId, v, Math.toDegrees(angle)))
@@ -213,6 +212,8 @@ public class LfBusImpl extends AbstractLfBus {
             }
         } else {
             if (mergedBusIds == null) {
+                // only reached at build time (materializeIidmDerivedData), copies share the computed list
+                var bus = getBus();
                 mergedBusIds = bus.getVoltageLevel().getBusBreakerView().getBusesFromBusViewBusId(bus.getId())
                         .stream().map(Identifiable::getId).toList();
             }
