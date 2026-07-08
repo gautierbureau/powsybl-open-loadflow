@@ -30,10 +30,11 @@ import java.util.Objects;
  * <p>The LODF of a monitored branch {@code l} for the outage of a branch {@code k} is the ratio between the active power
  * flow change on {@code l} caused by the outage of {@code k} and the pre-outage flow of {@code k}. It is computed as
  * {@code LODF(l, k) = PTDF(l, k) / (1 - PTDF(k, k))}, where {@code PTDF(., k)} is the sensitivity of branch flows to a
- * +1/-1 active power injection at the terminals of {@code k}. All the needed sensitivities are obtained with a single
- * multiple right-hand side resolution of the DC linear system, so the computation cost is one sparse solve plus dense
- * arithmetic, whatever the number of monitored branches and outages. This formula remains exact for branches with a
- * non-zero phase shift, as the phase shift contribution cancels out in the ratio.
+ * +1/-1 active power injection at the terminals of {@code k}. The needed sensitivities are obtained from batched
+ * multiple right-hand side resolutions of the DC linear system (a single resolution when all the outages fit in one
+ * batch), so the computation cost is a sparse solve plus dense arithmetic, whatever the number of monitored branches
+ * and outages. The Jacobian matrix is factorized only once and reused across batches. This formula remains exact for
+ * branches with a non-zero phase shift, as the phase shift contribution cancels out in the ratio.
  *
  * <p>Note that LODF factors only depend on the network topology and impedances: no load flow needs to be run beforehand.
  *
@@ -42,6 +43,13 @@ import java.util.Objects;
 public final class LodfCalculator {
 
     private static final double CONNECTIVITY_LOSS_THRESHOLD = 1e-6;
+
+    /**
+     * Soft cap on the memory footprint of the transient +1/-1 injection states matrix of a single batch of outages.
+     * Keeping it modest bounds the peak memory when computing LODF for a very large number of outages, at the negligible
+     * cost of a few extra right-hand side resolutions (the Jacobian factorization is reused across batches).
+     */
+    private static final int MAX_INJECTION_STATES_BYTES_PER_BATCH = 256 * 1024 * 1024;
 
     private LodfCalculator() {
     }
@@ -62,42 +70,77 @@ public final class LodfCalculator {
      */
     public static DenseMatrix computeLodfMatrix(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches, List<LfBranch> outagedBranches) {
         Objects.requireNonNull(loadFlowContext);
+        int outageBatchSize = computeOutageBatchSize(loadFlowContext.getEquationSystem());
+        return computeLodfMatrix(loadFlowContext, monitoredBranches, outagedBranches, outageBatchSize);
+    }
+
+    /**
+     * Same as {@link #computeLodfMatrix(DcLoadFlowContext, List, List)}, with an explicit number of outages processed
+     * per batch. Package-private, mainly to let tests exercise the batching with small batch sizes.
+     */
+    static DenseMatrix computeLodfMatrix(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches,
+                                         List<LfBranch> outagedBranches, int outageBatchSize) {
+        Objects.requireNonNull(loadFlowContext);
         Objects.requireNonNull(monitoredBranches);
         Objects.requireNonNull(outagedBranches);
-        LfNetwork lfNetwork = loadFlowContext.getNetwork();
         EquationSystem<DcVariableType, DcEquationType> equationSystem = loadFlowContext.getEquationSystem();
         DcEquationSystemCreationParameters creationParameters = loadFlowContext.getParameters().getEquationSystemCreationParameters();
 
-        List<ComputedContingencyElement> outageElements = outagedBranches.stream()
-                .map(branch -> {
-                    checkOutagedBranch(branch);
-                    return new ComputedContingencyElement(new BranchContingency(branch.getId()), lfNetwork, equationSystem, creationParameters);
-                })
-                .toList();
-        ComputedElement.setComputedElementIndexes(outageElements);
+        // validate all outaged branches up front, so we fail before doing any computation
+        outagedBranches.forEach(LodfCalculator::checkOutagedBranch);
 
-        // single multiple right-hand side sparse resolution giving, for each outaged branch,
-        // the angle response to a +1/-1 active power injection at its terminals
-        DenseMatrix injectionStates = ComputedElement.calculateElementsStates(loadFlowContext, outageElements);
-
-        // standalone flow equation terms of the monitored branches, working with both the scalar and the vectorized
-        // DC equation systems; null for branches without a closed DC flow term (open or zero impedance)
+        // flow equation terms of the monitored branches, built once and shared (read-only) across batches; work with
+        // both the scalar and the vectorized DC equation systems; null for branches without a closed DC flow term
         List<ClosedBranchSide1DcFlowEquationTerm> monitoredBranchEquations = monitoredBranches.stream()
                 .map(branch -> ComputedElement.createBranchEquation(branch, equationSystem, creationParameters))
                 .toList();
 
         DenseMatrix lodfMatrix = new DenseMatrix(monitoredBranches.size(), outagedBranches.size());
-        for (int column = 0; column < outageElements.size(); column++) {
-            ComputedContingencyElement outageElement = outageElements.get(column);
+
+        // The injection states of all outages cannot always be solved in a single pass: the +1/-1 right-hand side is a
+        // dense (equationCount x outages) matrix, whose size in bytes must fit in an int (see ComputedElement.initRhs)
+        // and whose memory footprint grows with the number of outages. We therefore process the outages in batches,
+        // reusing the Jacobian factorization (cached in the context) so that only the cheap per-batch resolution is redone.
+        for (int batchStart = 0; batchStart < outagedBranches.size(); batchStart += outageBatchSize) {
+            int batchEnd = Math.min(batchStart + outageBatchSize, outagedBranches.size());
+            computeLodfColumns(loadFlowContext, monitoredBranches, monitoredBranchEquations,
+                    outagedBranches.subList(batchStart, batchEnd), batchStart, lodfMatrix);
+        }
+        return lodfMatrix;
+    }
+
+    /**
+     * Fills the columns {@code [batchStart, batchStart + batch.size())} of the LODF matrix for the given batch of
+     * outaged branches, from a single multiple right-hand side resolution of the DC linear system.
+     */
+    private static void computeLodfColumns(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches,
+                                           List<ClosedBranchSide1DcFlowEquationTerm> monitoredBranchEquations,
+                                           List<LfBranch> outagedBranchesBatch, int batchStart, DenseMatrix lodfMatrix) {
+        LfNetwork lfNetwork = loadFlowContext.getNetwork();
+        EquationSystem<DcVariableType, DcEquationType> equationSystem = loadFlowContext.getEquationSystem();
+        DcEquationSystemCreationParameters creationParameters = loadFlowContext.getParameters().getEquationSystemCreationParameters();
+
+        List<ComputedContingencyElement> outageElements = outagedBranchesBatch.stream()
+                .map(branch -> new ComputedContingencyElement(new BranchContingency(branch.getId()), lfNetwork, equationSystem, creationParameters))
+                .toList();
+        ComputedElement.setComputedElementIndexes(outageElements);
+
+        // single multiple right-hand side sparse resolution for this batch, giving the angle response
+        // to a +1/-1 active power injection at the terminals of each outaged branch
+        DenseMatrix injectionStates = ComputedElement.calculateElementsStates(loadFlowContext, outageElements);
+
+        for (int j = 0; j < outageElements.size(); j++) {
+            ComputedContingencyElement outageElement = outageElements.get(j);
             double selfPtdf = outageElement.getLfBranchEquation().calculateSensi(injectionStates, outageElement.getComputedElementIndex());
             // a self-PTDF of 1 means that all the flow of the outaged branch goes through itself,
             // i.e. that its outage breaks the network connectivity: LODF factors are undefined
             boolean breaksConnectivity = Math.abs(selfPtdf) > 1d - CONNECTIVITY_LOSS_THRESHOLD;
+            int lodfColumn = batchStart + j;
             for (int row = 0; row < monitoredBranches.size(); row++) {
-                lodfMatrix.set(row, column, computeLodfValue(injectionStates, outageElement, monitoredBranches.get(row), monitoredBranchEquations.get(row), selfPtdf, breaksConnectivity));
+                lodfMatrix.set(row, lodfColumn, computeLodfValue(injectionStates, outageElement, monitoredBranches.get(row),
+                        monitoredBranchEquations.get(row), selfPtdf, breaksConnectivity));
             }
         }
-        return lodfMatrix;
     }
 
     private static double computeLodfValue(DenseMatrix injectionStates, ComputedContingencyElement outageElement,
@@ -111,6 +154,21 @@ public final class LodfCalculator {
         }
         double ptdf = monitoredBranchEquation.calculateSensi(injectionStates, outageElement.getComputedElementIndex());
         return ptdf / (1d - selfPtdf);
+    }
+
+    /**
+     * Returns the number of outages whose injection states can be solved together in one batch, respecting both the
+     * hard constraint that the {@code (equationCount x outages)} matrix size in bytes fits in an int, and a soft memory
+     * cap on the transient injection states matrix.
+     */
+    private static int computeOutageBatchSize(EquationSystem<DcVariableType, DcEquationType> equationSystem) {
+        int equationCount = equationSystem.getIndex().getColumnCount();
+        int bytesPerColumn = equationCount * Double.BYTES;
+        // hard limit: the (equationCount x columns) matrix size in bytes must fit in an int (same guard as ComputedElement.initRhs)
+        int maxColumns = Integer.MAX_VALUE / bytesPerColumn;
+        // soft cap: keep the transient injection states matrix of a batch below MAX_INJECTION_STATES_BYTES_PER_BATCH
+        int memoryCap = MAX_INJECTION_STATES_BYTES_PER_BATCH / bytesPerColumn;
+        return Math.max(1, Math.min(maxColumns, memoryCap));
     }
 
     private static void checkOutagedBranch(LfBranch branch) {

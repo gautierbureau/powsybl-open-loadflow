@@ -175,4 +175,30 @@ class LodfCalculatorTest {
             assertEquals(0d, lodfMatrix.get(3, 0), DELTA_LODF);
         }
     }
+
+    @ParameterizedTest(name = "vectorized={0}")
+    @ValueSource(booleans = {false, true})
+    void testOutageBatchingGivesSameResult(boolean vectorized) {
+        // processing the outages in several small batches must give exactly the same matrix as a single batch
+        dcParameters.setVectorized(vectorized);
+        Network network = FourBusNetworkFactory.create();
+        LfNetwork lfNetwork = LfNetwork.load(network, new LfNetworkLoaderImpl(), dcParameters.getNetworkParameters()).getFirst();
+        try (DcLoadFlowContext context = new DcLoadFlowContext(lfNetwork, dcParameters)) {
+            List<LfBranch> branches = List.of("l14", "l12", "l23", "l34", "l13").stream()
+                    .map(lfNetwork::getBranchById)
+                    .toList();
+            DenseMatrix reference = LodfCalculator.computeLodfMatrix(context, branches, branches);
+            for (int batchSize : new int[] {1, 2, 3, branches.size()}) {
+                DenseMatrix batched = LodfCalculator.computeLodfMatrix(context, branches, branches, batchSize);
+                assertEquals(reference.getRowCount(), batched.getRowCount());
+                assertEquals(reference.getColumnCount(), batched.getColumnCount());
+                for (int row = 0; row < reference.getRowCount(); row++) {
+                    for (int column = 0; column < reference.getColumnCount(); column++) {
+                        assertEquals(reference.get(row, column), batched.get(row, column), 0d,
+                                "batchSize=" + batchSize + " row=" + row + " column=" + column);
+                    }
+                }
+            }
+        }
+    }
 }
