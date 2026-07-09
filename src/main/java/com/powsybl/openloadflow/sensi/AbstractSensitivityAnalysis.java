@@ -1187,7 +1187,9 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
         // (functionType, functionId) resp. variableId, but is repeated for every factor sharing that function or
         // variable (e.g. a whole matrix of flows-per-injection reuses the same few functions and variables). Memoize
         // both resolutions to avoid re-doing the network / LF-network lookups for each such factor.
-        final Map<Pair<SensitivityFunctionType, String>, LfBranch> functionBranchCache = new HashMap<>();
+        // Nested (functionType -> functionId -> branch) rather than a Pair key, so a cache hit allocates nothing
+        // (a Pair per factor would add tens of MB on a large factor matrix).
+        final Map<SensitivityFunctionType, Map<String, LfBranch>> functionBranchCache = new EnumMap<>(SensitivityFunctionType.class);
         final Map<String, LfBus> injectionBusElementCache = new HashMap<>();
         int[] factorIndex = new int[1];
         factorReader.read((functionTypeToCheck, functionIdToCheck, variableType,
@@ -1204,9 +1206,9 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
      * still throws (on the first, uncached, occurrence) exactly as the non-cached resolution does.
      */
     private static LfBranch getBranchOrLegCached(Network network, String functionId, SensitivityFunctionType functionType,
-                                                 LfNetwork lfNetwork, Map<Pair<SensitivityFunctionType, String>, LfBranch> functionBranchCache) {
-        return functionBranchCache.computeIfAbsent(Pair.of(functionType, functionId),
-            k -> checkAndGetBranchOrLeg(network, functionId, functionType, lfNetwork));
+                                                 LfNetwork lfNetwork, Map<SensitivityFunctionType, Map<String, LfBranch>> functionBranchCache) {
+        return functionBranchCache.computeIfAbsent(functionType, k -> new HashMap<>())
+            .computeIfAbsent(functionId, k -> checkAndGetBranchOrLeg(network, functionId, functionType, lfNetwork));
     }
 
     /**
@@ -1230,7 +1232,7 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
                               Map<String, Set<String>> originalVariableSetIdsByVariableId,
                               Map<String, Bus> busCache, Map<String, SensitivityVariableSet> variableSetsById,
                               InjectionVariableIdToBusIdCache injectionVariableIdToBusIdCache,
-                              Map<Pair<SensitivityFunctionType, String>, LfBranch> functionBranchCache,
+                              Map<SensitivityFunctionType, Map<String, LfBranch>> functionBranchCache,
                               Map<String, LfBus> injectionBusElementCache,
                               int[] factorIndex, String variableId, boolean breakers) {
         SensitivityFunctionType functionType = functionTypeToCheck;
