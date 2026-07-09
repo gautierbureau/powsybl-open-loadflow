@@ -160,6 +160,12 @@ class PegaseAcSensitivityBenchmark {
         //  - "count": a counting SensitivityResultWriter that discards values, to isolate the analysis proper
         //    (factor ingestion + load flow + solve + value computation) from the result-model egress.
         boolean countOnly = "count".equals(System.getProperty("bench.writer"));
+        // Bytes allocated across all threads before the analysis. Thread-allocated-bytes is cumulative and
+        // GC-independent, so the delta across the analysis equals the bytes it allocated (the analysis runs on a
+        // pooled executor thread, captured by summing all threads). That is deterministic — the same code path
+        // allocates the same bytes regardless of machine or CPU contention — unlike wall-clock time, and is the
+        // reproducible metric for allocation-reducing changes on a shared/noisy host.
+        long alloc0 = allocatedBytesAllThreads();
         long t0 = System.nanoTime();
         long count;
         if (countOnly) {
@@ -173,8 +179,22 @@ class PegaseAcSensitivityBenchmark {
             count = result.getValues().size();
         }
         long ms = (System.nanoTime() - t0) / 1_000_000;
-        LOGGER.info("  [{}] {} sensitivity values in {} ms (writer={})", label, count, ms, countOnly ? "count" : "model");
+        long allocMb = (allocatedBytesAllThreads() - alloc0) / (1024 * 1024);
+        LOGGER.info("  [{}] {} sensitivity values in {} ms, allocated {} MB (writer={})", label, count, ms, allocMb, countOnly ? "count" : "model");
         return ms;
+    }
+
+    /** Cumulative bytes allocated across all live threads; the delta over a section is that section's allocation. */
+    private static long allocatedBytesAllThreads() {
+        com.sun.management.ThreadMXBean bean = (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
+        long total = 0;
+        for (long id : bean.getAllThreadIds()) {
+            long bytes = bean.getThreadAllocatedBytes(id);
+            if (bytes > 0) {
+                total += bytes;
+            }
+        }
+        return total;
     }
 
     /** Discards sensitivity values, only counting them, to isolate result-egress cost from the analysis. */
@@ -247,37 +267,48 @@ class PegaseAcSensitivityBenchmark {
         return model;
     }
 
+    /** Parse a MATPOWER numeric field, mapping the {@code Inf}/{@code -Inf} sentinels (e.g. unlimited reactive limits). */
+    private static double parseMatDouble(String s) {
+        if ("Inf".equals(s)) {
+            return Double.POSITIVE_INFINITY;
+        }
+        if ("-Inf".equals(s)) {
+            return Double.NEGATIVE_INFINITY;
+        }
+        return Double.parseDouble(s);
+    }
+
     private static MBus parseBus(String[] t) {
         MBus bus = new MBus();
         bus.setNumber(Integer.parseInt(t[0]));
         bus.setType(MBus.Type.fromInt(Integer.parseInt(t[1])));
         bus.setName("BUS-" + t[0]);
-        bus.setRealPowerDemand(Double.parseDouble(t[2]));
-        bus.setReactivePowerDemand(Double.parseDouble(t[3]));
-        bus.setShuntConductance(Double.parseDouble(t[4]));
-        bus.setShuntSusceptance(Double.parseDouble(t[5]));
+        bus.setRealPowerDemand(parseMatDouble(t[2]));
+        bus.setReactivePowerDemand(parseMatDouble(t[3]));
+        bus.setShuntConductance(parseMatDouble(t[4]));
+        bus.setShuntSusceptance(parseMatDouble(t[5]));
         bus.setAreaNumber(Integer.parseInt(t[6]));
-        bus.setVoltageMagnitude(Double.parseDouble(t[7]));
-        bus.setVoltageAngle(Double.parseDouble(t[8]));
-        bus.setBaseVoltage(Double.parseDouble(t[9]));
+        bus.setVoltageMagnitude(parseMatDouble(t[7]));
+        bus.setVoltageAngle(parseMatDouble(t[8]));
+        bus.setBaseVoltage(parseMatDouble(t[9]));
         bus.setLossZone(Integer.parseInt(t[10]));
-        bus.setMaximumVoltageMagnitude(Double.parseDouble(t[11]));
-        bus.setMinimumVoltageMagnitude(Double.parseDouble(t[12]));
+        bus.setMaximumVoltageMagnitude(parseMatDouble(t[11]));
+        bus.setMinimumVoltageMagnitude(parseMatDouble(t[12]));
         return bus;
     }
 
     private static MGen parseGen(String[] t) {
         MGen gen = new MGen();
         gen.setNumber(Integer.parseInt(t[0]));
-        gen.setRealPowerOutput(Double.parseDouble(t[1]));
-        gen.setReactivePowerOutput(Double.parseDouble(t[2]));
-        gen.setMaximumReactivePowerOutput(Double.parseDouble(t[3]));
-        gen.setMinimumReactivePowerOutput(Double.parseDouble(t[4]));
-        gen.setVoltageMagnitudeSetpoint(Double.parseDouble(t[5]));
-        gen.setTotalMbase(Double.parseDouble(t[6]));
+        gen.setRealPowerOutput(parseMatDouble(t[1]));
+        gen.setReactivePowerOutput(parseMatDouble(t[2]));
+        gen.setMaximumReactivePowerOutput(parseMatDouble(t[3]));
+        gen.setMinimumReactivePowerOutput(parseMatDouble(t[4]));
+        gen.setVoltageMagnitudeSetpoint(parseMatDouble(t[5]));
+        gen.setTotalMbase(parseMatDouble(t[6]));
         gen.setStatus(Integer.parseInt(t[7]));
-        gen.setMaximumRealPowerOutput(Double.parseDouble(t[8]));
-        gen.setMinimumRealPowerOutput(Double.parseDouble(t[9]));
+        gen.setMaximumRealPowerOutput(parseMatDouble(t[8]));
+        gen.setMinimumRealPowerOutput(parseMatDouble(t[9]));
         return gen;
     }
 
@@ -285,17 +316,17 @@ class PegaseAcSensitivityBenchmark {
         MBranch branch = new MBranch();
         branch.setFrom(Integer.parseInt(t[0]));
         branch.setTo(Integer.parseInt(t[1]));
-        branch.setR(Double.parseDouble(t[2]));
-        branch.setX(Double.parseDouble(t[3]));
-        branch.setB(Double.parseDouble(t[4]));
-        branch.setRateA(Double.parseDouble(t[5]));
-        branch.setRateB(Double.parseDouble(t[6]));
-        branch.setRateC(Double.parseDouble(t[7]));
-        branch.setRatio(Double.parseDouble(t[8]));
-        branch.setPhaseShiftAngle(Double.parseDouble(t[9]));
+        branch.setR(parseMatDouble(t[2]));
+        branch.setX(parseMatDouble(t[3]));
+        branch.setB(parseMatDouble(t[4]));
+        branch.setRateA(parseMatDouble(t[5]));
+        branch.setRateB(parseMatDouble(t[6]));
+        branch.setRateC(parseMatDouble(t[7]));
+        branch.setRatio(parseMatDouble(t[8]));
+        branch.setPhaseShiftAngle(parseMatDouble(t[9]));
         branch.setStatus(Integer.parseInt(t[10]));
-        branch.setAngMin(Double.parseDouble(t[11]));
-        branch.setAngMax(Double.parseDouble(t[12]));
+        branch.setAngMin(parseMatDouble(t[11]));
+        branch.setAngMax(parseMatDouble(t[12]));
         return branch;
     }
 }
