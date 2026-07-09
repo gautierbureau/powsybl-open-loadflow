@@ -1207,8 +1207,20 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
      */
     private static LfBranch getBranchOrLegCached(Network network, String functionId, SensitivityFunctionType functionType,
                                                  LfNetwork lfNetwork, Map<SensitivityFunctionType, Map<String, LfBranch>> functionBranchCache) {
-        return functionBranchCache.computeIfAbsent(functionType, k -> new HashMap<>())
-            .computeIfAbsent(functionId, k -> checkAndGetBranchOrLeg(network, functionId, functionType, lfNetwork));
+        // Explicit get/put rather than computeIfAbsent: the lambda computeIfAbsent needs closes over
+        // network/functionId/lfNetwork, so it would be allocated once per factor, which on a large factor matrix costs
+        // more than the lookups it saves. containsKey lets a null resolution (branch not in the LF network) be cached.
+        Map<String, LfBranch> byFunctionId = functionBranchCache.get(functionType);
+        if (byFunctionId == null) {
+            byFunctionId = new HashMap<>();
+            functionBranchCache.put(functionType, byFunctionId);
+        }
+        LfBranch branch = byFunctionId.get(functionId);
+        if (branch == null && !byFunctionId.containsKey(functionId)) {
+            branch = checkAndGetBranchOrLeg(network, functionId, functionType, lfNetwork);
+            byFunctionId.put(functionId, branch);
+        }
+        return branch;
     }
 
     /**
@@ -1219,10 +1231,13 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
     private static LfBus getInjectionBusElementCached(Network network, String variableId, boolean breakers, LfNetwork lfNetwork,
                                                       InjectionVariableIdToBusIdCache injectionVariableIdToBusIdCache,
                                                       Map<String, LfBus> injectionBusElementCache) {
-        return injectionBusElementCache.computeIfAbsent(variableId, vid -> {
-            String injectionBusId = injectionVariableIdToBusIdCache.getBusId(network, vid, breakers);
-            return injectionBusId != null ? lfNetwork.getBusById(injectionBusId) : null;
-        });
+        LfBus bus = injectionBusElementCache.get(variableId);
+        if (bus == null && !injectionBusElementCache.containsKey(variableId)) {
+            String injectionBusId = injectionVariableIdToBusIdCache.getBusId(network, variableId, breakers);
+            bus = injectionBusId != null ? lfNetwork.getBusById(injectionBusId) : null;
+            injectionBusElementCache.put(variableId, bus);
+        }
+        return bus;
     }
 
     private void readAndCheck(SensitivityFunctionType functionTypeToCheck, String functionIdToCheck, Network network,
