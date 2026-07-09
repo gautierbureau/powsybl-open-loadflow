@@ -13,12 +13,30 @@ import com.powsybl.security.SecurityAnalysisParameters;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
  * @author Geoffroy Jamgotchian {@literal <geoffroy.jamgotchian at rte-france.com>}
  */
 public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAnalysisParameters> {
+
+    /**
+     * How branch limit violations are reported when a branch carries more than one selected operational limits group.
+     * <ul>
+     *     <li>{@link #PER_LIMITS_GROUP}: report a violation for every selected operational limits group that is exceeded
+     *     (one violation per group, per side, per limit type). This is the default and the historical behaviour.</li>
+     *     <li>{@link #MOST_RESTRICTIVE}: for each side and each limit type, only check the most restrictive selected
+     *     operational limits group, i.e. the one with the lowest (reduced) permanent limit, and report at most one
+     *     violation for it.</li>
+     * </ul>
+     * This only changes the output of branches carrying at least two selected operational limits groups; branches with a
+     * single group behave identically in both modes.
+     */
+    public enum LimitViolationReporting {
+        PER_LIMITS_GROUP,
+        MOST_RESTRICTIVE
+    }
 
     private boolean createResultExtension = CREATE_RESULT_EXTENSION_DEFAULT_VALUE;
 
@@ -32,7 +50,11 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
 
     private boolean startWithFrozenACEmulation = START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE;
 
+    private LimitViolationReporting limitViolationReporting = LIMIT_VIOLATION_REPORTING_DEFAULT_VALUE;
+
     public static final String CREATE_RESULT_EXTENSION_PARAM_NAME = "createResultExtension";
+    public static final String LIMIT_VIOLATION_REPORTING_PARAM_NAME = "limitViolationReporting";
+    public static final LimitViolationReporting LIMIT_VIOLATION_REPORTING_DEFAULT_VALUE = LimitViolationReporting.PER_LIMITS_GROUP;
     public static final boolean CREATE_RESULT_EXTENSION_DEFAULT_VALUE = false;
     public static final String CONTINGENCY_PROPAGATION_PARAM_NAME = "contingencyPropagation";
     public static final boolean CONTINGENCY_PROPAGATION_DEFAULT_VALUE = true;
@@ -49,7 +71,8 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
             THREAD_COUNT_PARAM_NAME,
             DC_FAST_MODE_PARAM_NAME,
             CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME,
-            START_WITH_FROZEN_AC_EMULATION_PARAM_NAME);
+            START_WITH_FROZEN_AC_EMULATION_PARAM_NAME,
+            LIMIT_VIOLATION_REPORTING_PARAM_NAME);
 
     @Override
     public String getName() {
@@ -114,6 +137,15 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
         return this;
     }
 
+    public LimitViolationReporting getLimitViolationReporting() {
+        return limitViolationReporting;
+    }
+
+    public OpenSecurityAnalysisParameters setLimitViolationReporting(LimitViolationReporting limitViolationReporting) {
+        this.limitViolationReporting = Objects.requireNonNull(limitViolationReporting);
+        return this;
+    }
+
     public static OpenSecurityAnalysisParameters getOrDefault(SecurityAnalysisParameters parameters) {
         OpenSecurityAnalysisParameters parametersExt = parameters.getExtension(OpenSecurityAnalysisParameters.class);
         if (parametersExt == null) {
@@ -136,7 +168,8 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
                         .setDcFastMode(config.getBooleanProperty(DC_FAST_MODE_PARAM_NAME, DC_FAST_MODE_DEFAULT_VALUE))
                         .setContingencyActivePowerLossDistribution(config.getStringProperty(CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME,
                             CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE))
-                        .setStartWithFrozenACEmulation(config.getBooleanProperty(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME, START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE)));
+                        .setStartWithFrozenACEmulation(config.getBooleanProperty(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME, START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE))
+                        .setLimitViolationReporting(config.getEnumProperty(LIMIT_VIOLATION_REPORTING_PARAM_NAME, LimitViolationReporting.class, LIMIT_VIOLATION_REPORTING_DEFAULT_VALUE)));
         return parameters;
     }
 
@@ -158,6 +191,8 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
                 .ifPresent(this::setContingencyActivePowerLossDistribution);
         Optional.ofNullable(properties.get(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME))
                 .ifPresent(value -> this.setStartWithFrozenACEmulation(Boolean.parseBoolean(value)));
+        Optional.ofNullable(properties.get(LIMIT_VIOLATION_REPORTING_PARAM_NAME))
+                .ifPresent(value -> this.setLimitViolationReporting(LimitViolationReporting.valueOf(value)));
         return this;
     }
 }

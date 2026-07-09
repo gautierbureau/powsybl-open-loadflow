@@ -41,19 +41,32 @@ public class LimitViolationManager {
 
     private SecurityAnalysisParameters.IncreasedViolationsParameters parameters;
 
+    private final OpenSecurityAnalysisParameters.LimitViolationReporting limitViolationReporting;
+
     private final Map<Pair<Object, String>, LimitViolation> violations = new LinkedHashMap<>(); // All limit violations indexed by network element and OperationalLimitsGroup (if it exists)
 
     public LimitViolationManager(LimitViolationManager reference, List<LimitReduction> limitReductions,
-                                 SecurityAnalysisParameters.IncreasedViolationsParameters parameters) {
+                                 SecurityAnalysisParameters.IncreasedViolationsParameters parameters,
+                                 OpenSecurityAnalysisParameters.LimitViolationReporting limitViolationReporting) {
         this.reference = reference;
         if (reference != null) {
             this.parameters = Objects.requireNonNull(parameters);
         }
         this.limitReductionManager = LimitReductionManager.create(limitReductions);
+        this.limitViolationReporting = Objects.requireNonNull(limitViolationReporting);
+    }
+
+    public LimitViolationManager(LimitViolationManager reference, List<LimitReduction> limitReductions,
+                                 SecurityAnalysisParameters.IncreasedViolationsParameters parameters) {
+        this(reference, limitReductions, parameters, OpenSecurityAnalysisParameters.LIMIT_VIOLATION_REPORTING_DEFAULT_VALUE);
+    }
+
+    public LimitViolationManager(List<LimitReduction> limitReductions, OpenSecurityAnalysisParameters.LimitViolationReporting limitViolationReporting) {
+        this(null, limitReductions, null, limitViolationReporting);
     }
 
     public LimitViolationManager(List<LimitReduction> limitReductions) {
-        this(null, limitReductions, null);
+        this(limitReductions, OpenSecurityAnalysisParameters.LIMIT_VIOLATION_REPORTING_DEFAULT_VALUE);
     }
 
     public List<LimitViolation> getLimitViolations() {
@@ -163,17 +176,18 @@ public class LimitViolationManager {
      * {@link #detectViolations(LfNetwork, Predicate, List)} so that each contingency reuses these groups instead of
      * looking them up on every branch of the network again.
      */
-    public static List<BranchLimitsToCheck> getBranchLimitsToCheck(LfNetwork network, LimitReductionManager limitReductionManager) {
+    public static List<BranchLimitsToCheck> getBranchLimitsToCheck(LfNetwork network, LimitReductionManager limitReductionManager,
+                                                                   OpenSecurityAnalysisParameters.LimitViolationReporting limitViolationReporting) {
         List<BranchLimitsToCheck> branchLimitsToCheck = new ArrayList<>();
         for (LfBranch branch : network.getBranches()) {
             LfBus bus1 = branch.getBus1();
             LfBus bus2 = branch.getBus2();
-            List<LfBranch.LfLimitsGroup> current1 = bus1 != null ? branch.getLimits1(LimitType.CURRENT, limitReductionManager) : List.of();
-            List<LfBranch.LfLimitsGroup> activePower1 = bus1 != null ? branch.getLimits1(LimitType.ACTIVE_POWER, limitReductionManager) : List.of();
-            List<LfBranch.LfLimitsGroup> apparentPower1 = bus1 != null ? branch.getLimits1(LimitType.APPARENT_POWER, limitReductionManager) : List.of();
-            List<LfBranch.LfLimitsGroup> current2 = bus2 != null ? branch.getLimits2(LimitType.CURRENT, limitReductionManager) : List.of();
-            List<LfBranch.LfLimitsGroup> activePower2 = bus2 != null ? branch.getLimits2(LimitType.ACTIVE_POWER, limitReductionManager) : List.of();
-            List<LfBranch.LfLimitsGroup> apparentPower2 = bus2 != null ? branch.getLimits2(LimitType.APPARENT_POWER, limitReductionManager) : List.of();
+            List<LfBranch.LfLimitsGroup> current1 = bus1 != null ? selectLimitsGroups(branch.getLimits1(LimitType.CURRENT, limitReductionManager), limitViolationReporting) : List.of();
+            List<LfBranch.LfLimitsGroup> activePower1 = bus1 != null ? selectLimitsGroups(branch.getLimits1(LimitType.ACTIVE_POWER, limitReductionManager), limitViolationReporting) : List.of();
+            List<LfBranch.LfLimitsGroup> apparentPower1 = bus1 != null ? selectLimitsGroups(branch.getLimits1(LimitType.APPARENT_POWER, limitReductionManager), limitViolationReporting) : List.of();
+            List<LfBranch.LfLimitsGroup> current2 = bus2 != null ? selectLimitsGroups(branch.getLimits2(LimitType.CURRENT, limitReductionManager), limitViolationReporting) : List.of();
+            List<LfBranch.LfLimitsGroup> activePower2 = bus2 != null ? selectLimitsGroups(branch.getLimits2(LimitType.ACTIVE_POWER, limitReductionManager), limitViolationReporting) : List.of();
+            List<LfBranch.LfLimitsGroup> apparentPower2 = bus2 != null ? selectLimitsGroups(branch.getLimits2(LimitType.APPARENT_POWER, limitReductionManager), limitViolationReporting) : List.of();
             if (!current1.isEmpty() || !activePower1.isEmpty() || !apparentPower1.isEmpty()
                     || !current2.isEmpty() || !activePower2.isEmpty() || !apparentPower2.isEmpty()) {
                 branchLimitsToCheck.add(new BranchLimitsToCheck(branch, bus1, current1, activePower1, apparentPower1,
@@ -255,20 +269,53 @@ public class LimitViolationManager {
                                             Function<LfBranch, Evaluable> pGetter,
                                             ToDoubleFunction<LfBranch> sGetter,
                                             TwoSides side) {
-        List<LfBranch.LfLimitsGroup> limitsGroups = limitsGetter.apply(branch, LimitType.CURRENT, limitReductionManager);
+        List<LfBranch.LfLimitsGroup> limitsGroups = selectLimitsGroups(limitsGetter.apply(branch, LimitType.CURRENT, limitReductionManager), limitViolationReporting);
         for (LfBranch.LfLimitsGroup limitsGroup : limitsGroups) {
             detectBranchCurrentViolations(branch, bus, iGetter, limitsGroup, side);
         }
 
-        limitsGroups = limitsGetter.apply(branch, LimitType.ACTIVE_POWER, limitReductionManager);
+        limitsGroups = selectLimitsGroups(limitsGetter.apply(branch, LimitType.ACTIVE_POWER, limitReductionManager), limitViolationReporting);
         for (LfBranch.LfLimitsGroup limitsGroup : limitsGroups) {
             detectBranchActivePowerViolations(branch, pGetter, limitsGroup, side);
         }
 
-        limitsGroups = limitsGetter.apply(branch, LimitType.APPARENT_POWER, limitReductionManager);
+        limitsGroups = selectLimitsGroups(limitsGetter.apply(branch, LimitType.APPARENT_POWER, limitReductionManager), limitViolationReporting);
         for (LfBranch.LfLimitsGroup limitsGroup : limitsGroups) {
             detectBranchApparentPowerViolations(branch, sGetter, limitsGroup, side);
         }
+    }
+
+    /**
+     * Reduce a branch side's selected operational limits groups (of a single limit type) according to the reporting mode:
+     * all of them in {@link OpenSecurityAnalysisParameters.LimitViolationReporting#PER_LIMITS_GROUP}, or only the most
+     * restrictive one (lowest reduced permanent limit) in
+     * {@link OpenSecurityAnalysisParameters.LimitViolationReporting#MOST_RESTRICTIVE}.
+     */
+    static List<LfBranch.LfLimitsGroup> selectLimitsGroups(List<LfBranch.LfLimitsGroup> limitsGroups,
+                                                           OpenSecurityAnalysisParameters.LimitViolationReporting limitViolationReporting) {
+        if (limitViolationReporting == OpenSecurityAnalysisParameters.LimitViolationReporting.PER_LIMITS_GROUP
+                || limitsGroups.size() <= 1) {
+            return limitsGroups;
+        }
+        LfBranch.LfLimitsGroup mostRestrictive = null;
+        double minPermanentReducedValue = Double.POSITIVE_INFINITY;
+        for (LfBranch.LfLimitsGroup limitsGroup : limitsGroups) {
+            double permanentReducedValue = permanentReducedValue(limitsGroup);
+            if (permanentReducedValue < minPermanentReducedValue) {
+                minPermanentReducedValue = permanentReducedValue;
+                mostRestrictive = limitsGroup;
+            }
+        }
+        return mostRestrictive != null ? List.of(mostRestrictive) : limitsGroups;
+    }
+
+    /**
+     * The reduced value of a limit group's permanent limit, which is the last of its severity-sorted limits (temporary
+     * limits first, permanent last, see {@link LfBranch.LfLimitsGroup#createSortedLimitsList}).
+     */
+    private static double permanentReducedValue(LfBranch.LfLimitsGroup limitsGroup) {
+        List<LfBranch.LfLimit> sortedLimits = limitsGroup.getSortedLimits();
+        return sortedLimits.isEmpty() ? Double.POSITIVE_INFINITY : sortedLimits.get(sortedLimits.size() - 1).getReducedValue();
     }
 
     /**
