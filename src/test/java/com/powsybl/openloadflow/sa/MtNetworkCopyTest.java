@@ -17,9 +17,11 @@ import com.powsybl.contingency.LoadContingency;
 import com.powsybl.contingency.strategy.OperatorStrategy;
 import com.powsybl.contingency.strategy.condition.TrueCondition;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.VariantManagerConstants;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.network.NodeBreakerNetworkFactory;
+import com.powsybl.openloadflow.network.impl.RefThreadGuardTestUtil;
 import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.results.BranchResult;
@@ -33,6 +35,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
  * With the network per thread COPY mode, a multi-threaded security analysis simulates the very same
@@ -102,6 +105,43 @@ class MtNetworkCopyTest extends AbstractOpenSecurityAnalysisTest {
     }
 
     @Test
+    void testCopyModeFromNonInitialVariant() {
+        // gridsuite / pypowsybl pattern: the caller clones the network to a process variant, modifies
+        // it and launches the security analysis from that variant; the LfNetwork (and its per-thread
+        // copies) must capture the selected variant's state on the calling thread, and the workers
+        // must not fall back to iidm reads (which could observe another variant)
+        Network network = createNodeBreakerNetwork();
+        List<Contingency> contingencies = List.of(
+                new Contingency("L1", new BranchContingency("L1")),
+                new Contingency("L2", new BranchContingency("L2")));
+
+        SecurityAnalysisResult initialVariant = run(network, contingencies, 1, false, false, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY);
+
+        network.getVariantManager().cloneVariant(VariantManagerConstants.INITIAL_VARIANT_ID, "processVariant");
+        network.getVariantManager().setWorkingVariant("processVariant");
+        network.getLoad("LD").setP0(network.getLoad("LD").getP0() * 1.2); // modified in the variant only
+
+        SecurityAnalysisResult singleThread = run(network, contingencies, 1, false, false, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY);
+        RefThreadGuardTestUtil.arm();
+        SecurityAnalysisResult multiThread;
+        try {
+            multiThread = run(network, contingencies, 4, false, false, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY);
+        } finally {
+            RefThreadGuardTestUtil.disarm();
+        }
+        assertSameResults(singleThread, multiThread);
+
+        // the analysis really simulated the variant state, not the initial one
+        double initialP1 = initialVariant.getPreContingencyResult().getNetworkResult().getBranchResult("L1").getP1();
+        double variantP1 = multiThread.getPreContingencyResult().getNetworkResult().getBranchResult("L1").getP1();
+        assertNotEquals(initialP1, variantP1, 1e-3);
+
+        // switching back to the initial variant still gives the original results
+        network.getVariantManager().setWorkingVariant(VariantManagerConstants.INITIAL_VARIANT_ID);
+        assertSameResults(initialVariant, run(network, contingencies, 4, false, false, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY));
+    }
+
+    @Test
     void testOperatorStrategiesIdenticalToSingleThread() {
         // remedial switch-closing actions make the network go through an initial topology restoration
         // (switches built closed then reopened, leaving disabled elements and removed connectivity
@@ -137,6 +177,45 @@ class MtNetworkCopyTest extends AbstractOpenSecurityAnalysisTest {
                 assertEquals(branchResult.getI1(), actual.getNetworkResult().getBranchResult(branchResult.getBranchId()).getI1(), 0,
                         "operator strategy " + expected.getOperatorStrategy().getId() + " I1 mismatch on " + branchResult.getBranchId());
             }
+        }
+    }
+
+    @Test
+    void testCopyModeWorkersNeverReadIidm() {
+        // full featured run (monitors, result extensions, operator strategy with actions,
+        // load contingency, distributed slack and reactive limits) with the Ref thread guard
+        // armed: any IIDM network dereference from a worker thread fails the analysis
+        Network network = NodeBreakerNetworkFactory.create3Bars();
+        network.getSwitch("C1").setOpen(true);
+        network.getSwitch("C2").setOpen(true);
+
+        List<Contingency> contingencies = List.of(
+                new Contingency("L1", new BranchContingency("L1")),
+                new Contingency("L3", new BranchContingency("L3")),
+                new Contingency("L2", new BranchContingency("L2")));
+        List<Action> actions = List.of(new SwitchAction("action1", "C1", false), new SwitchAction("action3", "C2", false));
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("strategyL1", ContingencyContext.specificContingency("L1"), new TrueCondition(), List.of("action1")),
+                new OperatorStrategy("strategyL3", ContingencyContext.specificContingency("L3"), new TrueCondition(), List.of("action3")),
+                new OperatorStrategy("strategyL2", ContingencyContext.specificContingency("L2"), new TrueCondition(), List.of("action1", "action3")));
+
+        LoadFlowParameters parameters = new LoadFlowParameters();
+        setSlackBusId(parameters, "VL2_0");
+        SecurityAnalysisParameters saParameters = new SecurityAnalysisParameters();
+        saParameters.setLoadFlowParameters(parameters);
+        saParameters.addExtension(OpenSecurityAnalysisParameters.class, new OpenSecurityAnalysisParameters()
+                .setThreadCount(2)
+                .setNetworkPerThreadMode(OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY)
+                .setCreateResultExtension(true));
+
+        RefThreadGuardTestUtil.arm();
+        try {
+            SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, createAllBranchesMonitors(network), saParameters,
+                    operatorStrategies, actions, ReportNode.NO_OP);
+            assertEquals(3, result.getPostContingencyResults().size());
+            assertEquals(3, result.getOperatorStrategyResults().size());
+        } finally {
+            RefThreadGuardTestUtil.disarm();
         }
     }
 

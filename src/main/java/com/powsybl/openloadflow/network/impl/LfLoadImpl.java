@@ -34,6 +34,21 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
 
     private final List<Ref<LccConverterStation>> lccCsRefs = new ArrayList<>();
 
+    /**
+     * Original load data cached at build time (p0, q0, fictitious flag) so the run phase never
+     * goes back to the iidm network (see the iidm free run phase of the multi thread copy mode).
+     */
+    private record OriginalLoadInfo(double p0, double q0, boolean fictitious) {
+
+        double getPowerFactor() {
+            return p0 != 0 ? q0 / p0 : 1;
+        }
+    }
+
+    private final Map<String, OriginalLoadInfo> loadsInfos;
+
+    private final List<String> lccCsIds;
+
     private double targetQ = 0;
 
     private boolean ensurePowerFactorConstantByLoad = false;
@@ -55,6 +70,8 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
         this.bus = Objects.requireNonNull(bus);
         this.distributedOnConformLoad = distributedOnConformLoad;
         this.loadModel = loadModel;
+        this.loadsInfos = new LinkedHashMap<>();
+        this.lccCsIds = new ArrayList<>();
     }
 
     LfLoadImpl(LfLoadImpl other, LfBus bus) {
@@ -64,6 +81,9 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
         this.loadModel = other.loadModel;
         this.loadsRefs.putAll(other.loadsRefs);
         this.lccCsRefs.addAll(other.lccCsRefs);
+        // immutable once the load is done, shared with the copies
+        this.loadsInfos = other.loadsInfos;
+        this.lccCsIds = other.lccCsIds;
         this.targetQ = other.targetQ;
         this.ensurePowerFactorConstantByLoad = other.ensurePowerFactorConstantByLoad;
         this.loadsAbsVariableTargetP.putAll(other.loadsAbsVariableTargetP);
@@ -79,8 +99,7 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
 
     @Override
     public List<String> getOriginalIds() {
-        return Stream.concat(loadsRefs.values().stream().map(r -> r.get().getId()),
-                             lccCsRefs.stream().map(r -> r.get().getId()))
+        return Stream.concat(loadsInfos.keySet().stream(), lccCsIds.stream())
                 .toList();
     }
 
@@ -91,10 +110,12 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
 
     @Override
     public boolean isOriginalLoadNotParticipating(String originalLoadId) {
-        if (loadsRefs.get(originalLoadId) == null) {
+        OriginalLoadInfo loadInfo = loadsInfos.get(originalLoadId);
+        if (loadInfo == null) {
             return false;
         }
-        return isLoadNotParticipating(loadsRefs.get(originalLoadId).get());
+        // Fictitious loads do not participate to slack distribution.
+        return loadInfo.fictitious();
     }
 
     @Override
@@ -107,6 +128,7 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
         loadsDisablingStatus.put(load.getId(), false);
         double p0 = load.getP0();
         double q0 = load.getQ0();
+        loadsInfos.put(load.getId(), new OriginalLoadInfo(p0, q0, isLoadFictitious(load)));
         targetP += p0 / PerUnit.SB;
         initialTargetP += p0 / PerUnit.SB;
         targetQ += q0 / PerUnit.SB;
@@ -129,6 +151,7 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
     void add(LccConverterStation lccCs, LfNetworkParameters parameters) {
         // note that LCC converter station are out of the slack distribution.
         lccCsRefs.add(Ref.create(lccCs, parameters.isCacheEnabled()));
+        lccCsIds.add(lccCs.getId());
         double lccTargetP = HvdcUtils.getConverterStationTargetP(lccCs);
         this.targetP += lccTargetP / PerUnit.SB;
         initialTargetP += lccTargetP / PerUnit.SB;
@@ -252,9 +275,9 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
     @Override
     public double calculateNewTargetQ(double diffTargetP) {
         double newLoadTargetQ = 0;
-        for (Ref<Load> refLoad : loadsRefs.values()) {
-            Load load = refLoad.get();
-            double updatedQ0 = load.getQ0() / PerUnit.SB + getPowerFactor(load) * diffTargetP * getParticipationFactor(load.getId());
+        for (var e : loadsInfos.entrySet()) {
+            OriginalLoadInfo loadInfo = e.getValue();
+            double updatedQ0 = loadInfo.q0() / PerUnit.SB + loadInfo.getPowerFactor() * diffTargetP * getParticipationFactor(e.getKey());
             newLoadTargetQ += updatedQ0;
         }
         return newLoadTargetQ;
@@ -302,11 +325,9 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
 
     @Override
     public double getNonFictitiousLoadTargetP() {
-        return loadsRefs.values().stream()
-                .map(Ref::get)
-                .filter(Objects::nonNull)
-                .filter(l -> !isLoadFictitious(l))
-                .mapToDouble(Load::getP0)
+        return loadsInfos.values().stream()
+                .filter(loadInfo -> !loadInfo.fictitious())
+                .mapToDouble(OriginalLoadInfo::p0)
                 .sum();
     }
 
