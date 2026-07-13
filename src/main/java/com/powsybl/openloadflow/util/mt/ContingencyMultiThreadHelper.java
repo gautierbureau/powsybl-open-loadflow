@@ -30,6 +30,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -114,9 +115,13 @@ public final class ContingencyMultiThreadHelper {
      * analysis methods) and appends them to the main network nodes in contingency list order. Required
      * to keep the report identical to a single-threaded run when the partitions are not contiguous
      * slices (round-robin partitioning).
+     *
+     * <p>When {@code dedupPostContingency} is {@code true} (operator strategy balancing), a contingency is
+     * simulated by several partitions, so only the first post-contingency node of each contingency is kept
+     * (mirroring the result merging), avoiding duplicate post-contingency nodes in the report.</p>
      */
     public static void mergeReportThreadResultsOrdered(ReportNode mainReport, List<ReportNode> threadReports,
-                                                       Map<String, Integer> contingencyPositions) {
+                                                       Map<String, Integer> contingencyPositions, boolean dedupPostContingency) {
         Map<LfNetworkId, ReportNode> mainNodes = indexLfNetworkNodes(mainReport);
         List<Map<LfNetworkId, ReportNode>> threadNodes = threadReports.stream()
                 .map(ContingencyMultiThreadHelper::indexLfNetworkNodes)
@@ -136,6 +141,12 @@ public final class ContingencyMultiThreadHelper {
                         postNodes.add(child);
                     }
                 }
+            }
+            if (dedupPostContingency) {
+                // post nodes are collected in partition order, keep the first one of each contingency
+                Set<String> seenContingencyIds = new HashSet<>();
+                postNodes.removeIf(n -> !seenContingencyIds.add(
+                        n.getValue(Reports.CONTINGENCY_ID).orElseThrow().getValue().toString()));
             }
             postNodes.sort(Comparator.comparingInt(n -> contingencyPositions.getOrDefault(
                     n.getValue(Reports.CONTINGENCY_ID).orElseThrow().getValue().toString(), Integer.MAX_VALUE)));

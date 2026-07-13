@@ -376,8 +376,10 @@ class OpenSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnalysisTe
         GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory = new NaiveGraphConnectivityFactory<>(LfBus::getNum);
         securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), connectivityFactory);
 
-        // a single contingency (L1) carries three operator strategies, the other contingency (L2) carries one
-        List<Contingency> contingencies = Stream.of("L1", "L2")
+        // a single contingency (L1) carries three operator strategies, the other contingency (L2) carries one.
+        // L1 is listed last on purpose: as the heaviest contingency the balancer assigns it to the first partition,
+        // so a merge that keeps the partition order (instead of the contingency list order) would reorder the results.
+        List<Contingency> contingencies = Stream.of("L2", "L1")
                 .map(id -> new Contingency(id, new BranchContingency(id)))
                 .toList();
         List<Action> actions = List.of(new SwitchAction("action1", "C1", false),
@@ -396,6 +398,14 @@ class OpenSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnalysisTe
         assertEquals(2, parallelResult.getPostContingencyResults().size());
         assertSecurityAnalysisResultsEqual(referenceResult, parallelResult, List.of("L1", "L2"),
                 List.of("strategyL1a", "strategyL1b", "strategyL1c", "strategyL2"));
+
+        // the merged result order must match the single-threaded reference, not only the set of results looked up by id
+        assertEquals(referenceResult.getPostContingencyResults().stream().map(r -> r.getContingency().getId()).toList(),
+                parallelResult.getPostContingencyResults().stream().map(r -> r.getContingency().getId()).toList(),
+                "post-contingency result order");
+        assertEquals(referenceResult.getOperatorStrategyResults().stream().map(r -> r.getOperatorStrategy().getId()).toList(),
+                parallelResult.getOperatorStrategyResults().stream().map(r -> r.getOperatorStrategy().getId()).toList(),
+                "operator strategy result order");
     }
 
     private SecurityAnalysisResult runOperatorStrategyParallelizationCase(GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory,
