@@ -48,6 +48,7 @@ import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.SecurityAnalysisRunParameters;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.results.BranchResult;
+import com.powsybl.security.results.NetworkResult;
 import com.powsybl.security.results.OperatorStrategyResult;
 import com.powsybl.security.results.PostContingencyResult;
 import com.powsybl.security.results.PreContingencyResult;
@@ -362,6 +363,102 @@ class OpenSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnalysisTe
         assertEquals(441.539, network.getLine("L1").getTerminal1().getI(), LoadFlowAssert.DELTA_I);
         assertEquals(89.429, network.getLine("L2").getTerminal1().getI(), LoadFlowAssert.DELTA_I);
         assertEquals(441.539, network.getLine("L3").getTerminal1().getI(), LoadFlowAssert.DELTA_I);
+    }
+
+    /**
+     * Operator strategy parallelization must produce exactly the same results as a single threaded run, whatever the
+     * thread count, including in the extreme case of a single contingency carrying several operator strategies (where
+     * contingency-level parallelization alone brings no speed-up).
+     */
+    @ParameterizedTest
+    @CsvSource({"2, true", "3, true", "4, true"})
+    void testOperatorStrategyParallelization(int threadCount, boolean operatorStrategyParallelization) {
+        GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory = new NaiveGraphConnectivityFactory<>(LfBus::getNum);
+        securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), connectivityFactory);
+
+        // a single contingency (L1) carries three operator strategies, the other contingency (L2) carries one.
+        // L1 is listed last on purpose: as the heaviest contingency the balancer assigns it to the first partition,
+        // so a merge that keeps the partition order (instead of the contingency list order) would reorder the results.
+        List<Contingency> contingencies = Stream.of("L2", "L1")
+                .map(id -> new Contingency(id, new BranchContingency(id)))
+                .toList();
+        List<Action> actions = List.of(new SwitchAction("action1", "C1", false),
+                                       new SwitchAction("action3", "C2", false));
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("strategyL1a", ContingencyContext.specificContingency("L1"), new TrueCondition(), List.of("action1")),
+                new OperatorStrategy("strategyL1b", ContingencyContext.specificContingency("L1"), new TrueCondition(), List.of("action3")),
+                new OperatorStrategy("strategyL1c", ContingencyContext.specificContingency("L1"), new TrueCondition(), List.of("action1", "action3")),
+                new OperatorStrategy("strategyL2", ContingencyContext.specificContingency("L2"), new TrueCondition(), List.of("action1", "action3")));
+
+        // reference single threaded run and parallelized run must give the exact same results
+        SecurityAnalysisResult referenceResult = runOperatorStrategyParallelizationCase(connectivityFactory, contingencies, actions, operatorStrategies, 1, false);
+        SecurityAnalysisResult parallelResult = runOperatorStrategyParallelizationCase(connectivityFactory, contingencies, actions, operatorStrategies, threadCount, operatorStrategyParallelization);
+
+        assertEquals(4, parallelResult.getOperatorStrategyResults().size());
+        assertEquals(2, parallelResult.getPostContingencyResults().size());
+        assertSecurityAnalysisResultsEqual(referenceResult, parallelResult, List.of("L1", "L2"),
+                List.of("strategyL1a", "strategyL1b", "strategyL1c", "strategyL2"));
+
+        // the merged result order must match the single-threaded reference, not only the set of results looked up by id
+        assertEquals(referenceResult.getPostContingencyResults().stream().map(r -> r.getContingency().getId()).toList(),
+                parallelResult.getPostContingencyResults().stream().map(r -> r.getContingency().getId()).toList(),
+                "post-contingency result order");
+        assertEquals(referenceResult.getOperatorStrategyResults().stream().map(r -> r.getOperatorStrategy().getId()).toList(),
+                parallelResult.getOperatorStrategyResults().stream().map(r -> r.getOperatorStrategy().getId()).toList(),
+                "operator strategy result order");
+    }
+
+    private SecurityAnalysisResult runOperatorStrategyParallelizationCase(GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory,
+                                                                          List<Contingency> contingencies, List<Action> actions,
+                                                                          List<OperatorStrategy> operatorStrategies, int threadCount,
+                                                                          boolean operatorStrategyParallelization) {
+        securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), connectivityFactory);
+        Network network = NodeBreakerNetworkFactory.create3Bars();
+        network.getSwitch("C1").setOpen(true);
+        network.getSwitch("C2").setOpen(true);
+        network.getLineStream().forEach(line -> {
+            if (line.getCurrentLimits1().isPresent()) {
+                line.getCurrentLimits1().orElseThrow().setPermanentLimit(310);
+            }
+            if (line.getCurrentLimits2().isPresent()) {
+                line.getCurrentLimits2().orElseThrow().setPermanentLimit(310);
+            }
+        });
+
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+        LoadFlowParameters parameters = new LoadFlowParameters();
+        parameters.setDistributedSlack(false);
+        setSlackBusId(parameters, "VL2_0");
+        SecurityAnalysisParameters securityAnalysisParameters = new SecurityAnalysisParameters();
+        securityAnalysisParameters.setLoadFlowParameters(parameters);
+        securityAnalysisParameters.addExtension(OpenSecurityAnalysisParameters.class, new OpenSecurityAnalysisParameters()
+                .setThreadCount(threadCount)
+                .setOperatorStrategyParallelization(operatorStrategyParallelization));
+
+        return runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+    }
+
+    private void assertSecurityAnalysisResultsEqual(SecurityAnalysisResult expected, SecurityAnalysisResult actual,
+                                                    List<String> contingencyIds, List<String> operatorStrategyIds) {
+        for (String contingencyId : contingencyIds) {
+            assertBranchResultsEqual(getPostContingencyResult(expected, contingencyId).getNetworkResult(),
+                    getPostContingencyResult(actual, contingencyId).getNetworkResult(), "post-contingency " + contingencyId);
+        }
+        for (String operatorStrategyId : operatorStrategyIds) {
+            assertBranchResultsEqual(getOperatorStrategyResult(expected, operatorStrategyId).getNetworkResult(),
+                    getOperatorStrategyResult(actual, operatorStrategyId).getNetworkResult(), "operator strategy " + operatorStrategyId);
+        }
+    }
+
+    private static void assertBranchResultsEqual(NetworkResult expected, NetworkResult actual, String context) {
+        assertEquals(expected.getBranchResults().size(), actual.getBranchResults().size(), context + " branch result count");
+        for (BranchResult expectedBranchResult : expected.getBranchResults()) {
+            BranchResult actualBranchResult = actual.getBranchResult(expectedBranchResult.getBranchId());
+            assertNotNull(actualBranchResult, context + " branch " + expectedBranchResult.getBranchId());
+            assertEquals(expectedBranchResult.getI1(), actualBranchResult.getI1(), LoadFlowAssert.DELTA_I,
+                    context + " branch " + expectedBranchResult.getBranchId());
+        }
     }
 
     @Test

@@ -52,7 +52,7 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
     @Test
     void specificParametersNamesTest() {
         assertEquals(List.of("createResultExtension", "contingencyPropagation", "threadCount", "dcFastMode",
-                "contingencyActivePowerLossDistribution", "startWithFrozenACEmulation",
+                "contingencyActivePowerLossDistribution", "startWithFrozenACEmulation", "operatorStrategyParallelization",
                 "networkPerThreadMode", "contingencyPartitioningMode"),
             provider.getSpecificParametersNames());
     }
@@ -94,6 +94,11 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         assertEquals("Default", parametersExt.getContingencyActivePowerLossDistribution());
         testCount++;
 
+        assertFalse(parametersExt.isOperatorStrategyParallelization());
+        parametersExt.setOperatorStrategyParallelization(true);
+        assertTrue(parametersExt.isOperatorStrategyParallelization());
+        testCount++;
+
         assertEquals(OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY, parametersExt.getNetworkPerThreadMode());
         parametersExt.setNetworkPerThreadMode(OpenSecurityAnalysisParameters.NetworkPerThreadMode.REBUILD);
         assertEquals(OpenSecurityAnalysisParameters.NetworkPerThreadMode.REBUILD, parametersExt.getNetworkPerThreadMode());
@@ -117,6 +122,7 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         moduleConfig.setStringProperty("startWithFrozenACEmulation", "false");
         moduleConfig.setStringProperty("threadCount", "3");
         moduleConfig.setStringProperty("contingencyActivePowerLossDistribution", "Default");
+        moduleConfig.setStringProperty("operatorStrategyParallelization", "true");
         moduleConfig.setStringProperty("networkPerThreadMode", "REBUILD");
         moduleConfig.setStringProperty("contingencyPartitioningMode", "ROUND_ROBIN");
 
@@ -126,6 +132,7 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         assertTrue(parametersExt.isDcFastMode());
         assertFalse(parametersExt.isStartWithFrozenACEmulation());
         assertEquals(3, parametersExt.getThreadCount());
+        assertTrue(parametersExt.isOperatorStrategyParallelization());
         assertEquals(OpenSecurityAnalysisParameters.NetworkPerThreadMode.REBUILD, parametersExt.getNetworkPerThreadMode());
         assertEquals(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.ROUND_ROBIN, parametersExt.getContingencyPartitioningMode());
         // check test completeness
@@ -150,6 +157,7 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
                 "threadCount", "3",
                 "startWithFrozenACEmulation", "false",
                 "contingencyActivePowerLossDistribution", "Default",
+                "operatorStrategyParallelization", "true",
                 "networkPerThreadMode", "REBUILD",
                 "contingencyPartitioningMode", "ROUND_ROBIN");
         OpenSecurityAnalysisParameters parametersExt = (OpenSecurityAnalysisParameters) provider.loadSpecificParameters(properties).orElseThrow();
@@ -174,7 +182,8 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
                 .setContingencyPropagation(false)
                 .setDcFastMode(true)
                 .setThreadCount(3)
-                .setStartWithFrozenACEmulation(false);
+                .setStartWithFrozenACEmulation(false)
+                .setOperatorStrategyParallelization(true);
         parameters.addExtension(OpenSecurityAnalysisParameters.class, parametersExt);
         roundTripTest(parameters, JsonSecurityAnalysisParameters::write, JsonSecurityAnalysisParameters::read, "/sa-params.json");
     }

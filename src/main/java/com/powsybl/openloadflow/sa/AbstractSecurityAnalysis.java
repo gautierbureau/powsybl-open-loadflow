@@ -43,10 +43,10 @@ import com.powsybl.openloadflow.network.impl.PropagatedContingency;
 import com.powsybl.openloadflow.network.impl.PropagatedContingencyCreationParameters;
 import com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters;
 import com.powsybl.openloadflow.util.Indexed;
-import com.powsybl.openloadflow.util.Lists2;
 import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.openloadflow.util.Reports;
 import com.powsybl.openloadflow.util.mt.ContingencyMultiThreadHelper;
+import com.powsybl.openloadflow.util.mt.SecurityAnalysisPartitioner;
 import com.powsybl.security.*;
 import com.powsybl.security.limitreduction.LimitReduction;
 import com.powsybl.security.monitor.StateMonitor;
@@ -189,24 +189,47 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         } else {
             OperatorStrategies.check(operatorStrategies, contingencies, actions);
 
+            // when operator strategy parallelization is enabled, the operator strategies of a given contingency can be
+            // spread over several partitions to balance a workload made of few contingencies but many operator
+            // strategies; a contingency may then appear in several partitions and its post-contingency result must be
+            // deduplicated when merging. This operator-strategy balancing supersedes the contingency partitioning mode.
+            boolean balanceOperatorStrategies = securityAnalysisParametersExt.isOperatorStrategyParallelization()
+                    && SecurityAnalysisPartitioner.canBalanceOperatorStrategies(operatorStrategies);
             // round-robin partitioning decorrelates contiguous slices from electrical regions (contingency lists are
-            // usually region-ordered), balancing the partition load
-            boolean roundRobinPartitioning = securityAnalysisParametersExt.getContingencyPartitioningMode()
-                    == OpenSecurityAnalysisParameters.ContingencyPartitioningMode.ROUND_ROBIN;
+            // usually region-ordered), balancing the partition load; it does not apply when operator strategies are
+            // balanced (that partitioner distributes work by operator strategy load and may duplicate contingencies)
+            boolean roundRobinPartitioning = !balanceOperatorStrategies
+                    && securityAnalysisParametersExt.getContingencyPartitioningMode() == OpenSecurityAnalysisParameters.ContingencyPartitioningMode.ROUND_ROBIN;
+            // both round-robin and operator strategy balancing spread the contingencies over the partitions in a
+            // non-contiguous way, so the merged results and reports must be restored to the contingency list order to
+            // stay identical to a single-threaded run (a plain SLICE split is already in order)
+            boolean restoreContingencyOrder = roundRobinPartitioning || balanceOperatorStrategies;
 
-            List<List<Contingency>> contingenciesPartitions;
+            List<SecurityAnalysisPartitioner.Partition> partitions;
             if (roundRobinPartitioning) {
-                // contingency i goes to partition i modulo thread count
-                contingenciesPartitions = new ArrayList<>();
+                // contingency i goes to partition i modulo thread count; each partition keeps the full operator
+                // strategy list (filtered per contingency later by OperatorStrategies.indexByContingencyId)
+                List<List<Contingency>> roundRobinContingencies = new ArrayList<>();
                 for (int i = 0; i < securityAnalysisParametersExt.getThreadCount(); i++) {
-                    contingenciesPartitions.add(new ArrayList<>());
+                    roundRobinContingencies.add(new ArrayList<>());
                 }
                 for (int i = 0; i < contingencies.size(); i++) {
-                    contingenciesPartitions.get(i % securityAnalysisParametersExt.getThreadCount()).add(contingencies.get(i));
+                    roundRobinContingencies.get(i % securityAnalysisParametersExt.getThreadCount()).add(contingencies.get(i));
                 }
+                partitions = roundRobinContingencies.stream()
+                        .map(c -> new SecurityAnalysisPartitioner.Partition(c, operatorStrategies))
+                        .toList();
             } else {
-                contingenciesPartitions = Lists2.partition(contingencies, securityAnalysisParametersExt.getThreadCount());
+                // SecurityAnalysisPartitioner handles both the operator-strategy-balanced case and the plain (SLICE)
+                // contingency split. Copies are much cheaper than rebuilds, so with COPY mode we spread the operator
+                // strategies more aggressively (lower fixed cost per extra partition).
+                double partitionFixedCost = securityAnalysisParametersExt.getNetworkPerThreadMode() == OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY
+                        ? SecurityAnalysisPartitioner.PARTITION_FIXED_COST_COPY
+                        : SecurityAnalysisPartitioner.PARTITION_FIXED_COST_REBUILD;
+                partitions = SecurityAnalysisPartitioner.partition(contingencies, operatorStrategies,
+                        securityAnalysisParametersExt.getThreadCount(), balanceOperatorStrategies, partitionFixedCost);
             }
+            var contingenciesPartitions = partitions.stream().map(SecurityAnalysisPartitioner.Partition::contingencies).toList();
 
             // we pre-allocate the results so that threads can set result in a stable order (using the partition number)
             // so that we always get results in the same order whatever threads completion order is.
@@ -232,34 +255,44 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             };
             ContingencyMultiThreadHelper.ContingencyRunner<P> contingencyRunner = (partitionNum, lfNetworks, propagatedContingencies, parameters, presolved) ->
                     partitionResults.set(partitionNum, runSimulationsOnAllComponents(
-                            lfNetworks, propagatedContingencies, parameters, securityAnalysisParameters, operatorStrategies,
+                            lfNetworks, propagatedContingencies, parameters, securityAnalysisParameters, partitions.get(partitionNum).operatorStrategies(),
                             actions, limitReductions, lfParameters, presolved ? presolvedResults : null));
             Map<String, Integer> contingencyPositions = new HashMap<>();
             for (int i = 0; i < contingencies.size(); i++) {
                 contingencyPositions.putIfAbsent(contingencies.get(i).getId(), i);
             }
-            // with round-robin partitions, the merged report nodes must be re-inserted in contingency
-            // order (and the first partition reporting detached) to stay identical to single-thread mode
-            ContingencyMultiThreadHelper.ReportMerger reportMerger = roundRobinPartitioning
-                    ? (rootNode, threadNodes) -> ContingencyMultiThreadHelper.mergeReportThreadResultsOrdered(rootNode, threadNodes, contingencyPositions)
+            // with non-contiguous partitions, the merged report nodes must be re-inserted in contingency
+            // order (and the first partition reporting detached) to stay identical to single-thread mode; when operator
+            // strategies are balanced a contingency is simulated by several partitions, so its post-contingency report
+            // nodes are also deduplicated (keeping the first, as for the results)
+            boolean dedupPostContingencyReports = balanceOperatorStrategies;
+            ContingencyMultiThreadHelper.ReportMerger reportMerger = restoreContingencyOrder
+                    ? (rootNode, threadNodes) -> ContingencyMultiThreadHelper.mergeReportThreadResultsOrdered(rootNode, threadNodes, contingencyPositions, dedupPostContingencyReports)
                     : ContingencyMultiThreadHelper::mergeReportThreadResults;
             if (securityAnalysisParametersExt.getNetworkPerThreadMode() == OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY) {
                 ContingencyMultiThreadHelper.buildOnceCopyAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
-                        parameterProvider, presolver, contingencyRunner, saReportNode, reportMerger, roundRobinPartitioning, executor);
+                        parameterProvider, presolver, contingencyRunner, saReportNode, reportMerger, restoreContingencyOrder, executor);
             } else {
                 ContingencyMultiThreadHelper.createLFNetworksPerContingencyPartitionAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
-                        parameterProvider, contingencyRunner, saReportNode, reportMerger, roundRobinPartitioning, executor);
+                        parameterProvider, contingencyRunner, saReportNode, reportMerger, restoreContingencyOrder, executor);
             }
 
-            // we just need to merge post contingency and operator strategy results, all pre contingency are the same
+            // we just need to merge post contingency and operator strategy results, all pre contingency are the same.
+            // when operator strategies are balanced, the same contingency may be simulated by several partitions, so we
+            // keep a single (the first) post-contingency result per contingency; operator strategy results stay disjoint.
             List<PostContingencyResult> postContingencyResults = new ArrayList<>();
             List<OperatorStrategyResult> operatorStrategyResults = new ArrayList<>();
+            Set<String> mergedContingencyIds = new HashSet<>();
             for (var partitionResult : partitionResults) {
-                postContingencyResults.addAll(partitionResult.getPostContingencyResults());
+                for (PostContingencyResult postContingencyResult : partitionResult.getPostContingencyResults()) {
+                    if (!balanceOperatorStrategies || mergedContingencyIds.add(postContingencyResult.getContingency().getId())) {
+                        postContingencyResults.add(postContingencyResult);
+                    }
+                }
                 operatorStrategyResults.addAll(partitionResult.getOperatorStrategyResults());
             }
-            if (roundRobinPartitioning) {
-                // concatenating round-robin partitions interleaves the results: restore the input order
+            if (restoreContingencyOrder) {
+                // concatenating non-contiguous partitions interleaves the results: restore the input order
                 postContingencyResults.sort(Comparator.comparingInt(r -> contingencyPositions.getOrDefault(r.getContingency().getId(), Integer.MAX_VALUE)));
                 Map<String, Integer> strategyPositions = new HashMap<>();
                 for (int i = 0; i < operatorStrategies.size(); i++) {
