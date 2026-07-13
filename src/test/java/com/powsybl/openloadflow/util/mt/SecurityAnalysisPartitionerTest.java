@@ -193,6 +193,64 @@ class SecurityAnalysisPartitionerTest {
         assertEachStrategyAssignedOnce(operatorStrategies, partitions);
     }
 
+    @Test
+    void unevenStrategyCountsAllocatePartitionsByLargestRemainder() {
+        // three strategy-bearing contingencies with uneven strategy counts (20 / 3 / 1), more partitions than
+        // contingencies (6): the partitions are allocated proportionally to the strategy counts (largest remainder
+        // method), and the single leftover partition goes to the largest remainder (c1), giving blocks of 4 / 1 / 1.
+        // The cheap copy cost makes spreading the chosen plan.
+        List<Contingency> contingencies = List.of(contingency("c1"), contingency("c2"), contingency("c3"));
+        List<OperatorStrategy> operatorStrategies = new ArrayList<>();
+        for (int j = 0; j < 20; j++) {
+            operatorStrategies.add(specificStrategy("c1_s" + j, "c1"));
+        }
+        for (int j = 0; j < 3; j++) {
+            operatorStrategies.add(specificStrategy("c2_s" + j, "c2"));
+        }
+        operatorStrategies.add(specificStrategy("c3_s0", "c3"));
+
+        List<SecurityAnalysisPartitioner.Partition> partitions = SecurityAnalysisPartitioner.partition(contingencies,
+                operatorStrategies, 6, true, SecurityAnalysisPartitioner.PARTITION_FIXED_COST_COPY);
+
+        assertEquals(6, partitions.size());
+        // proportional allocation with the leftover partition given to the largest remainder (c1): c1 -> 4, c2 -> 1, c3 -> 1
+        assertEquals(4, partitions.stream().filter(p -> contingencyIds(p).contains("c1")).count(), "c1 block size");
+        assertEquals(1, partitions.stream().filter(p -> contingencyIds(p).contains("c2")).count(), "c2 block size");
+        assertEquals(1, partitions.stream().filter(p -> contingencyIds(p).contains("c3")).count(), "c3 block size");
+        assertEachStrategyAssignedOnce(operatorStrategies, partitions);
+    }
+
+    @Test
+    void strategyLessContingenciesPackedIntoDistinctPartitions() {
+        // one strategy-heavy contingency (spread over all partitions) plus several contingencies without operator
+        // strategies (which still need a post-contingency simulation): those must be packed into the least loaded
+        // partitions, one each, not all piled onto the same partition.
+        List<Contingency> contingencies = List.of(contingency("c1"), contingency("c2"), contingency("c3"),
+                contingency("c4"), contingency("c5"));
+        List<OperatorStrategy> operatorStrategies = new ArrayList<>();
+        for (int j = 0; j < 12; j++) {
+            operatorStrategies.add(specificStrategy("c1_s" + j, "c1"));
+        }
+
+        List<SecurityAnalysisPartitioner.Partition> partitions = SecurityAnalysisPartitioner.partition(contingencies,
+                operatorStrategies, 4, true, SecurityAnalysisPartitioner.PARTITION_FIXED_COST_COPY);
+
+        assertEquals(4, partitions.size());
+        // the heavy contingency is spread over all partitions
+        assertEquals(4, partitions.stream().filter(p -> contingencyIds(p).contains("c1")).count());
+        // every strategy-less contingency is simulated exactly once
+        for (String contingencyId : List.of("c2", "c3", "c4", "c5")) {
+            assertEquals(1, partitions.stream().filter(p -> contingencyIds(p).contains(contingencyId)).count(),
+                    contingencyId + " should be simulated by exactly one partition");
+        }
+        // the four strategy-less contingencies are packed into distinct partitions, not piled onto a single one
+        long partitionsWithStrategyLessContingency = partitions.stream()
+                .filter(p -> contingencyIds(p).stream().anyMatch(id -> !id.equals("c1")))
+                .count();
+        assertEquals(4, partitionsWithStrategyLessContingency, "strategy-less contingencies should be spread over distinct partitions");
+        assertEachStrategyAssignedOnce(operatorStrategies, partitions);
+    }
+
     private static List<String> contingencyIds(SecurityAnalysisPartitioner.Partition partition) {
         return partition.contingencies().stream().map(Contingency::getId).toList();
     }
