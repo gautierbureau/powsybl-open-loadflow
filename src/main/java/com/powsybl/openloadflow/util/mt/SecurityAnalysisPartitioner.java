@@ -14,6 +14,8 @@ import com.powsybl.openloadflow.util.Lists2;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -283,13 +285,15 @@ public final class SecurityAnalysisPartitioner {
 
     private static List<Partition> buildPartitions(List<Contingency> contingencies, List<List<Contingency>> contingenciesByBucket,
                                                    List<List<OperatorStrategy>> strategiesByBucket, int partitionCount) {
+        // index of each contingency in the input list, to restore the original order within each bucket
+        Map<String, Integer> positions = new HashMap<>();
+        for (int i = 0; i < contingencies.size(); i++) {
+            positions.putIfAbsent(contingencies.get(i).getId(), i);
+        }
         List<Partition> partitions = new ArrayList<>(partitionCount);
         for (int i = 0; i < partitionCount; i++) {
-            List<Contingency> bucketContingencies = contingenciesByBucket.get(i);
-            // keep contingencies in their original order within each bucket
-            List<Contingency> orderedContingencies = contingencies.stream()
-                    .filter(bucketContingencies::contains)
-                    .toList();
+            List<Contingency> orderedContingencies = new ArrayList<>(contingenciesByBucket.get(i));
+            orderedContingencies.sort(Comparator.comparingInt(c -> positions.getOrDefault(c.getId(), Integer.MAX_VALUE)));
             partitions.add(new Partition(orderedContingencies, strategiesByBucket.get(i)));
         }
         return partitions;
