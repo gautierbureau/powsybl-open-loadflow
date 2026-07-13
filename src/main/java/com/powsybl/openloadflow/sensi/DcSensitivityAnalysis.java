@@ -83,7 +83,10 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
     private static int[] computeSensitivityStateRows(List<LfSensitivityFactor<DcVariableType, DcEquationType>> factors) {
         TreeSet<Integer> rows = new TreeSet<>();
         for (LfSensitivityFactor<DcVariableType, DcEquationType> factor : factors) {
-            if (factor.getStatus() != LfSensitivityFactor.Status.VALID) {
+            // include VALID_ONLY_FOR_FUNCTION factors: their function reference is also read from the states,
+            // so their monitored branch rows must be corrected too (skip only the factors that read nothing)
+            if (factor.getStatus() == LfSensitivityFactor.Status.SKIP
+                    || factor.getStatus() == LfSensitivityFactor.Status.ZERO) {
                 continue;
             }
             if (!(factor.getFunctionEquationTerm() instanceof EquationTerm<?, ?> functionTerm)) {
