@@ -7,7 +7,7 @@ sequential warm‑start mode below remain proposals.
 security‑analysis compute machinery and the streaming‑output seam introduced by **PR #23**
 (*"Stream all branch flows out of a security analysis (CSV / Parquet)"*) and its companion
 powsybl‑core PR.
-**Author:** design proposal
+**Author:** Gautier Bureau
 
 > **One‑line summary.** Run *many* load flows on **one fixed network topology** where only the
 > **injection setpoints change** per time step (the generation plan, plus optionally loads),
