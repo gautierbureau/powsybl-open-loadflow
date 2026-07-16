@@ -42,6 +42,7 @@ import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.network.util.ZeroImpedanceFlows;
 import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.timeseries.DoubleTimeSeries;
+import com.powsybl.timeseries.DoubleTimeSeriesValues;
 import com.powsybl.timeseries.TimeSeriesIndex;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -144,6 +145,9 @@ public final class TimeSeriesLoadFlow {
             return new TimeSeriesLoadFlowResult(List.of());
         }
 
+        // read the plan once, here, before any partition thread exists
+        List<PlanSeries> planSeries = readPlan(plan);
+
         LoadFlowParameters lfParameters = parameters.getLoadFlowParameters();
         MatrixFactory matrixFactory = new SparseMatrixFactory();
         GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory = new EvenShiloachGraphDecrementalConnectivityFactory<>();
@@ -162,11 +166,11 @@ public final class TimeSeriesLoadFlow {
                 network.getVariantManager().setWorkingVariant(workingVariantId);
                 try (LfNetworkList lfNetworks = Networks.loadWithReconnectableElements(network, new LfTopoConfig(),
                         enginePlan.networkParameters(), ReportNode.NO_OP)) {
-                    results = runSteps(lfNetworks, ranges.get(0), enginePlan, plan, index, parameters, writer);
+                    results = runSteps(lfNetworks, ranges.get(0), enginePlan, planSeries, index, parameters, writer);
                 }
             }
         } else {
-            results = runMultiThread(network, workingVariantId, plan, index, ranges, parameters,
+            results = runMultiThread(network, workingVariantId, planSeries, index, ranges, parameters,
                     matrixFactory, connectivityFactory, writerFactory);
         }
 
@@ -174,7 +178,7 @@ public final class TimeSeriesLoadFlow {
         return new TimeSeriesLoadFlowResult(results);
     }
 
-    private static List<StepResult> runMultiThread(Network network, String workingVariantId, List<DoubleTimeSeries> plan,
+    private static List<StepResult> runMultiThread(Network network, String workingVariantId, List<PlanSeries> plan,
                                                    TimeSeriesIndex index, List<int[]> ranges, TimeSeriesLoadFlowParameters parameters,
                                                    MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory,
                                                    NetworkResultWriterFactory writerFactory) {
@@ -233,7 +237,7 @@ public final class TimeSeriesLoadFlow {
     }
 
     private static List<StepResult> runSteps(LfNetworkList lfNetworks, int[] range, EnginePlan enginePlan,
-                                             List<DoubleTimeSeries> plan, TimeSeriesIndex index,
+                                             List<PlanSeries> plan, TimeSeriesIndex index,
                                              TimeSeriesLoadFlowParameters parameters, NetworkResultWriter writer) {
         LoadFlowParameters lfParameters = parameters.getLoadFlowParameters();
         LoadFlowModel loadFlowModel = enginePlan.loadFlowModel();
@@ -282,9 +286,26 @@ public final class TimeSeriesLoadFlow {
         }
     }
 
+    /**
+     * Reads each plan series once, on the calling thread, into the values holder the time-series API exposes for
+     * indexed access.
+     *
+     * <p>This is not an optimization detail, it is required for both correctness and performance. {@link
+     * DoubleTimeSeries#get(int)} is a convenience method that materializes the <b>whole</b> series on every call
+     * (through {@code getDoubleTimeSeriesValues()}, itself calling {@code toArray()}), so reading it per step per
+     * generator would cost O(steps² x generators) and allocate an array per step. It is also the only unsafe part to
+     * touch concurrently: {@link com.powsybl.timeseries.CalculatedTimeSeries} lazily computes and caches its index in a
+     * plain field, so a shared plan read from several partition threads at once would race on it.
+     */
+    private static List<PlanSeries> readPlan(List<DoubleTimeSeries> plan) {
+        return plan.stream()
+                .map(series -> new PlanSeries(series.getMetadata().getName(), series.getDoubleTimeSeriesValues()))
+                .toList();
+    }
+
     private static void applySetpoints(List<GeneratorSetpoint> setpoints, int step, LfNetworkParameters networkParameters) {
         for (GeneratorSetpoint setpoint : setpoints) {
-            double targetP = setpoint.series().get(step) / PerUnit.SB;
+            double targetP = setpoint.values().get(step) / PerUnit.SB;
             LfGenerator generator = setpoint.generator();
             generator.setTargetP(targetP);
             generator.setInitialTargetP(targetP);
@@ -292,12 +313,12 @@ public final class TimeSeriesLoadFlow {
         }
     }
 
-    private static List<GeneratorSetpoint> resolveSetpoints(LfNetwork lfNetwork, List<DoubleTimeSeries> plan) {
+    private static List<GeneratorSetpoint> resolveSetpoints(LfNetwork lfNetwork, List<PlanSeries> plan) {
         List<GeneratorSetpoint> setpoints = new ArrayList<>();
-        for (DoubleTimeSeries series : plan) {
-            LfGenerator generator = lfNetwork.getGeneratorById(series.getMetadata().getName());
+        for (PlanSeries series : plan) {
+            LfGenerator generator = lfNetwork.getGeneratorById(series.generatorId());
             if (generator != null) {
-                setpoints.add(new GeneratorSetpoint(generator, series));
+                setpoints.add(new GeneratorSetpoint(generator, series.values()));
             }
         }
         return setpoints;
@@ -474,7 +495,11 @@ public final class TimeSeriesLoadFlow {
                                double distributedActivePower) {
     }
 
-    private record GeneratorSetpoint(LfGenerator generator, DoubleTimeSeries series) {
+    /** One plan series, read once: the generator it targets and its per-step values. */
+    private record PlanSeries(String generatorId, DoubleTimeSeriesValues values) {
+    }
+
+    private record GeneratorSetpoint(LfGenerator generator, DoubleTimeSeriesValues values) {
     }
 
     private record NetworkRun(LfNetwork lfNetwork, StepEngine engine, List<GeneratorSetpoint> setpoints, NetworkState baseState) {
