@@ -50,12 +50,14 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Time-series (multi-step) load flow: solves the <b>same</b> network many times, changing only the active-power targets
@@ -76,7 +78,7 @@ import java.util.concurrent.Executors;
  * <p>Each step is solved from the same base operating point (the network is restored between steps), so results are
  * independent of the partitioning and reproducible.
  *
- * @author (design proposal)
+ * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public final class TimeSeriesLoadFlow {
 
@@ -126,7 +128,6 @@ public final class TimeSeriesLoadFlow {
         }
 
         LoadFlowParameters lfParameters = parameters.getLoadFlowParameters();
-        OpenLoadFlowParameters parametersExt = OpenLoadFlowParameters.get(lfParameters);
         MatrixFactory matrixFactory = new SparseMatrixFactory();
         GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory = new EvenShiloachGraphDecrementalConnectivityFactory<>();
 
@@ -192,10 +193,25 @@ public final class TimeSeriesLoadFlow {
             }
             return all;
         } finally {
+            // Wait for every worker to stop before removing the cloned variants: if one partition fails, join()
+            // rethrows while the other workers are still solving, and closing their networks under them would corrupt
+            // the run and hide the original failure.
+            awaitTermination(executor);
             // Close (remove the cloned variants) on the main thread, after all parallel work is done.
             jobs.forEach(job -> job.lfNetworks().close());
-            executor.shutdown();
             network.getVariantManager().allowVariantMultiThreadAccess(oldAllowVariantMultiThreadAccess);
+        }
+    }
+
+    private static void awaitTermination(ExecutorService executor) {
+        executor.shutdown();
+        try {
+            if (!executor.awaitTermination(1, TimeUnit.HOURS)) {
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -213,7 +229,17 @@ public final class TimeSeriesLoadFlow {
             for (LfNetwork lfNetwork : networks) {
                 StepEngine engine = enginePlan.createEngine(lfNetwork);
                 List<GeneratorSetpoint> setpoints = resolveSetpoints(lfNetwork, plan);
-                engine.solve(); // base solve: establishes a warm-start operating point and a base state to restore to
+                // The base solve gives every step a warm start (voltages and angles close to a solution), but slack
+                // distribution mutates the generator targets while doing so. Those distributed targets must not leak
+                // into the base state: each step has to restart from the network's own dispatch, otherwise generators
+                // outside the plan would accumulate the base share on top of their step share.
+                Map<LfGenerator, Double> baseTargetP = saveGeneratorTargetP(lfNetwork);
+                SolveResult baseResult = engine.solve();
+                if (baseResult.status() != LoadFlowResult.ComponentResult.Status.CONVERGED) {
+                    LOGGER.warn("Base solve of network {} did not converge ({}), steps will start from a degraded warm start",
+                            lfNetwork, baseResult.status());
+                }
+                restoreGeneratorTargetP(baseTargetP, networkParameters);
                 NetworkState baseState = NetworkState.save(lfNetwork);
                 runs.add(new NetworkRun(lfNetwork, engine, setpoints, baseState));
             }
@@ -242,6 +268,26 @@ public final class TimeSeriesLoadFlow {
         } finally {
             runs.forEach(run -> run.engine().close());
         }
+    }
+
+    private static Map<LfGenerator, Double> saveGeneratorTargetP(LfNetwork lfNetwork) {
+        Map<LfGenerator, Double> targetPs = new LinkedHashMap<>();
+        for (LfBus bus : lfNetwork.getBuses()) {
+            for (LfGenerator generator : bus.getGenerators()) {
+                targetPs.put(generator, generator.getTargetP());
+            }
+        }
+        return targetPs;
+    }
+
+    private static void restoreGeneratorTargetP(Map<LfGenerator, Double> targetPs, LfNetworkParameters networkParameters) {
+        targetPs.forEach((generator, targetP) -> setGeneratorTargetP(generator, targetP, networkParameters));
+    }
+
+    private static void setGeneratorTargetP(LfGenerator generator, double targetP, LfNetworkParameters networkParameters) {
+        generator.setTargetP(targetP);
+        generator.setInitialTargetP(targetP);
+        generator.reApplyActivePowerControlChecks(networkParameters, null);
     }
 
     private static void applySetpoints(List<GeneratorSetpoint> setpoints, int step, LfNetworkParameters networkParameters) {

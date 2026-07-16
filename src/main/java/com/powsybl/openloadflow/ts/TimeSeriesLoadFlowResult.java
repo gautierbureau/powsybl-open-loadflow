@@ -15,7 +15,7 @@ import java.util.Objects;
  * results are streamed out through the {@link com.powsybl.loadflow.resultswriter.NetworkResultWriter} and are not held
  * here.
  *
- * @author (design proposal)
+ * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public class TimeSeriesLoadFlowResult {
 

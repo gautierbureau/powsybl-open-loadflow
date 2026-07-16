@@ -20,7 +20,7 @@ import java.util.Objects;
  * {@link com.powsybl.loadflow.resultswriter.NetworkResultWriter}; only a compact per-step summary is returned in memory
  * (see {@link TimeSeriesLoadFlowResult}).
  *
- * @author (design proposal)
+ * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public class TimeSeriesLoadFlowParameters {
 

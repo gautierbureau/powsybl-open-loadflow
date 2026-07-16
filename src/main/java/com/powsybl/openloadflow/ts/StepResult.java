@@ -18,11 +18,12 @@ import java.time.Instant;
  *
  * @param stepIndex                    the 0-based index of the step in the time-series
  * @param timestamp                    the instant of the step (from the time-series index)
- * @param status                       the (worst across connected components) computation status of the step
+ * @param status                       the computation status of the step: {@code CONVERGED} if every simulated connected
+ *                                     component converged, otherwise the status of the first one that did not
  * @param slackBusActivePowerMismatch  the slack bus active power mismatch (MW), summed over connected components
  * @param distributedActivePower       the active power distributed by slack distribution (MW), summed over components
  *
- * @author (design proposal)
+ * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public record StepResult(int stepIndex,
                          Instant timestamp,

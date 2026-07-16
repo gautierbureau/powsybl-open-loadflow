@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ts;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
+import com.powsybl.iidm.network.test.FourSubstationsNodeBreakerFactory;
 import com.powsybl.loadflow.LoadFlow;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
@@ -49,7 +50,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Tests for the time-series (multi-step) load flow: streaming of the three datasets, value correctness versus an
  * independent load flow, DC mode, and single-thread / multi-thread equivalence.
  *
- * @author (design proposal)
+ * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 class TimeSeriesLoadFlowTest {
 
@@ -122,6 +123,53 @@ class TimeSeriesLoadFlowTest {
             double refP1 = ref.getLine("NHV1_NHV2_1").getTerminal1().getP();
             String ts = index.getInstantAt(step).toString();
             assertEquals(refP1, streamedP1.get(ts + "|NHV1_NHV2_1"), 1e-2, "p1 mismatch at step " + step);
+        }
+    }
+
+    /**
+     * On a network where several generators participate in slack distribution but only one is in the plan, each step
+     * must still equal an independent load flow: the generators outside the plan have to start every step from their
+     * own dispatch, not from the slack-distributed dispatch of the base solve.
+     */
+    @Test
+    void nonPlanGeneratorsMatchIndependentLoadFlow() {
+        double[] gh1Targets = {80.0, 120.0, 60.0};
+        List<DoubleTimeSeries> gh1Plan = List.of(TimeSeries.createDouble("GH1", index, gh1Targets));
+        List<String> generatorIds = List.of("GH1", "GH2", "GH3", "GTH1", "GTH2");
+
+        Map<String, StringWriter> csv = new HashMap<>();
+        TimeSeriesLoadFlowParameters parameters = new TimeSeriesLoadFlowParameters();
+        parameters.getLoadFlowParameters().setDistributedSlack(true);
+        TimeSeriesLoadFlowResult result = TimeSeriesLoadFlow.run(FourSubstationsNodeBreakerFactory.create(), gh1Plan,
+                parameters, partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+        assertTrue(result.getStepResults().stream()
+                .allMatch(s -> s.status() == LoadFlowResult.ComponentResult.Status.CONVERGED));
+
+        // streamed generator dispatch keyed by "timestamp|generatorId"
+        Map<String, Double> streamedP = new HashMap<>();
+        Map<String, Double> streamedTargetP = new HashMap<>();
+        csv.get("generators").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedTargetP.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+            streamedP.put(c[0] + "|" + c[3], Double.parseDouble(c[5]));
+        });
+
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        for (int step = 0; step < gh1Targets.length; step++) {
+            Network ref = FourSubstationsNodeBreakerFactory.create();
+            ref.getGenerator("GH1").setTargetP(gh1Targets[step]);
+            assertTrue(runner.run(ref, new LoadFlowParameters().setDistributedSlack(true)).isFullyConverged());
+
+            String ts = index.getInstantAt(step).toString();
+            for (String id : generatorIds) {
+                assertEquals(-ref.getGenerator(id).getTerminal().getP(), streamedP.get(ts + "|" + id), 1e-2,
+                        () -> "dispatch mismatch for " + id + " at " + ts);
+                // the requested target is the plan value for GH1, and the network's own setpoint for the others
+                double expectedTarget = "GH1".equals(id) ? gh1Targets[step]
+                        : FourSubstationsNodeBreakerFactory.create().getGenerator(id).getTargetP();
+                assertEquals(expectedTarget, streamedTargetP.get(ts + "|" + id), 1e-2,
+                        () -> "requested targetP mismatch for " + id + " at " + ts);
+            }
         }
     }
 
