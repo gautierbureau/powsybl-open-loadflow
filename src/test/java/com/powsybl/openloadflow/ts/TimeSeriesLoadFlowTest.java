@@ -34,6 +34,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -201,6 +202,48 @@ class TimeSeriesLoadFlowTest {
         try (Stream<Path> parts = Files.list(dir.resolve("multi").resolve("branches"))) {
             assertEquals(3, parts.count());
         }
+    }
+
+    /**
+     * A step that does not converge still streams its rows, carrying its own status: callers filter on the status
+     * column rather than having to reconcile a gap in the dataset against the step summary. The emitted values are the
+     * solver's last iterate, which is exactly why the status must be there to tell them apart. A failed step must not
+     * affect its neighbours either — each step is restored and solved independently.
+     */
+    @Test
+    void nonConvergedStepIsStreamedWithItsStatus() {
+        Map<String, StringWriter> csv = new HashMap<>();
+        // the middle step is unreachable and does not converge
+        List<DoubleTimeSeries> divergingPlan = List.of(TimeSeries.createDouble("GEN", index, 600.0, 1e7, 700.0));
+
+        TimeSeriesLoadFlowResult result = TimeSeriesLoadFlow.run(EurostagTutorialExample1Factory.create(),
+                divergingPlan, new TimeSeriesLoadFlowParameters(),
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getStepResults().get(0).status());
+        assertEquals(LoadFlowResult.ComponentResult.Status.MAX_ITERATION_REACHED, result.getStepResults().get(1).status());
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getStepResults().get(2).status());
+
+        // every step is streamed, the failed one included, each row tagged with that step's status
+        Map<String, List<String>> statusesByStep = new HashMap<>();
+        csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            statusesByStep.computeIfAbsent(c[0], k -> new ArrayList<>()).add(c[2]);
+        });
+        assertEquals(3, statusesByStep.size());
+        assertEquals(List.of("MAX_ITERATION_REACHED", "MAX_ITERATION_REACHED", "MAX_ITERATION_REACHED", "MAX_ITERATION_REACHED"),
+                statusesByStep.get("2025-01-01T01:00:00Z"));
+
+        // the failed step does not leak into the next one: step 2 still equals an independent load flow
+        Network ref = EurostagTutorialExample1Factory.create();
+        ref.getGenerator("GEN").setTargetP(700.0);
+        assertTrue(new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()))
+                .run(ref, new LoadFlowParameters()).isFullyConverged());
+        double streamedP1 = csv.get("branches").toString().strip().lines()
+                .filter(l -> l.startsWith("2025-01-01T02:00:00Z;;CONVERGED;NHV1_NHV2_1;"))
+                .map(l -> Double.parseDouble(l.split(";")[4]))
+                .findFirst().orElseThrow();
+        assertEquals(ref.getLine("NHV1_NHV2_1").getTerminal1().getP(), streamedP1, 1e-2);
     }
 
     @Test

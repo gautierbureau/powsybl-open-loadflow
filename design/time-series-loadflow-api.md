@@ -279,12 +279,20 @@ for step in partitionSteps:
     base.restore()                                   // deterministic, order‑independent
     applySetpoints(step)                             // setTargetP/… -> TargetVector auto‑invalidated
     status = createLoadFlowEngine(context).run()     // reuses equations + jacobian structure
-    if converged:
-        emit branch / bus / generator rows to partition writer
+    emit branch / bus / generator rows, tagged with this step's status
     record compact StepResult
 close partition writer
 ```
 
+- **Non‑converged steps are streamed too, tagged with their status.** *Decided.* Every step emits
+  its rows whatever its outcome, and the `status` column carries that step's own status
+  (`CONVERGED`, `MAX_ITERATION_REACHED`, …). Consumers filter on it. The alternative — emitting only
+  converged steps — was rejected: it turns a failure into a *gap*, which a reader cannot distinguish
+  from a step that was never run without joining back to the in‑memory `StepResult` summary, and
+  that summary is exactly what does not survive to disk. Note the values on a non‑converged row are
+  the solver's **last iterate**, not NaN and not meaningful (a diverged Eurostag step streams flows
+  of ~1e8 MW), so the status column is the only thing that distinguishes them — which is the point.
+  A failed step does not affect its neighbours: the next step restores and solves normally.
 - **No base solve.** The snapshot must be taken **before** anything is solved. Solving mutates far
   more than the generator targets it distributes the slack over: outer loops move tap positions and
   shunt sections and switch buses between PV and PQ, and `NetworkState.save()` additionally calls
@@ -391,7 +399,8 @@ core that both consumers share (or add a lean TS‑specific sibling if extractio
    setpoints) from step one.
 4. **Voltage/angle extension columns** — always emit V/angle, or gate like PR #23's
    `createResultExtension` (`OlfBranchResult`).
-5. **Non‑convergent steps** — emit an empty/`status`‑only row, or omit the step's bulk rows
-   entirely (status still recorded in the in‑memory summary either way).
+5. ~~**Non‑convergent steps**~~ — **settled:** emit the step's rows like any other, tagged with its
+   own `status`, so callers can tell a failed step from a missing one without the in‑memory
+   summary. See §8 and `TimeSeriesLoadFlowTest#nonConvergedStepIsStreamedWithItsStatus`.
 6. **Sequential warm‑start mode** — expose it, and if so, document its order‑dependence within a
    partition.
