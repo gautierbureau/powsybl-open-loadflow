@@ -50,7 +50,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -62,8 +61,15 @@ import java.util.concurrent.TimeUnit;
 /**
  * Time-series (multi-step) load flow: solves the <b>same</b> network many times, changing only the active-power targets
  * of generators from one step to the next (the "generation plan"). The network structure — buses, branches, switches,
- * controls — is fixed, so each step is a cheap warm re-solve on a persistent load flow context (only the target vector
- * changes), exactly like a security-analysis post-contingency re-solve minus the topology change.
+ * controls — is fixed, so each step is a cheap re-solve on a persistent load flow context (the equation system, the
+ * Jacobian structure and, in DC, the factorization are built once and only the target vector changes), exactly like a
+ * security-analysis post-contingency re-solve minus the topology change.
+ *
+ * <p>Each step is <b>independent</b>: the network is restored to its as-loaded state before the step's targets are
+ * applied, and the step is then solved with the full outer loop configuration of the supplied
+ * {@link LoadFlowParameters}. A step therefore yields the same result as running a classical
+ * {@link com.powsybl.loadflow.LoadFlow} on the network with that step's generator targets, and results do not depend on
+ * the order the steps are solved in nor on how they are partitioned across threads.
  *
  * <p>The generation plan is supplied as powsybl-core {@link DoubleTimeSeries}: one series per controllable generator
  * (its {@link com.powsybl.timeseries.TimeSeriesMetadata#getName() name} is the generator id, its values are the
@@ -74,9 +80,6 @@ import java.util.concurrent.TimeUnit;
  * runs, the per-step results are <b>streamed</b> to a {@link NetworkResultWriter} (CSV or Parquet). Only a compact
  * per-step summary is returned in memory (see {@link TimeSeriesLoadFlowResult}). Steps are partitioned across threads
  * ({@link TimeSeriesLoadFlowParameters#getThreadCount()}); each partition writes its own lock-free part file.
- *
- * <p>Each step is solved from the same base operating point (the network is restored between steps), so results are
- * independent of the partitioning and reproducible.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -229,17 +232,12 @@ public final class TimeSeriesLoadFlow {
             for (LfNetwork lfNetwork : networks) {
                 StepEngine engine = enginePlan.createEngine(lfNetwork);
                 List<GeneratorSetpoint> setpoints = resolveSetpoints(lfNetwork, plan);
-                // The base solve gives every step a warm start (voltages and angles close to a solution), but slack
-                // distribution mutates the generator targets while doing so. Those distributed targets must not leak
-                // into the base state: each step has to restart from the network's own dispatch, otherwise generators
-                // outside the plan would accumulate the base share on top of their step share.
-                Map<LfGenerator, Double> baseTargetP = saveGeneratorTargetP(lfNetwork);
-                SolveResult baseResult = engine.solve();
-                if (baseResult.status() != LoadFlowResult.ComponentResult.Status.CONVERGED) {
-                    LOGGER.warn("Base solve of network {} did not converge ({}), steps will start from a degraded warm start",
-                            lfNetwork, baseResult.status());
-                }
-                restoreGeneratorTargetP(baseTargetP, networkParameters);
+                // Snapshot the network as loaded, before anything is solved. Solving mutates far more than the
+                // generator targets it distributes the slack over: outer loops move tap positions and shunt sections,
+                // and switch buses between PV and PQ. Restoring a snapshot taken after a solve would make every step
+                // start from that solve's control state instead of the network's own, so a step would no longer equal
+                // an independent load flow run. There is nothing to warm-start from either: the solver initializes its
+                // state vector from the configured voltage initializer, not from the restored voltages.
                 NetworkState baseState = NetworkState.save(lfNetwork);
                 runs.add(new NetworkRun(lfNetwork, engine, setpoints, baseState));
             }
@@ -268,26 +266,6 @@ public final class TimeSeriesLoadFlow {
         } finally {
             runs.forEach(run -> run.engine().close());
         }
-    }
-
-    private static Map<LfGenerator, Double> saveGeneratorTargetP(LfNetwork lfNetwork) {
-        Map<LfGenerator, Double> targetPs = new LinkedHashMap<>();
-        for (LfBus bus : lfNetwork.getBuses()) {
-            for (LfGenerator generator : bus.getGenerators()) {
-                targetPs.put(generator, generator.getTargetP());
-            }
-        }
-        return targetPs;
-    }
-
-    private static void restoreGeneratorTargetP(Map<LfGenerator, Double> targetPs, LfNetworkParameters networkParameters) {
-        targetPs.forEach((generator, targetP) -> setGeneratorTargetP(generator, targetP, networkParameters));
-    }
-
-    private static void setGeneratorTargetP(LfGenerator generator, double targetP, LfNetworkParameters networkParameters) {
-        generator.setTargetP(targetP);
-        generator.setInitialTargetP(targetP);
-        generator.reApplyActivePowerControlChecks(networkParameters, null);
     }
 
     private static void applySetpoints(List<GeneratorSetpoint> setpoints, int step, LfNetworkParameters networkParameters) {
