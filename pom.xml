@@ -173,7 +173,7 @@
         <!-- Test dependencies -->
         <dependency>
             <groupId>com.powsybl</groupId>
-            <artifactId>powsybl-security-analysis-parquet</artifactId>
+            <artifactId>powsybl-loadflow-results-parquet</artifactId>
             <version>${powsybl-core.version}</version>
             <scope>test</scope>
         </dependency>

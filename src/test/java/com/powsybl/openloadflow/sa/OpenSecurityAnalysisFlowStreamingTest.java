@@ -19,6 +19,9 @@ import com.powsybl.contingency.strategy.OperatorStrategy;
 import com.powsybl.contingency.strategy.condition.TrueCondition;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
+import com.powsybl.loadflow.resultswriter.CsvNetworkResultWriter;
+import com.powsybl.loadflow.resultswriter.CsvNetworkResultWriterFactory;
+import com.powsybl.loadflow.resultswriter.NetworkResultWriterFactory;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.network.VoltageControlNetworkFactory;
 import com.powsybl.security.SecurityAnalysisParameters;
@@ -28,9 +31,6 @@ import com.powsybl.security.SecurityAnalysisRunParameters;
 import com.powsybl.security.results.BranchResult;
 import com.powsybl.security.results.OperatorStrategyResult;
 import com.powsybl.security.results.PostContingencyResult;
-import com.powsybl.security.writer.CsvSecurityAnalysisResultWriter;
-import com.powsybl.security.writer.CsvSecurityAnalysisResultWriterFactory;
-import com.powsybl.security.writer.SecurityAnalysisResultWriterFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -70,7 +70,7 @@ class OpenSecurityAnalysisFlowStreamingTest extends AbstractOpenSecurityAnalysis
     }
 
     private SecurityAnalysisResult run(Network network, List<Contingency> contingencies,
-                                       SecurityAnalysisParameters saParameters, SecurityAnalysisResultWriterFactory writerFactory) {
+                                       SecurityAnalysisParameters saParameters, NetworkResultWriterFactory writerFactory) {
         ContingenciesProvider provider = n -> contingencies;
         SecurityAnalysisRunParameters runParameters = new SecurityAnalysisRunParameters()
                 .setComputationManager(computationManager)
@@ -90,12 +90,12 @@ class OpenSecurityAnalysisFlowStreamingTest extends AbstractOpenSecurityAnalysis
 
         StringWriter csv = new StringWriter();
         SecurityAnalysisResult result = run(network, contingencies, monitorAllParameters(),
-                partitionIndex -> new CsvSecurityAnalysisResultWriter(csv));
+                partitionIndex -> new CsvNetworkResultWriter(dataset -> csv));
 
         String content = csv.toString();
         List<String> lines = content.strip().lines().toList();
 
-        assertEquals("contingencyId;operatorStrategyId;status;branchId;p1;q1;i1;p2;q2;i2;flowTransfer", lines.get(0).strip());
+        assertEquals("stateId;subStateId;status;branchId;p1;q1;i1;p2;q2;i2;flowTransfer", lines.get(0).strip());
 
         // base case: every one of the 4 branches reported with an empty contingency id and operator strategy id
         long baseCaseRows = lines.stream().skip(1).filter(l -> l.startsWith(";;CONVERGED;")).count();
@@ -124,7 +124,7 @@ class OpenSecurityAnalysisFlowStreamingTest extends AbstractOpenSecurityAnalysis
 
         // vectorized monitor-all path, streamed to CSV
         StringWriter csv = new StringWriter();
-        run(network, List.of(), monitorAllParameters(), partitionIndex -> new CsvSecurityAnalysisResultWriter(csv));
+        run(network, List.of(), monitorAllParameters(), partitionIndex -> new CsvNetworkResultWriter(dataset -> csv));
 
         Map<String, Double> streamedP1 = new HashMap<>();
         csv.toString().strip().lines().skip(1).forEach(line -> {
@@ -147,10 +147,10 @@ class OpenSecurityAnalysisFlowStreamingTest extends AbstractOpenSecurityAnalysis
         SecurityAnalysisParameters saParameters = monitorAllParameters();
         saParameters.getExtension(OpenSecurityAnalysisParameters.class).setThreadCount(2);
 
-        run(network, contingencies, saParameters, new CsvSecurityAnalysisResultWriterFactory(dir));
+        run(network, contingencies, saParameters, new CsvNetworkResultWriterFactory(dir));
 
-        Path part0 = dir.resolve("part-0.csv");
-        Path part1 = dir.resolve("part-1.csv");
+        Path part0 = dir.resolve("branches").resolve("part-0.csv");
+        Path part1 = dir.resolve("branches").resolve("part-1.csv");
         assertTrue(Files.exists(part0));
         assertTrue(Files.exists(part1));
 
@@ -185,7 +185,7 @@ class OpenSecurityAnalysisFlowStreamingTest extends AbstractOpenSecurityAnalysis
 
         StringWriter csv = new StringWriter();
         SecurityAnalysisResult result = run(network, contingencies, saParameters,
-                partitionIndex -> new CsvSecurityAnalysisResultWriter(csv));
+                partitionIndex -> new CsvNetworkResultWriter(dataset -> csv));
 
         Map<String, Double> streamedBaseCaseP1 = new HashMap<>();
         csv.toString().strip().lines().skip(1).forEach(line -> {
@@ -221,7 +221,7 @@ class OpenSecurityAnalysisFlowStreamingTest extends AbstractOpenSecurityAnalysis
                 .setSecurityAnalysisParameters(monitorAllParameters())
                 .setOperatorStrategies(operatorStrategies)
                 .setActions(actions)
-                .setResultWriterFactory(partitionIndex -> new CsvSecurityAnalysisResultWriter(csv));
+                .setResultWriterFactory(partitionIndex -> new CsvNetworkResultWriter(dataset -> csv));
         SecurityAnalysisResult result = securityAnalysisProvider.run(network,
                 network.getVariantManager().getWorkingVariantId(), provider, runParameters).join().getResult();
 
@@ -256,7 +256,7 @@ class OpenSecurityAnalysisFlowStreamingTest extends AbstractOpenSecurityAnalysis
 
         StringWriter csv = new StringWriter();
         SecurityAnalysisResult result = run(network, contingencies, saParameters,
-                partitionIndex -> new CsvSecurityAnalysisResultWriter(csv));
+                partitionIndex -> new CsvNetworkResultWriter(dataset -> csv));
 
         // did not throw, and the real branches are streamed in the base case
         assertSame(com.powsybl.loadflow.LoadFlowResult.ComponentResult.Status.CONVERGED, result.getPreContingencyResult().getStatus());
@@ -269,7 +269,7 @@ class OpenSecurityAnalysisFlowStreamingTest extends AbstractOpenSecurityAnalysis
     void monitorAllBranchesWithoutWriterFactoryThrows() {
         Network network = EurostagTutorialExample1Factory.create();
         PowsyblException e = assertThrows(PowsyblException.class,
-                () -> run(network, List.of(), monitorAllParameters(), SecurityAnalysisResultWriterFactory.NO_OP));
+                () -> run(network, List.of(), monitorAllParameters(), NetworkResultWriterFactory.NO_OP));
         assertTrue(e.getMessage().contains("monitorAllBranches requires a result writer factory"));
     }
 

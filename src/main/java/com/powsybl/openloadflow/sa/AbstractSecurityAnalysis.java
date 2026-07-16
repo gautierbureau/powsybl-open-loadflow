@@ -25,6 +25,8 @@ import com.powsybl.iidm.network.ComponentConstants;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
+import com.powsybl.loadflow.resultswriter.NetworkResultWriter;
+import com.powsybl.loadflow.resultswriter.NetworkResultWriterFactory;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.equations.Quantity;
@@ -41,6 +43,7 @@ import com.powsybl.openloadflow.network.impl.LfNetworkList;
 import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
 import com.powsybl.openloadflow.network.impl.PropagatedContingencyCreationParameters;
+import com.powsybl.openloadflow.network.util.ZeroImpedanceFlows;
 import com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters;
 import com.powsybl.openloadflow.util.Indexed;
 import com.powsybl.openloadflow.util.Lists2;
@@ -52,9 +55,6 @@ import com.powsybl.security.limitreduction.LimitReduction;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.monitor.StateMonitorIndex;
 import com.powsybl.security.results.*;
-import com.powsybl.security.writer.SecurityAnalysisResultWriter;
-import com.powsybl.security.writer.SecurityAnalysisResultWriterFactory;
-import com.powsybl.openloadflow.network.util.ZeroImpedanceFlows;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.event.Level;
@@ -93,13 +93,13 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
     // factory building one streaming sink per contingency partition; defaults to a no-op so that behaviour is unchanged
     // unless a factory is set. Each partition thread gets its own writer, so writing is lock-free.
-    protected SecurityAnalysisResultWriterFactory resultWriterFactory = SecurityAnalysisResultWriterFactory.NO_OP;
+    protected NetworkResultWriterFactory resultWriterFactory = NetworkResultWriterFactory.NO_OP;
 
     // when true, all branch flows are streamed for the base case and every contingency, bypassing the state monitors.
     protected boolean monitorAllBranches;
 
     // the writer of the partition currently being processed by this thread (set by runPartition).
-    private final ThreadLocal<SecurityAnalysisResultWriter> partitionWriter = ThreadLocal.withInitial(() -> SecurityAnalysisResultWriter.NO_OP);
+    private final ThreadLocal<NetworkResultWriter> partitionWriter = ThreadLocal.withInitial(() -> NetworkResultWriter.NO_OP);
     // whether the current partition is the one responsible for streaming the base-case rows (partition 0 only).
     private final ThreadLocal<Boolean> partitionWritesPreContingency = ThreadLocal.withInitial(() -> Boolean.FALSE);
 
@@ -117,9 +117,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
     /**
      * Sets the factory building the per-partition streaming sinks used to write results (base case and each contingency)
      * as they are computed, instead of keeping the full network results in memory. Defaults to
-     * {@link SecurityAnalysisResultWriterFactory#NO_OP}.
+     * {@link NetworkResultWriterFactory#NO_OP}.
      */
-    public void setResultWriterFactory(SecurityAnalysisResultWriterFactory resultWriterFactory) {
+    public void setResultWriterFactory(NetworkResultWriterFactory resultWriterFactory) {
         this.resultWriterFactory = Objects.requireNonNull(resultWriterFactory);
     }
 
@@ -128,7 +128,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
     }
 
     protected boolean isStreaming() {
-        return resultWriterFactory != SecurityAnalysisResultWriterFactory.NO_OP;
+        return resultWriterFactory != NetworkResultWriterFactory.NO_OP;
     }
 
     /**
@@ -139,7 +139,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
      * @param partitionIndex the partition number (0 for the single-threaded case); only partition 0 streams the base case.
      */
     protected SecurityAnalysisResult runPartition(int partitionIndex, Supplier<SecurityAnalysisResult> body) {
-        try (SecurityAnalysisResultWriter writer = resultWriterFactory.create(partitionIndex)) {
+        try (NetworkResultWriter writer = resultWriterFactory.create(partitionIndex)) {
             partitionWriter.set(writer);
             partitionWritesPreContingency.set(partitionIndex == 0);
             return body.get();
@@ -662,7 +662,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             new NetworkResult(Collections.emptyList(), Collections.emptyList(), Collections.emptyList());
 
     /** The streaming writer of the contingency partition currently processed by this thread. */
-    protected SecurityAnalysisResultWriter currentPartitionWriter() {
+    protected NetworkResultWriter currentPartitionWriter() {
         return partitionWriter.get();
     }
 
@@ -680,7 +680,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
      *                         for the base case, or a contingency-specific predicate for the fast-DC path)
      */
     protected void streamAllBranchFlows(LfNetwork lfNetwork, String contingencyId, String operatorStrategyId, String status, LoadFlowModel loadFlowModel,
-                                        double dcPowerFactor, SecurityAnalysisResultWriter writer, Predicate<LfBranch> isBranchDisabled) {
+                                        double dcPowerFactor, NetworkResultWriter writer, Predicate<LfBranch> isBranchDisabled) {
         Map<String, LfBranch.LfBranchResults> zeroImpedanceFlows = computeAllZeroImpedanceFlows(lfNetwork, loadFlowModel, dcPowerFactor);
         // one consumer per state (not per branch); each branch emits its flows straight to the writer with no BranchResult
         // allocation. Branch types not reported as results (switches, three-winding transformer legs) emit nothing.

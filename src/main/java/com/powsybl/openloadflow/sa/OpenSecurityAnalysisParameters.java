@@ -122,7 +122,7 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
     /**
      * When {@code true}, all branches are monitored for every contingency (and the base case), without having to
      * enumerate them through {@link com.powsybl.security.monitor.StateMonitor}s. This is intended to be combined
-     * with a {@link com.powsybl.security.writer.SecurityAnalysisResultWriter} so that flows are streamed out rather
+     * with a {@link com.powsybl.loadflow.resultswriter.NetworkResultWriter} so that flows are streamed out rather
      * than accumulated in memory.
      */
     public boolean isMonitorAllBranches() {

@@ -15,10 +15,10 @@ import com.powsybl.contingency.ContingenciesProvider;
 import com.powsybl.contingency.Contingency;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
+import com.powsybl.loadflow.resultswriter.ParquetNetworkResultWriterFactory;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisRunParameters;
-import com.powsybl.security.writer.parquet.ParquetSecurityAnalysisResultWriterFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -57,20 +57,20 @@ class OpenSecurityAnalysisParquetStreamingTest extends AbstractOpenSecurityAnaly
         SecurityAnalysisRunParameters runParameters = new SecurityAnalysisRunParameters()
                 .setComputationManager(computationManager)
                 .setSecurityAnalysisParameters(saParameters)
-                .setResultWriterFactory(new ParquetSecurityAnalysisResultWriterFactory(dir));
+                .setResultWriterFactory(new ParquetNetworkResultWriterFactory(dir));
         securityAnalysisProvider.run(network, network.getVariantManager().getWorkingVariantId(), provider, runParameters).join();
 
-        List<Map<String, Object>> rows = readParquet(dir.resolve("part-0.parquet"));
+        List<Map<String, Object>> rows = readParquet(dir.resolve("branches").resolve("part-0.parquet"));
 
         // 4 base-case branches + 3 remaining branches after the single-line contingency
-        long baseCaseRows = rows.stream().filter(r -> String.valueOf(r.get("contingencyId")).isEmpty()).count();
-        long contingencyRows = rows.stream().filter(r -> "NHV1_NHV2_1".equals(String.valueOf(r.get("contingencyId")))).count();
+        long baseCaseRows = rows.stream().filter(r -> String.valueOf(r.get("stateId")).isEmpty()).count();
+        long contingencyRows = rows.stream().filter(r -> "NHV1_NHV2_1".equals(String.valueOf(r.get("stateId")))).count();
         assertEquals(4, baseCaseRows);
         assertEquals(3, contingencyRows);
 
         // sanity: a known branch has a non-zero active power in the base case
         Map<String, Object> transfoBaseCase = rows.stream()
-                .filter(r -> String.valueOf(r.get("contingencyId")).isEmpty() && "NGEN_NHV1".equals(String.valueOf(r.get("branchId"))))
+                .filter(r -> String.valueOf(r.get("stateId")).isEmpty() && "NGEN_NHV1".equals(String.valueOf(r.get("branchId"))))
                 .findFirst().orElseThrow();
         assertTrue(Math.abs((double) transfoBaseCase.get("p1")) > 0.0);
     }

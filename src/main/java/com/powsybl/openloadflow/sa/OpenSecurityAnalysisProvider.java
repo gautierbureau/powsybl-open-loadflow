@@ -15,6 +15,7 @@ import com.powsybl.commons.extensions.ExtensionJsonSerializer;
 import com.powsybl.contingency.ContingenciesProvider;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
+import com.powsybl.loadflow.resultswriter.NetworkResultWriterFactory;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
@@ -29,7 +30,6 @@ import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisProvider;
 import com.powsybl.security.SecurityAnalysisReport;
 import com.powsybl.security.SecurityAnalysisRunParameters;
-import com.powsybl.security.writer.SecurityAnalysisResultWriterFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -88,9 +88,9 @@ public class OpenSecurityAnalysisProvider implements SecurityAnalysisProvider {
         OpenSecurityAnalysisParameters openSecurityAnalysisParameters =
                 OpenSecurityAnalysisParameters.getOrDefault(runParameters.getSecurityAnalysisParameters());
 
-        SecurityAnalysisResultWriterFactory resultWriterFactory = runParameters.getResultWriterFactory();
+        NetworkResultWriterFactory resultWriterFactory = runParameters.getResultWriterFactory();
         boolean monitorAllBranches = openSecurityAnalysisParameters.isMonitorAllBranches();
-        if (monitorAllBranches && resultWriterFactory == SecurityAnalysisResultWriterFactory.NO_OP) {
+        if (monitorAllBranches && resultWriterFactory == NetworkResultWriterFactory.NO_OP) {
             throw new PowsyblException("monitorAllBranches requires a result writer factory to stream the flows "
                     + "(set SecurityAnalysisRunParameters.resultWriterFactory)");
         }
