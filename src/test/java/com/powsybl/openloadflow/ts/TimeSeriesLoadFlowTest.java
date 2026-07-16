@@ -204,6 +204,64 @@ class TimeSeriesLoadFlowTest {
     }
 
     @Test
+    void dcStepsMatchIndependentDcLoadFlow() {
+        Map<String, StringWriter> csv = new HashMap<>();
+        TimeSeriesLoadFlowParameters parameters = new TimeSeriesLoadFlowParameters();
+        parameters.getLoadFlowParameters().setDc(true);
+        TimeSeriesLoadFlow.run(EurostagTutorialExample1Factory.create(), plan, parameters,
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+
+        Map<String, Double> streamedP1 = new HashMap<>();
+        csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedP1.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+        });
+
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        for (int step = 0; step < targets.length; step++) {
+            Network ref = EurostagTutorialExample1Factory.create();
+            ref.getGenerator("GEN").setTargetP(targets[step]);
+            assertTrue(runner.run(ref, new LoadFlowParameters().setDc(true)).isFullyConverged());
+            String ts = index.getInstantAt(step).toString();
+            assertEquals(ref.getLine("NHV1_NHV2_1").getTerminal1().getP(), streamedP1.get(ts + "|NHV1_NHV2_1"), 1e-2,
+                    "DC p1 mismatch at step " + step);
+        }
+    }
+
+    @Test
+    void planSeriesWithDifferentIndexLengthThrows() {
+        RegularTimeSeriesIndex shorterIndex = RegularTimeSeriesIndex.create(Instant.parse("2025-01-01T00:00:00Z"),
+                Instant.parse("2025-01-01T01:00:00Z"), Duration.ofHours(1));
+        List<DoubleTimeSeries> mixedPlan = List.of(TimeSeries.createDouble("GEN", index, targets),
+                TimeSeries.createDouble("GEN2", shorterIndex, 1.0, 2.0));
+        PowsyblException e = assertThrows(PowsyblException.class,
+                () -> TimeSeriesLoadFlow.run(EurostagTutorialExample1Factory.createWithMultipleConnectedComponents(),
+                        mixedPlan, new TimeSeriesLoadFlowParameters(), NetworkResultWriterFactory.NO_OP));
+        assertTrue(e.getMessage().contains("same time-series index length"));
+    }
+
+    @Test
+    void emptyPlanThrows() {
+        PowsyblException e = assertThrows(PowsyblException.class,
+                () -> TimeSeriesLoadFlow.run(EurostagTutorialExample1Factory.create(), List.of(),
+                        new TimeSeriesLoadFlowParameters(), NetworkResultWriterFactory.NO_OP));
+        assertTrue(e.getMessage().contains("at least one generation plan series"));
+    }
+
+    /**
+     * Two series naming the same generator would otherwise silently leave only the last one applied.
+     */
+    @Test
+    void duplicatedGeneratorInPlanThrows() {
+        List<DoubleTimeSeries> duplicatedPlan = List.of(TimeSeries.createDouble("GEN", index, targets),
+                TimeSeries.createDouble("GEN", index, 1.0, 2.0, 3.0));
+        PowsyblException e = assertThrows(PowsyblException.class,
+                () -> TimeSeriesLoadFlow.run(EurostagTutorialExample1Factory.create(), duplicatedPlan,
+                        new TimeSeriesLoadFlowParameters(), NetworkResultWriterFactory.NO_OP));
+        assertTrue(e.getMessage().contains("Duplicated generator id(s) in the generation plan: [GEN]"));
+    }
+
+    @Test
     void unknownGeneratorInPlanThrows() {
         Network network = EurostagTutorialExample1Factory.create();
         List<DoubleTimeSeries> badPlan = List.of(TimeSeries.createDouble("MISSING", index, targets));

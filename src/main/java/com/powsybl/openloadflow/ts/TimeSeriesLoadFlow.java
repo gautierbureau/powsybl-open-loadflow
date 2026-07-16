@@ -57,6 +57,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * Time-series (multi-step) load flow: solves the <b>same</b> network many times, changing only the active-power targets
@@ -124,6 +126,18 @@ public final class TimeSeriesLoadFlow {
                 .toList();
         if (!unknownGenerators.isEmpty()) {
             throw new PowsyblException("Unknown generator id(s) in the generation plan: " + unknownGenerators);
+        }
+        // two series for one generator would silently leave the last one applied
+        List<String> duplicatedGenerators = plan.stream()
+                .map(series -> series.getMetadata().getName())
+                .collect(Collectors.groupingBy(Function.identity(), Collectors.counting()))
+                .entrySet().stream()
+                .filter(e -> e.getValue() > 1)
+                .map(Map.Entry::getKey)
+                .sorted()
+                .toList();
+        if (!duplicatedGenerators.isEmpty()) {
+            throw new PowsyblException("Duplicated generator id(s) in the generation plan: " + duplicatedGenerators);
         }
 
         if (stepCount == 0) {
