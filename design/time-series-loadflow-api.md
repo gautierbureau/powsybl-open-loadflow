@@ -107,9 +107,11 @@ The time‑series engine keeps steps 1–3 verbatim, replaces step 4's "apply co
   factorisation across steps; only the target vector changes.
 - **R3 — Multithreaded.** Partition steps across threads, one `LfNetwork` + context per
   partition, lock‑free per‑partition output (reuse the SA MT helper + PR #23 writer).
-- **R4 — Streamed, bounded‑memory output.** Peak memory independent of the number of steps; the
-  bulk (branch flows, bus voltages, generator dispatch) goes to a columnar dataset (CSV /
-  Parquet); only a compact per‑step status summary stays in memory.
+- **R4 — Streamed, bounded‑memory output.** *Output* peak memory independent of the number of
+  steps: the bulk (branch flows, bus voltages, generator dispatch) goes to a columnar dataset
+  (CSV / Parquet); only a compact per‑step status summary stays in memory. Note this constrains the
+  output only — the *input* plan is read once and so scales with `generators × steps`; see the
+  known limitation in §8.
 - **R5 — Standard input.** The production plan is supplied as **powsybl‑core time series**
   (`DoubleTimeSeries`), so it interoperates with existing PowSyBl TS tooling.
 - **R6 — Reuse, don't fork.** Reuse PR #23's writer seam (generalised to be provider‑agnostic),
@@ -241,7 +243,31 @@ implementation materialises the whole series (`getDoubleTimeSeriesValues()` → 
 `O(steps² × generators)` and allocates a full array per call — measured at ~10 s versus ~29 ms
 (**343×**) just to walk a one‑year hourly plan over 50 generators. It is also the only part unsafe
 to touch concurrently: `CalculatedTimeSeries` lazily computes and caches its index in a plain
-non‑volatile field, so partitions sharing a plan would race on it. Reading once fixes both.
+non‑volatile field, so partitions sharing a plan would race on it (fixed upstream in core PR #33,
+but the engine no longer depends on it either way). Reading once fixes both.
+
+> **Known limitation — plan memory.** Reading once materialises the full `generators × steps`
+> matrix of doubles, which this document previously ruled out ("never materialise the full
+> `injections × steps` matrix"). That promise was traded for the 343× above, deliberately and with
+> eyes open. The cost is bounded: 500 generators × 8760 hourly steps ≈ **35 MB**, quarter‑hourly for
+> a year ≈ **140 MB**. For a plan of `StoredDoubleTimeSeries` with uncompressed chunks the values
+> are already in memory at that size, so the peak roughly doubles. Where it would bite is
+> **compressed or calculated plans** — a run‑length‑encoded flat profile living in kilobytes, or a
+> `CalculatedTimeSeries` that is a small expression tree, both expand to full size when read.
+>
+> No plan has hurt yet, so this is recorded rather than fixed. If one does, the fix belongs **in
+> this engine, not in core** — neither option needs new core API:
+>
+> 1. **Materialise per partition.** Read only each partition's step range; peak memory drops by the
+>    thread count, still one read per series. Smallest change.
+> 2. **Stream with `DoubleTimeSeries.iterator(List<DoubleTimeSeries>)` / `DoubleMultiPoint`** — the
+>    existing bulk‑read path for walking many aligned series step by step, materialising nothing.
+>    Restores the original promise in full.
+>
+> What is **not** the answer is random access on `DoubleDataChunk` (a `getValue(int)` SPI plus a
+> per‑chunk prefix index over the run‑length encoding). Our access pattern is "every step of every
+> series, once": indexing a `double[]` already beats a chunk search per point, so it would be new
+> permanent public API in core, slower for its only caller here.
 
 Then, per partition/thread:
 
