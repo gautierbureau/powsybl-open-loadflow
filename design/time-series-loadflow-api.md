@@ -1,6 +1,8 @@
 # Scoping — Time‑series load flow API (fixed structure, varying generation plan)
 
-**Status:** Draft / scoping (planning only — no code in this change)
+**Status:** Implemented for generators — `com.powsybl.openloadflow.ts`. Sections 8 and 9 have been
+reconciled with the engine as built and measured; loads/HVDC setpoints, relative setpoints and the
+sequential warm‑start mode below remain proposals.
 **Scope:** a new `com.powsybl.openloadflow.ts` API in powsybl‑open‑loadflow, reusing the
 security‑analysis compute machinery and the streaming‑output seam introduced by **PR #23**
 (*"Stream all branch flows out of a security analysis (CSV / Parquet)"*) and its companion
@@ -47,7 +49,7 @@ The costly primitive ("hold the structure fixed, change the targets, re‑solve 
   `onGeneratorVoltageControlTargetChange` … So calling `LfGenerator.setTargetP(...)` (as
   `LfGeneratorAction.apply` already does, `network/action/LfGeneratorAction.java:62`) is enough
   to make the next solve pick up the new target — **no equation‑system rebuild**.
-- **Warm re‑solve on a persistent context.** `AbstractSecurityAnalysis.runPostContingencySimulation`
+- **Re‑solve on a persistent context.** `AbstractSecurityAnalysis.runPostContingencySimulation`
   re‑runs `createLoadFlowEngine(context).run()` on the *same* `context` after each contingency
   (`sa/AbstractSecurityAnalysis.java:641`). The equation system, the Jacobian sparsity pattern
   and (for DC) the matrix factorisation live in `context` and are reused across solves. A
@@ -71,7 +73,7 @@ The costly primitive ("hold the structure fixed, change the targets, re‑solve 
   a `ThreadLocal` in a `runPartition(index, body)` wrapper.
 
 **Conclusion:** the time‑series API is essentially *security‑analysis‑without‑contingencies*: it
-reuses the LfNetwork loading, the persistent `LfLoadFlowContext`, the warm re‑solve, the
+reuses the LfNetwork loading, the persistent `LfLoadFlowContext`, the re‑solve, the
 save/restore, the MT partitioning and the streaming writer — and replaces "apply a contingency"
 with "apply this step's injection setpoints".
 
@@ -148,11 +150,9 @@ on the base target) setpoints — mirroring `GeneratorAction.isActivePowerRelati
 `onLoadActivePowerTargetChange`). Both already trigger `TargetVector.invalidateValues()`.
 
 **Partitioning for MT.** The step range `[0, pointCount)` is split into contiguous blocks (one
-per thread). Each thread reads only its block's values from the (shared, read‑only)
-`DoubleTimeSeries` list — the series are not mutated, so no locking is needed for input.
-
-> *Note on very large plans:* `DoubleTimeSeries` can be chunked/stored; we read values
-> step‑by‑step within a partition and never materialise the full `injections × steps` matrix.
+per thread). Each thread reads only its block's values from the plan, which is read **once on the
+main thread** into an immutable `double[]` per series (see §8) — threads never touch a
+`DoubleTimeSeries` themselves, so there is no locking and no lazy‑init race on the input.
 
 ## 7. Output — generalised streaming writer (built on PR #23)
 
@@ -229,32 +229,57 @@ a compact `TimeSeriesLoadFlowResult`: a `List<StepResult>` of
 
 Per partition/thread:
 
+Read the plan once, on the main thread, **before** any partition thread exists:
+
+```
+plan = [(generatorId, series.getDoubleTimeSeriesValues()) for series in plan]
+```
+
+`DoubleTimeSeries.get(int)` is a convenience method, **not** an accessor: the default
+implementation materialises the whole series (`getDoubleTimeSeriesValues()` → `toArray()`) on
+*every* call, and no implementation overrides it. Calling it per generator per step costs
+`O(steps² × generators)` and allocates a full array per call — measured at ~10 s versus ~29 ms
+(**343×**) just to walk a one‑year hourly plan over 50 generators. It is also the only part unsafe
+to touch concurrently: `CalculatedTimeSeries` lazily computes and caches its index in a plain
+non‑volatile field, so partitions sharing a plan would race on it. Reading once fixes both.
+
+Then, per partition/thread:
+
 ```
 build LfNetwork + LfLoadFlowContext once            // fixed structure, built ONE time
-run base load flow                                   // establishes a warm start & base state
-NetworkState base = NetworkState.save(lfNetwork)
+NetworkState base = NetworkState.save(lfNetwork)     // as loaded, BEFORE any solve
 bind partition writer (ThreadLocal, PR #23 runPartition)
 for step in partitionSteps:
     base.restore()                                   // deterministic, order‑independent
     applySetpoints(step)                             // setTargetP/… -> TargetVector auto‑invalidated
-    status = createLoadFlowEngine(context).run()     // warm re‑solve, reuses equations + factorization
+    status = createLoadFlowEngine(context).run()     // reuses equations + jacobian structure
     if converged:
         emit branch / bus / generator rows to partition writer
     record compact StepResult
 close partition writer
 ```
 
-- **AC:** the Jacobian **structure** is fixed → the symbolic factorisation and equation system in
-  `context` are reused; each step is a few Newton‑Raphson iterations warm‑started from the base
-  voltages. This is exactly SA's post‑contingency re‑solve minus the topology delta.
-- **DC — fast path (R7/§ optimisation):** the DC state matrix depends only on the (fixed)
-  structure, **not** on the targets. Only the RHS changes per step. So the matrix is factorised
-  **once per partition** and every step is a single back/forward‑substitution against the cached
-  LU — the dominant cost collapses to `O(steps × solve)` with one factorisation total. We must
-  confirm the DC engine keeps and reuses the factorisation across `run()` calls when only the
-  target vector is invalidated (it should, since only `invalidateValues()` fires, not a matrix
-  rebuild); if not, add a small "targets‑only re‑solve" entry point. This is the single biggest
-  efficiency lever for DC time series.
+- **No base solve.** The snapshot must be taken **before** anything is solved. Solving mutates far
+  more than the generator targets it distributes the slack over: outer loops move tap positions and
+  shunt sections and switch buses between PV and PQ, and `NetworkState.save()` additionally calls
+  `setGeneratorsInitialTargetPToTargetP()`. A post‑solve snapshot bakes all of that in, so each step
+  restarts from that solve's control state and no longer equals an independent run. A base solve
+  would buy nothing anyway: the solver initialises its state vector from the configured voltage
+  initializer, so restored voltages are overwritten. (SA *does* warm‑start, but only because
+  `AcSecurityAnalysis` explicitly opts into `PreviousValueVoltageInitializer`; the TS engine keeps
+  the classical default so a step matches `LoadFlow.run`.)
+- **AC:** the Jacobian **structure** is fixed → the equation system and the symbolic factorisation
+  in `context` are reused across steps; only values are refreshed. This is SA's post‑contingency
+  re‑solve minus the topology delta, minus the warm start.
+- **DC — measured, not the "one factorisation total" originally claimed here.** The DC state matrix
+  depends only on the fixed structure, so the *symbolic* factorisation is built **once per
+  partition** and reused — confirmed: a 3‑step DC run logs one `Jacobian matrix built` and one
+  `LU decomposition done`. But each step still logs `Jacobian matrix values updated` +
+  `LU decomposition updated`: writing the solution back into the state vector fires
+  `onStateUpdate()`, which marks the Jacobian `VALUES_INVALID`. So steps are *not* pure
+  back‑substitutions against a cached LU. For DC that invalidation is pessimistic (the susceptance
+  matrix is target‑independent), and skipping it is a real remaining lever — but it is pre‑existing
+  OLF behaviour that SA shares, so it belongs in its own change, not here.
 - **Restore vs. warm‑start trade‑off.** Default = `restore()` to base each step →
   reproducible and independent of partitioning/order. An **opt‑in** "sequential warm start"
   mode skips the restore and starts each step from the previous converged solution (faster when
@@ -270,8 +295,8 @@ New package `com.powsybl.openloadflow.ts`:
 - `TimeSeriesLoadFlow` — a static facade (`run(network, plan, parameters, writerFactory, …)`),
   modelled on `LoadFlow.run` / the SA runner. Returns `TimeSeriesLoadFlowResult`.
 - `TimeSeriesLoadFlowParameters` — `LoadFlowParameters` + OLF extension holding `threadCount`,
-  the dataset‑selection flags (branches/buses/generators), the setpoint mapping, and the
-  warm‑start mode. `NetworkResultWriterFactory` is passed programmatically (like PR #23 passes the
+  the dataset‑selection flags (branches/buses/generators), the setpoint mapping, and (once added)
+  the sequential warm‑start mode. `NetworkResultWriterFactory` is passed programmatically (like PR #23 passes the
   factory via `SecurityAnalysisRunParameters`), so a caller can stream to a directory (CSV /
   Parquet) or to a custom sink.
 - `TimeSeriesLoadFlowResult` / `StepResult` — the compact in‑memory summary (§7.4).
@@ -294,7 +319,8 @@ core that both consumers share (or add a lean TS‑specific sibling if extractio
    both consumers share one seam.*
 2. **OLF API surface.** `com.powsybl.openloadflow.ts`: `TimeSeriesLoadFlow`,
    `TimeSeriesLoadFlowParameters`, `TimeSeriesLoadFlowResult` + `StepResult`.
-3. **Single‑thread engine.** Build LfNetwork/context once; base solve + `NetworkState.save`;
+3. **Single‑thread engine.** Build LfNetwork/context once; `NetworkState.save` **before any
+   solve**;
    per‑step `restore → applySetpoints → run → emit`. Branch emit reuses
    `LfBranch.emitBranchResults`; add bus + generator emit. Prove golden equality vs. N
    independent `LoadFlow.run`s on a small network.
@@ -303,8 +329,10 @@ core that both consumers share (or add a lean TS‑specific sibling if extractio
 5. **Multithread + per‑partition writer.** Partition the step range; reuse/generalise the SA MT
    helper (one LfNetwork per partition) and PR #23's `runPartition` ThreadLocal writer → one
    `part-<i>` set per thread; validate the union equals the single‑thread output.
-6. **DC fast path.** Ensure/verify LU factorisation reuse across steps (targets‑only re‑solve);
-   benchmark vs. AC.
+6. **DC fast path.** *Verified (§8):* the symbolic factorisation is reused across steps, but each
+   step still triggers a numeric LU update because `onStateUpdate()` invalidates the Jacobian
+   values. A targets‑only re‑solve that skips it is a real lever, but it is pre‑existing OLF
+   behaviour shared with SA — track it separately. Benchmark vs. AC.
 7. **Parquet + docs.** Wire the Parquet writer for all three datasets; document parameters under
    `docs/`.
 
