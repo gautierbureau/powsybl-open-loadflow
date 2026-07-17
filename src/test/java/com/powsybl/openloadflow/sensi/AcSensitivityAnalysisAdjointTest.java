@@ -114,8 +114,11 @@ class AcSensitivityAnalysisAdjointTest {
         // reverse mode: ȳ = e_branch -> θ̄_g = dP_branch1/dP_g
         AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
                 new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
-        Map<String, Double> thetaBar = analysis.runAdjointFromFactors(network,
-                network.getVariantManager().getWorkingVariantId(), List.of(), factors, Map.of(AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, branch), 1.0));
+        Map<String, Double> thetaBar = analysis.runAdjoint(network,
+                network.getVariantManager().getWorkingVariantId(), List.of(),
+                adjointBlocks(List.of(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1), List.of(List.of(branch)),
+                        SensitivityVariableType.INJECTION_ACTIVE_POWER, GENS),
+                Map.of(AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, branch), 1.0));
 
         // forward sensitivity matrix S (its own no-cache load flow; unscaled == raw here)
         SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, factors,
@@ -165,9 +168,11 @@ class AcSensitivityAnalysisAdjointTest {
 
         AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
                 new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
-        Map<String, Double> thetaBar = analysis.runAdjointFromFactors(network,
+        Map<String, Double> thetaBar = analysis.runAdjoint(network,
                 network.getVariantManager().getWorkingVariantId(), List.of(),
-                factors, Map.of(AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, branch), 1.0));
+                adjointBlocks(List.of(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1), List.of(List.of(branch)),
+                        SensitivityVariableType.INJECTION_ACTIVE_POWER, GENS),
+                Map.of(AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, branch), 1.0));
 
         SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, factors,
                 new SensitivityAnalysisRunParameters().setParameters(sensiParams));
@@ -244,11 +249,15 @@ class AcSensitivityAnalysisAdjointTest {
         Network nAfter = ieee14WithZone(targetV + dV);
         LoadFlow.find("OpenLoadFlow").run(nAfter, lfp);
 
+        List<AcSensitivityAnalysis.AdjointBlock> blocks = adjointBlocks(List.of(SensitivityFunctionType.BUS_VOLTAGE),
+                List.of(monitored), SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE, List.of(zone));
+
         double pilotTheta = 0;
         for (String f0 : monitored) {
             // ȳ = e_{f0} -> θ̄[zone] = dV_f0 / dV_pilotTarget (closed loop), raw per-unit
-            Map<String, Double> thetaBar = analysis.runAdjointFromFactors(network,
-                    network.getVariantManager().getWorkingVariantId(), List.of(), factors, Map.of(AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BUS_VOLTAGE, f0), 1.0));
+            Map<String, Double> thetaBar = analysis.runAdjoint(network,
+                    network.getVariantManager().getWorkingVariantId(), List.of(), blocks,
+                    Map.of(AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BUS_VOLTAGE, f0), 1.0));
             double theta = thetaBar.get(zone); // UNSCALED (kV/kV), the dual of get_sensitivity_matrix
 
             double sKv = fwd.getBusVoltageSensitivityValue(zone, f0, SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE);
@@ -289,9 +298,11 @@ class AcSensitivityAnalysisAdjointTest {
 
         AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
                 new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
-        Map<String, Double> thetaBar = analysis.runAdjointFromFactors(network,
+        Map<String, Double> thetaBar = analysis.runAdjoint(network,
                 network.getVariantManager().getWorkingVariantId(), List.of(),
-                factors, Map.of(powerKey(branchA), wA, powerKey(branchB), wB));
+                adjointBlocks(List.of(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1), List.of(List.of(branchA, branchB)),
+                        SensitivityVariableType.INJECTION_ACTIVE_POWER, GENS),
+                Map.of(powerKey(branchA), wA, powerKey(branchB), wB));
 
         SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, factors,
                 new SensitivityAnalysisRunParameters().setParameters(sensiParams));
@@ -349,8 +360,10 @@ class AcSensitivityAnalysisAdjointTest {
                 new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
 
         String variantId = network.getVariantManager().getWorkingVariantId();
-        double thetaSelf = analysis.runAdjointFromFactors(network, variantId, List.of(), factors, Map.of(powerKey(variableLine), 1.0)).get(variableLine);
-        double thetaCross = analysis.runAdjointFromFactors(network, variantId, List.of(), factors, Map.of(powerKey(crossBranch), 1.0)).get(variableLine);
+        List<AcSensitivityAnalysis.AdjointBlock> blocks = adjointBlocks(List.of(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1),
+                List.of(List.of(variableLine, crossBranch)), SensitivityVariableType.BRANCH_ADMITTANCE, List.of(variableLine));
+        double thetaSelf = analysis.runAdjoint(network, variantId, List.of(), blocks, Map.of(powerKey(variableLine), 1.0)).get(variableLine);
+        double thetaCross = analysis.runAdjoint(network, variantId, List.of(), blocks, Map.of(powerKey(crossBranch), 1.0)).get(variableLine);
 
         // forward S (unscaled: physical MW per physical siemens)
         SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, factors,
@@ -408,8 +421,10 @@ class AcSensitivityAnalysisAdjointTest {
 
         double w1 = 0.7;
         double w2 = -1.3;
-        Map<String, Double> thetaBar = analysis.runAdjointFromFactors(network,
-                network.getVariantManager().getWorkingVariantId(), List.of(), factors,
+        Map<String, Double> thetaBar = analysis.runAdjoint(network,
+                network.getVariantManager().getWorkingVariantId(), List.of(),
+                adjointBlocks(List.of(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, SensitivityFunctionType.BRANCH_ACTIVE_POWER_2),
+                        List.of(List.of(branch), List.of(branch)), SensitivityVariableType.INJECTION_ACTIVE_POWER, GENS),
                 Map.of(AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, branch), w1,
                        AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BRANCH_ACTIVE_POWER_2, branch), w2));
 
@@ -440,10 +455,12 @@ class AcSensitivityAnalysisAdjointTest {
 
     @Test
     void runAdjointMinimalFactorSetMatchesFullCrossProduct() {
-        // The full adjoint declares functions×variables factors; reverse mode only needs O(F+V). This gate
-        // proves the minimal set reproduces the full θ̄ to machine precision on branch admittance — the case
-        // with a non-zero direct term (self) AND cross sensitivities (which must come from the single solve,
-        // not from per-pair factors). Distinct cotangent weights make every cross term matter.
+        // The full adjoint would declare functions×variables factors; reverse mode only needs the O(F+V) set
+        // buildAdjointFactors derives from the blocks. This gate gives that minimal set an INDEPENDENT oracle:
+        // the FORWARD sensitivity matrix over the full cross product, contracted with the same cotangents —
+        // θ̄(v) must equal Σ_f ȳ_f · S[f, v]. Branch admittance is the demanding case: a non-zero direct term
+        // (self) AND cross sensitivities, which must come from the single adjoint solve rather than from
+        // per-pair factors. Distinct cotangent weights make every cross term matter.
         Network network = IeeeCdfNetworkFactory.create14();
         LoadFlowParameters lfp = cacheEnabledParameters();
         assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
@@ -464,9 +481,9 @@ class AcSensitivityAnalysisAdjointTest {
                 full.add(new SensitivityFactor(ft, f, vt, v, false, ContingencyContext.all()));
             }
         }
-        List<SensitivityFactor> minimal = AcSensitivityAnalysis.buildAdjointFactors(network,
-                adjointBlocks(List.of(ft), List.of(functions), vt, variables));
-        assertTrue(minimal.size() < full.size(), "minimal set must be smaller than the cross product");
+        List<AcSensitivityAnalysis.AdjointBlock> blocks = adjointBlocks(List.of(ft), List.of(functions), vt, variables);
+        assertTrue(AcSensitivityAnalysis.buildAdjointFactors(network, blocks).size() < full.size(),
+                "minimal set must be smaller than the cross product");
 
         SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
         sensiParams.setLoadFlowParameters(lfp);
@@ -474,17 +491,26 @@ class AcSensitivityAnalysisAdjointTest {
                 new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
         String variantId = network.getVariantManager().getWorkingVariantId();
 
-        Map<String, Double> thetaFull = analysis.runAdjointFromFactors(network, variantId, List.of(), full, cot);
-        Map<String, Double> thetaMin = analysis.runAdjointFromFactors(network, variantId, List.of(), minimal, cot);
+        Map<String, Double> theta = analysis.runAdjoint(network, variantId, List.of(), blocks, cot);
 
+        // oracle: the forward matrix over the FULL cross product, contracted with the same cotangents
+        SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, full,
+                new SensitivityAnalysisRunParameters().setParameters(sensiParams));
         for (String v : variables) {
-            assertEquals(thetaFull.get(v), thetaMin.get(v), 1e-13 * Math.abs(thetaFull.get(v)) + 1e-14,
-                    "minimal O(F+V) factor set must match the full cross product for " + v);
+            double expected = 0;
+            for (int i = 0; i < functions.size(); i++) {
+                expected += w[i] * fwd.getBranchFlow1SensitivityValue(v, functions.get(i), vt);
+            }
+            assertEquals(expected, theta.get(v), 1e-12 * Math.abs(expected) + 1e-13,
+                    "minimal O(F+V) adjoint must match the cotangent-weighted forward cross product for " + v);
         }
     }
 
     @Test
     void runAdjointMinimalFactorSetMatchesFullMultiFunctionType() {
+        // Same gate as above with the structured multi-function-type request pypowsybl actually passes: two
+        // function types over the same branches, and a variable (L2-4-1) that is NOT itself monitored — the
+        // group guarantee. Oracle is again the cotangent-weighted forward cross product, per function type.
         Network network = IeeeCdfNetworkFactory.create14();
         LoadFlowParameters lfp = cacheEnabledParameters();
         assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
@@ -512,67 +538,27 @@ class AcSensitivityAnalysisAdjointTest {
                 }
             }
         }
-        List<SensitivityFactor> minimal = AcSensitivityAnalysis.buildAdjointFactors(network,
-                adjointBlocks(fts, functionsPerType, vt, variables));
-        assertTrue(minimal.size() < full.size(), "minimal set must be smaller than the cross product");
+        List<AcSensitivityAnalysis.AdjointBlock> blocks = adjointBlocks(fts, functionsPerType, vt, variables);
+        assertTrue(AcSensitivityAnalysis.buildAdjointFactors(network, blocks).size() < full.size(),
+                "minimal set must be smaller than the cross product");
 
         SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
         sensiParams.setLoadFlowParameters(lfp);
         AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
                 new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
         String variantId = network.getVariantManager().getWorkingVariantId();
-        Map<String, Double> thetaFull = analysis.runAdjointFromFactors(network, variantId, List.of(), full, cot);
-        Map<String, Double> thetaMin = analysis.runAdjointFromFactors(network, variantId, List.of(), minimal, cot);
+        Map<String, Double> theta = analysis.runAdjoint(network, variantId, List.of(), blocks, cot);
+
+        SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, full,
+                new SensitivityAnalysisRunParameters().setParameters(sensiParams));
         for (String v : variables) {
-            assertEquals(thetaFull.get(v), thetaMin.get(v), 1e-13 * Math.abs(thetaFull.get(v)) + 1e-14,
-                    "minimal multi-type factor set must match the full cross product for " + v);
-        }
-    }
-
-    @Test
-    void runAdjointStructuredBlocksMatchFullCrossProduct() {
-        // The structured runAdjoint(blocks) entry, where OLF owns the O(F+V) factor-set construction from
-        // the caller's per-function-type blocks (what pypowsybl now passes instead of exploding factors).
-        // Assert it reproduces the full functions×variables cross product on the multi-type IEEE-14 setup.
-        Network network = IeeeCdfNetworkFactory.create14();
-        LoadFlowParameters lfp = cacheEnabledParameters();
-        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
-
-        List<SensitivityFunctionType> fts = List.of(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1,
-                SensitivityFunctionType.BRANCH_CURRENT_1);
-        List<String> branches = List.of("L1-2-1", "L2-3-1", "L1-5-1");
-        SensitivityVariableType vt = SensitivityVariableType.BRANCH_ADMITTANCE;
-        List<String> variables = List.of("L2-3-1", "L2-4-1"); // L2-3-1 monitored (self), L2-4-1 not (group-guarantee)
-
-        Map<String, Double> cot = new HashMap<>();
-        double[] wp = {0.7, -1.3, 0.4};
-        double[] wi = {0.5, 0.9, -0.2};
-        for (int i = 0; i < branches.size(); i++) {
-            cot.put(AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, branches.get(i)), wp[i]);
-            cot.put(AcSensitivityAnalysis.functionCotangentKey(SensitivityFunctionType.BRANCH_CURRENT_1, branches.get(i)), wi[i]);
-        }
-
-        List<SensitivityFactor> full = new ArrayList<>();
-        for (String v : variables) {
-            for (SensitivityFunctionType ft : fts) {
-                for (String f : branches) {
-                    full.add(new SensitivityFactor(ft, f, vt, v, false, ContingencyContext.all()));
-                }
+            double expected = 0;
+            for (int i = 0; i < branches.size(); i++) {
+                expected += wp[i] * fwd.getBranchFlow1SensitivityValue(v, branches.get(i), vt)
+                        + wi[i] * fwd.getBranchCurrent1SensitivityValue(v, branches.get(i), vt);
             }
-        }
-        List<AcSensitivityAnalysis.AdjointBlock> blocks =
-                adjointBlocks(fts, List.of(branches, branches), vt, variables);
-
-        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
-        sensiParams.setLoadFlowParameters(lfp);
-        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
-                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
-        String variantId = network.getVariantManager().getWorkingVariantId();
-        Map<String, Double> thetaFull = analysis.runAdjointFromFactors(network, variantId, List.of(), full, cot);
-        Map<String, Double> thetaBlocks = analysis.runAdjoint(network, variantId, List.of(), blocks, cot);
-        for (String v : variables) {
-            assertEquals(thetaFull.get(v), thetaBlocks.get(v), 1e-13 * Math.abs(thetaFull.get(v)) + 1e-14,
-                    "structured blocks runAdjoint must match the full cross product for " + v);
+            assertEquals(expected, theta.get(v), 1e-12 * Math.abs(expected) + 1e-13,
+                    "minimal multi-type adjoint must match the cotangent-weighted forward cross product for " + v);
         }
     }
 
