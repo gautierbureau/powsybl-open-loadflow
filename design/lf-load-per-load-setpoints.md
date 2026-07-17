@@ -168,9 +168,12 @@ the crux: conflating the two is the bug. The new operation updates the per‑loa
 aggregate, fires the existing listener event, and maintains the `p0`‑derived state of §3 in one
 place. Add per‑load accessors (§4) and `initialTargetP` to `LoadDcState`.
 
-  *Pros:* the model owns its own invariants; per‑load write‑back in `updateState` becomes exact rather
-  than participation‑smeared; the `LfLoadImpl.java:190` FIXME goes away; `NetworkCache` could drop its
-  bail‑out. *Cons:* touches a central class (§7).
+  *Pros:* the model owns its own invariants, and a caller can state that a load consumes something else
+  without having to know what that implies. It also opens the way to three things it does **not** do on
+  its own, each of which would change existing behaviour and so deserves its own change: exact per‑load
+  write‑back in `updateState` instead of participation‑smeared; retiring the `LfLoadImpl.java:190`
+  FIXME, which needs `LfLoadAction` to go through the new operation rather than shift the aggregate;
+  and letting `NetworkCache` drop its bail‑out. *Cons:* touches a central class (§7).
 
 **B. Caller‑side bookkeeping.** The time‑series engine tracks each load's contribution itself and
 shifts the aggregate by the delta. *Pros:* no core change. *Cons:* it does not actually avoid the
