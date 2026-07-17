@@ -14,6 +14,7 @@ public class HvdcState extends ElementState<LfHvdc> {
 
     private final boolean acEmulation;
     private final LfHvdc.AcEmulationControl.AcEmulationStatus acEmulationStatus;
+    private final double p0;
     private final double vsc1TargetP;
     private final double vsc2TargetP;
 
@@ -22,10 +23,13 @@ public class HvdcState extends ElementState<LfHvdc> {
         this.acEmulation = hvdc.isAcEmulation();
         if (this.acEmulation) {
             acEmulationStatus = hvdc.getAcEmulationControl().getAcEmulationStatus();
+            // saved so a caller that moved the AC emulation offset in place is reset with everything else
+            p0 = hvdc.getAcEmulationControl().getP0();
             // VSCs targetP are stored to be used if the AC emulation is in saturated mode
             vsc1TargetP = hvdc.getConverterStation1().getTargetP();
             vsc2TargetP = hvdc.getConverterStation2().getTargetP();
         } else {
+            p0 = Double.NaN;
             vsc1TargetP = Double.NaN;
             vsc2TargetP = Double.NaN;
             acEmulationStatus = null;
@@ -41,6 +45,7 @@ public class HvdcState extends ElementState<LfHvdc> {
         super.restore();
         element.setAcEmulation(acEmulation);
         if (acEmulation) {
+            element.getAcEmulationControl().setP0(p0);
             element.getConverterStation1().setTargetP(vsc1TargetP);
             element.getConverterStation2().setTargetP(vsc2TargetP);
             element.updateAcEmulationStatus(acEmulationStatus);

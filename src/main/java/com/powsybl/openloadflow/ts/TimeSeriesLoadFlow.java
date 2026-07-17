@@ -10,7 +10,9 @@ package com.powsybl.openloadflow.ts;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.iidm.network.ComponentConstants;
+import com.powsybl.iidm.network.HvdcLine;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControl;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.loadflow.resultswriter.NetworkResultWriter;
@@ -31,6 +33,7 @@ import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
+import com.powsybl.openloadflow.network.LfHvdc;
 import com.powsybl.openloadflow.network.LfLoad;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkParameters;
@@ -75,10 +78,12 @@ import java.util.stream.Collectors;
  * {@link com.powsybl.loadflow.LoadFlow} on the network carrying that step's values, and results do not depend on the
  * order the steps are solved in nor on how they are partitioned across threads.
  *
- * <p>The plan is supplied as powsybl-core {@link DoubleTimeSeries}: one series per controllable generator or load (its
- * {@link com.powsybl.timeseries.TimeSeriesMetadata#getName() name} is the element id, its values are the per-step
- * active power in MW — a generator's target P, or a load's p0). All series share one {@link TimeSeriesIndex}, which
- * defines the number of steps and their instants.
+ * <p>The plan is supplied as powsybl-core {@link DoubleTimeSeries}: one series per controllable generator, load or
+ * angle-droop HVDC line (its {@link com.powsybl.timeseries.TimeSeriesMetadata#getName() name} is the element id, its
+ * values are the per-step active power in MW — a generator's target P, a load's p0, or the AC emulation offset p0 of an
+ * HVDC whose flow is {@code p0 + k(theta1 - theta2)}). A fixed-set-point HVDC has no such offset and is planned through
+ * its converter stations, which are generators (VSC) or a load (LCC). All series share one {@link TimeSeriesIndex},
+ * which defines the number of steps and their instants.
  *
  * <p>A load series carries active power. Its q0 is a separate input the plan does not describe, and by default it is
  * left untouched, which is what makes a step equal to a load flow on a network carrying that p0 — so a load does not
@@ -132,10 +137,22 @@ public final class TimeSeriesLoadFlow {
         }
         List<String> unknownElements = plan.stream()
                 .map(series -> series.getMetadata().getName())
-                .filter(id -> network.getGenerator(id) == null && network.getLoad(id) == null)
+                .filter(id -> network.getGenerator(id) == null && network.getLoad(id) == null && network.getHvdcLine(id) == null)
                 .toList();
         if (!unknownElements.isEmpty()) {
-            throw new PowsyblException("Unknown generator or load id(s) in the plan: " + unknownElements);
+            throw new PowsyblException("Unknown generator, load or HVDC id(s) in the plan: " + unknownElements);
+        }
+        // an HVDC line can only be planned through its AC emulation offset, so it must have one: an enabled angle-droop
+        // control and AC emulation on. A fixed-set-point line has none, and is planned through its converter stations.
+        List<String> nonDroopHvdc = plan.stream()
+                .map(series -> series.getMetadata().getName())
+                .filter(id -> network.getHvdcLine(id) != null)
+                .filter(id -> !hasSchedulableAcEmulation(network.getHvdcLine(id), parameters.getLoadFlowParameters()))
+                .sorted()
+                .toList();
+        if (!nonDroopHvdc.isEmpty()) {
+            throw new PowsyblException("HVDC id(s) in the plan without an enabled AC emulation to schedule: " + nonDroopHvdc
+                    + " (plan a fixed-set-point HVDC through its converter stations instead)");
         }
         // two series for one element would silently leave the last one applied
         List<String> duplicatedElements = plan.stream()
@@ -324,6 +341,19 @@ public final class TimeSeriesLoadFlow {
                 .toList();
     }
 
+    /**
+     * Whether an HVDC line's flow is driven by an AC emulation offset the plan can move: it needs an enabled angle-droop
+     * control and AC emulation switched on, the same two conditions under which the network builds an {@code LfHvdc} with
+     * an {@code AcEmulationControl}.
+     */
+    private static boolean hasSchedulableAcEmulation(HvdcLine hvdcLine, LoadFlowParameters lfParameters) {
+        if (!lfParameters.isHvdcAcEmulation()) {
+            return false;
+        }
+        HvdcAngleDroopActivePowerControl droopControl = hvdcLine.getExtension(HvdcAngleDroopActivePowerControl.class);
+        return droopControl != null && droopControl.isEnabled();
+    }
+
     private static void applySetpoints(List<Setpoint> setpoints, int step, LfNetworkParameters networkParameters) {
         for (Setpoint setpoint : setpoints) {
             setpoint.apply(step, networkParameters);
@@ -351,6 +381,12 @@ public final class TimeSeriesLoadFlow {
                         ? load.getOriginalLoadQ0(series.elementId()) / load.getOriginalLoadP0(series.elementId())
                         : Double.NaN;
                 setpoints.add(new LoadSetpoint(load, series.elementId(), series.values(), powerFactor));
+                continue;
+            }
+            // an angle-droop HVDC line: run() has already rejected any HVDC series with no AC emulation offset to move
+            LfHvdc hvdc = lfNetwork.getHvdcById(series.elementId());
+            if (hvdc != null && hvdc.getAcEmulationControl() != null) {
+                setpoints.add(new HvdcSetpoint(hvdc, series.values()));
             }
         }
         return setpoints;
@@ -566,6 +602,20 @@ public final class TimeSeriesLoadFlow {
             if (!Double.isNaN(powerFactor)) {
                 load.setOriginalLoadQ0(originalLoadId, p0 * powerFactor);
             }
+        }
+    }
+
+    /**
+     * The active power offset of an angle-droop HVDC, whose flow is {@code p0 + k(theta1 - theta2)}: it is p0 the plan
+     * moves, the schedule of a link whose flow otherwise follows the AC angle difference. A fixed-set-point HVDC has no
+     * such offset -- its two converter stations are planned as generators or loads instead -- so a series naming one is
+     * rejected up front rather than silently ignored here.
+     */
+    private record HvdcSetpoint(LfHvdc hvdc, DoubleTimeSeriesValues values) implements Setpoint {
+
+        @Override
+        public void apply(int step, LfNetworkParameters networkParameters) {
+            hvdc.getAcEmulationControl().setP0(values.get(step) / PerUnit.SB);
         }
     }
 
