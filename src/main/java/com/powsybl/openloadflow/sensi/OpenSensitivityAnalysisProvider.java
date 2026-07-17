@@ -256,25 +256,27 @@ public class OpenSensitivityAnalysisProvider implements SensitivityAnalysisProvi
      * network cache ({@code networkCacheEnabled}): a plain cached {@code run_ac} must have run on
      * {@code network} first. See {@link AcSensitivityAnalysis#runAdjoint}.
      *
-     * @param factors                the (function, variable) declaration, as for {@link #run}.
-     * @param functionCotangentsById dL/dfunction, keyed by monitored function id.
+     * @param blocks                 per-function-type monitored functions + the variables to differentiate
+     *                               (see {@link AcSensitivityAnalysis.AdjointBlock}) — the structured
+     *                               declaration replacing the SPI {@code List<SensitivityFactor>}.
+     * @param functionCotangentsById dL/dfunction, keyed by {@link AcSensitivityAnalysis#functionCotangentKey}.
      * @return dL/dvariable, keyed by variable id.
      */
     public Map<String, Double> runAdjoint(Network network,
                                           String workingVariantId,
-                                          List<SensitivityFactor> factors,
+                                          List<AcSensitivityAnalysis.AdjointBlock> blocks,
                                           Map<String, Double> functionCotangentsById,
                                           List<SensitivityVariableSet> variableSets,
                                           SensitivityAnalysisParameters sensitivityAnalysisParameters) {
         Objects.requireNonNull(network);
-        Objects.requireNonNull(factors);
+        Objects.requireNonNull(blocks);
         Objects.requireNonNull(functionCotangentsById);
         Objects.requireNonNull(sensitivityAnalysisParameters);
         if (sensitivityAnalysisParameters.getLoadFlowParameters().isDc()) {
             throw new PowsyblException("Adjoint (VJP) sensitivity is only supported in AC");
         }
         AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(matrixFactory, connectivityFactory, sensitivityAnalysisParameters);
-        return analysis.runAdjoint(network, workingVariantId, variableSets, factors, functionCotangentsById);
+        return analysis.runAdjoint(network, workingVariantId, variableSets, blocks, functionCotangentsById);
     }
 
     public record ReplayResult<T extends SensitivityResultWriter>(T resultWriter, List<SensitivityFactor> factors, List<Contingency> contingencies) {

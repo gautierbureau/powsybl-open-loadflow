@@ -11,6 +11,7 @@ import com.powsybl.action.Action;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.contingency.Contingency;
+import com.powsybl.contingency.ContingencyContext;
 import com.powsybl.contingency.strategy.OperatorStrategy;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
@@ -376,11 +377,14 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
     }
 
     /**
-     * Public reverse-mode / VJP entry point — the adjoint sibling of {@link #analyse}. Reuses the AC
-     * load flow OpenLoadFlow retained in the network cache ({@code networkCacheEnabled}): the caller
-     * must have run a cached AC load flow on {@code network} first. The factor declaration (functions ×
-     * variables) is the same as the forward; instead of materialising the sensitivity matrix {@code S},
-     * it contracts an output cotangent to return {@code θ̄ = Sᵀ·ȳ}.
+     * Factor-list reverse-mode core — the adjoint sibling of {@link #analyse}, driven by an explicit SPI
+     * {@code List<SensitivityFactor>}. Prefer the structured {@link #runAdjoint(Network, String, List,
+     * List, Map)} in application code; this overload is kept as the proven core (the structured entry
+     * builds its O(F+V) factor set and delegates here) and as the oracle for the minimal-vs-full
+     * equivalence gates in {@code AcSensitivityAnalysisAdjointTest}. Reuses the AC load flow OpenLoadFlow
+     * retained in the network cache ({@code networkCacheEnabled}): the caller must have run a cached AC
+     * load flow on {@code network} first. Instead of materialising the sensitivity matrix {@code S}, it
+     * contracts an output cotangent to return {@code θ̄ = Sᵀ·ȳ}.
      *
      * @param factors               the (function, variable) declaration, as in the forward. The cotangents
      *                               and the returned map are keyed by the ids on these factors (function
@@ -389,7 +393,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      *                               every factor sharing that function).
      * @return dL/dvariable, keyed by variable id.
      */
-    public Map<String, Double> runAdjoint(Network network, String workingVariantId,
+    public Map<String, Double> runAdjointFromFactors(Network network, String workingVariantId,
                                           List<SensitivityVariableSet> variableSets,
                                           List<SensitivityFactor> factors,
                                           Map<String, Double> functionCotangentsById) {
@@ -460,6 +464,107 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      */
     public static String functionCotangentKey(SensitivityFunctionType functionType, String functionId) {
         return functionType.name() + ' ' + functionId;
+    }
+
+    /**
+     * Structured reverse-mode / VJP entry point — the clean sibling of {@link #analyse}, and the API
+     * application callers should use (no SPI {@code List<SensitivityFactor>} to assemble). The caller
+     * passes its natural per-function-type {@link AdjointBlock}s (monitored functions + already
+     * type-resolved variables); OpenLoadFlow owns the reverse-mode O(functions + variables) factor-set
+     * construction ({@link #buildAdjointFactors}) and then runs the same proven pipeline as
+     * {@link #runAdjointFromFactors}. Requires a cached AC load flow on {@code network}
+     * ({@code networkCacheEnabled}), like the factor-list core.
+     *
+     * @param blocks                 per-function-type monitored functions + the variables to differentiate.
+     * @param functionCotangentsById dL/dfunction keyed by {@link #functionCotangentKey}; the caller keeps
+     *                               this build since it depends on the caller's matrix column layout.
+     * @return dL/dvariable, keyed by variable id.
+     */
+    public Map<String, Double> runAdjoint(Network network, String workingVariantId,
+                                          List<SensitivityVariableSet> variableSets,
+                                          List<AdjointBlock> blocks,
+                                          Map<String, Double> functionCotangentsById) {
+        return runAdjointFromFactors(network, workingVariantId, variableSets,
+                buildAdjointFactors(network, blocks), functionCotangentsById);
+    }
+
+    /**
+     * One monitored-function-type block of a {@link #runAdjoint} request: the functions monitored under
+     * {@code functionType}, and the variables to differentiate against (each carrying its resolved
+     * {@link SensitivityVariableType} and whether it is a {@link SensitivityVariableSet} id). The variable
+     * list is the same across a request's blocks.
+     */
+    public record AdjointBlock(SensitivityFunctionType functionType, List<String> functionIds,
+                               List<AdjointVariable> variables) {
+    }
+
+    /** A differentiation variable of an {@link AdjointBlock}: its id, resolved type, and set-ness. */
+    public record AdjointVariable(String id, SensitivityVariableType type, boolean variableSet) {
+    }
+
+    /**
+     * Build the O(functions + variables) reverse-mode factor set from the caller's {@link AdjointBlock}s —
+     * the minimal set that reproduces the full functions×variables cross product. Package-private rather
+     * than private so the equivalence gates drive THIS construction and not a copy of it: every
+     * {@code AcSensitivityAnalysisAdjointTest#runAdjointMinimalFactorSetMatchesFull*} case calls this
+     * method, and {@code #runAdjointStructuredBlocksMatchFullCrossProduct} exercises it through the public
+     * {@link #runAdjoint} entry. Not part of the API — the caller passes blocks, never factors.
+     * <ul>
+     *   <li>one factor per monitored function, paired with the first variable — feeds x̄ via the cotangent map;</li>
+     *   <li>the self-pair for a variable that is itself a monitored function — carries the direct term ∂f/∂p;</li>
+     *   <li>a group guarantee: any variable never appearing as a function still gets one factor (fixed
+     *       function, whose direct term is 0 for it) so it gets its own θ̄ group.</li>
+     * </ul>
+     * Deduplicated by (functionType, resolvedFunctionId, variableId). This is the construction that used
+     * to live in the pypowsybl caller; owning it here keeps it under the OLF equivalence gates.
+     */
+    static List<SensitivityFactor> buildAdjointFactors(Network network, List<AdjointBlock> blocks) {
+        List<SensitivityFactor> factors = new ArrayList<>();
+        Set<String> emittedPairs = new HashSet<>();       // functionType|resolvedFunctionId|variableId
+        Set<String> variablesWithGroup = new HashSet<>();
+
+        for (AdjointBlock block : blocks) {
+            SensitivityFunctionType functionType = block.functionType();
+            Set<String> functionIdSet = new HashSet<>(block.functionIds());
+
+            // x̄: one factor per function, paired with the first variable (base case only — adjoint ignores contingencies)
+            AdjointVariable v0 = block.variables().get(0);
+            for (String functionId : block.functionIds()) {
+                addAdjointFactor(factors, emittedPairs, network, functionType, functionId, v0);
+            }
+            variablesWithGroup.add(v0.id());
+
+            // self-pair (direct term): a variable that is itself a monitored function in this block
+            for (AdjointVariable v : block.variables()) {
+                if (functionIdSet.contains(v.id())) {
+                    addAdjointFactor(factors, emittedPairs, network, functionType, v.id(), v);
+                    variablesWithGroup.add(v.id());
+                }
+            }
+        }
+
+        // group guarantee: every variable (across all blocks) needs a θ̄ group; give the ungrouped ones one
+        // factor with a fixed function whose direct term is 0 for them (safe — see the OLF test).
+        AdjointBlock b0 = blocks.get(0);
+        SensitivityFunctionType ft0 = b0.functionType();
+        String f0 = b0.functionIds().get(0);
+        for (AdjointBlock block : blocks) {
+            for (AdjointVariable v : block.variables()) {
+                if (variablesWithGroup.add(v.id())) {
+                    addAdjointFactor(factors, emittedPairs, network, ft0, f0, v);
+                }
+            }
+        }
+        return factors;
+    }
+
+    private static void addAdjointFactor(List<SensitivityFactor> factors, Set<String> emittedPairs, Network network,
+                                         SensitivityFunctionType functionType, String functionId, AdjointVariable v) {
+        String resolvedFunctionId = SensitivityFactor.resolveBusId(functionId, functionType, network);
+        if (emittedPairs.add(functionType.name() + '|' + resolvedFunctionId + '|' + v.id())) {
+            factors.add(new SensitivityFactor(functionType, resolvedFunctionId, v.type(), v.id(),
+                    v.variableSet(), ContingencyContext.none()));
+        }
     }
 
     private static boolean runLoadFlow(AcLoadFlowContext context, boolean isRunningBaseSituation) {
