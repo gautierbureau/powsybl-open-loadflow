@@ -10,6 +10,8 @@ package com.powsybl.openloadflow.ts;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.iidm.network.Branch;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControl;
+import com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder;
 import com.powsybl.iidm.network.extensions.LoadDetailAdder;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
 import com.powsybl.iidm.network.test.FourSubstationsNodeBreakerFactory;
@@ -21,6 +23,7 @@ import com.powsybl.loadflow.resultswriter.CsvNetworkResultWriterFactory;
 import com.powsybl.loadflow.resultswriter.NetworkResultWriterFactory;
 import com.powsybl.math.matrix.DenseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowProvider;
+import com.powsybl.openloadflow.network.HvdcNetworkFactory;
 import com.powsybl.timeseries.DoubleTimeSeries;
 import com.powsybl.timeseries.RegularTimeSeriesIndex;
 import com.powsybl.timeseries.TimeSeries;
@@ -312,7 +315,7 @@ class TimeSeriesLoadFlowTest {
         List<DoubleTimeSeries> badPlan = List.of(TimeSeries.createDouble("MISSING", index, targets));
         PowsyblException e = assertThrows(PowsyblException.class,
                 () -> TimeSeriesLoadFlow.run(network, badPlan, new TimeSeriesLoadFlowParameters(), NetworkResultWriterFactory.NO_OP));
-        assertTrue(e.getMessage().contains("Unknown generator or load id"));
+        assertTrue(e.getMessage().contains("Unknown generator, load or HVDC id"));
     }
 
     /**
@@ -632,6 +635,88 @@ class TimeSeriesLoadFlowTest {
             assertEquals(ref.getLine("NHV1_NHV2_1").getTerminal1().getQ(), streamedQ1.get(ts + "|NHV1_NHV2_1"), 1e-2,
                     "q1 mismatch at step " + step);
         }
+    }
+
+    private static Network networkWithDroopHvdc() {
+        Network network = HvdcNetworkFactory.createWithHvdcInAcEmulation();
+        network.getHvdcLine("hvdc34").newExtension(HvdcAngleDroopActivePowerControlAdder.class)
+                .withDroop(180).withP0(0).withEnabled(true).add();
+        return network;
+    }
+
+    private static float droopP0(Network network) {
+        return network.getHvdcLine("hvdc34").getExtension(HvdcAngleDroopActivePowerControl.class).getP0();
+    }
+
+    /**
+     * The whole contract, for an angle-droop HVDC: its flow is p0 + k(theta1 - theta2), and it is p0 the plan moves.
+     * Each step must come out equal to a load flow on a network whose droop p0 is that step's value.
+     */
+    @Test
+    void hvdcDroopStepsMatchIndependentLoadFlow() {
+        double[] p0s = {-100.0, 200.0, 0.0};
+        List<DoubleTimeSeries> hvdcPlan = List.of(TimeSeries.createDouble("hvdc34", index, p0s));
+        Map<String, StringWriter> csv = new HashMap<>();
+        TimeSeriesLoadFlow.run(networkWithDroopHvdc(), hvdcPlan, new TimeSeriesLoadFlowParameters(),
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+
+        Map<String, Double> streamedP1 = new HashMap<>();
+        csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedP1.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+        });
+
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        for (int step = 0; step < p0s.length; step++) {
+            Network ref = networkWithDroopHvdc();
+            ref.getHvdcLine("hvdc34").getExtension(HvdcAngleDroopActivePowerControl.class).setP0((float) p0s[step]);
+            assertTrue(runner.run(ref, new LoadFlowParameters()).isFullyConverged());
+            String ts = index.getInstantAt(step).toString();
+            for (Branch<?> branch : ref.getBranches()) {
+                assertEquals(branch.getTerminal1().getP(), streamedP1.get(ts + "|" + branch.getId()), 1e-2,
+                        "p1 mismatch on " + branch.getId() + " at step " + step);
+            }
+        }
+
+        // p0 genuinely moves the flow between steps -- the golden check above would pass on a saturated flat line too
+        assertTrue(Math.abs(streamedP1.get(index.getInstantAt(0).toString() + "|l45")
+                - streamedP1.get(index.getInstantAt(1).toString() + "|l45")) > 0.1,
+                "the droop p0 has to change the flow across steps");
+    }
+
+    /**
+     * A restored step must leave the droop p0 where the network was built, not where the previous step left it. Same
+     * plan, but the failing step in the middle would corrupt its neighbour if the offset were not part of the snapshot.
+     */
+    @Test
+    void hvdcDroopStepIsIsolatedFromItsNeighbours() {
+        double[] p0s = {0.0, 200.0, 0.0};
+        List<DoubleTimeSeries> hvdcPlan = List.of(TimeSeries.createDouble("hvdc34", index, p0s));
+        Map<String, StringWriter> csv = new HashMap<>();
+        TimeSeriesLoadFlow.run(networkWithDroopHvdc(), hvdcPlan, new TimeSeriesLoadFlowParameters(),
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+
+        Map<String, Double> streamedP1 = new HashMap<>();
+        csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedP1.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+        });
+
+        // steps 0 and 2 carry the same p0, so they must produce the same flow: the p0=200 middle step leaves nothing behind
+        assertEquals(streamedP1.get(index.getInstantAt(0).toString() + "|l45"),
+                streamedP1.get(index.getInstantAt(2).toString() + "|l45"), 1e-9,
+                "two steps at the same p0 must match; the offset is restored between steps");
+    }
+
+    @Test
+    void planningAFixedSetpointHvdcThrows() {
+        // FourSubstations HVDC1 is VSC but carries no angle-droop control, so it has no offset to schedule
+        List<DoubleTimeSeries> hvdcPlan = List.of(TimeSeries.createDouble("HVDC1", index, 10.0, 20.0, 30.0));
+        PowsyblException e = assertThrows(PowsyblException.class,
+                () -> TimeSeriesLoadFlow.run(FourSubstationsNodeBreakerFactory.create(), hvdcPlan,
+                        new TimeSeriesLoadFlowParameters(), NetworkResultWriterFactory.NO_OP));
+        assertTrue(e.getMessage().contains("HVDC1"), e.getMessage());
+        assertTrue(e.getMessage().contains("without an enabled AC emulation"), e.getMessage());
     }
 
     private static Set<String> readBranchRows(Path datasetDir) throws IOException {
