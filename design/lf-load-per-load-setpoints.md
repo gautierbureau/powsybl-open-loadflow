@@ -30,8 +30,14 @@ The mechanical path is already there, and it mirrors generators closely:
 
 So the model is **already half‑way** to per‑load setpoints. Notably, the aggregation is not
 load‑bearing for the solver: the equations consume `LfBus.getLoadTargetP()`, which is *itself* a
-lazily‑cached sum over `List<LfLoad>`, invalidated on change (`AbstractLfBus.java:479‑492`). Summing
-per‑load values into `LfLoad.targetP` is the same pattern that already exists one level up.
+lazily‑cached sum over `List<LfLoad>`, invalidated on change (`AbstractLfBus.java:479‑492`).
+
+One caveat shapes the proposal: **`LfLoad.targetP` cannot simply be derived from per‑load values.**
+It also accumulates LCC converter stations (`LfLoadImpl.java:118`) and boundary lines (`:124`),
+neither of which is an IIDM `Load` or appears in `loadsRefs`. The scalar therefore stays
+authoritative, with per‑load values maintained alongside it covering the `Load` contributions only.
+(Note in passing that `add(BoundaryLine)` updates `targetP` but *not* `initialTargetP`, unlike the
+`Load` and LCC paths — an asymmetry that looks unintentional, but is out of scope here.)
 
 ## 2. What does not work
 
@@ -153,12 +159,14 @@ contingency path's known error either.
 
 ## 6. Options
 
-**A. Per‑original‑load setpoints on `LfLoad` (recommended).** Give `LfLoadImpl` a per‑load `targetP`
-map alongside the `loadsAbsVariableTargetP` map it already has, and derive the aggregate as a cached
-sum — the pattern `AbstractLfBus` already uses one level up. Add
-`LfLoad.setTargetP(String originalLoadId, double targetP)`, which updates the per‑load value,
-invalidates the aggregate, fires the existing listener event, and maintains the `p0`‑derived state of
-§3 in one place. Add `initialTargetP` to `LoadDcState`.
+**A. Per‑original‑load setpoints on `LfLoad` (recommended).** Give `LfLoadImpl` per‑load `targetP`
+and `initialTargetP` maps alongside the `loadsAbsVariableTargetP` map it already has, maintained in
+lockstep with the authoritative aggregate scalar (§1). Add a distinct **"this load's `p0` is now X"**
+operation — separate from the existing aggregate `setTargetP(double)`, which means "slack
+distribution moved this aggregate" and must *not* recompute `p0`‑derived state. That separation is
+the crux: conflating the two is the bug. The new operation updates the per‑load value, adjusts the
+aggregate, fires the existing listener event, and maintains the `p0`‑derived state of §3 in one
+place. Add per‑load accessors (§4) and `initialTargetP` to `LoadDcState`.
 
   *Pros:* the model owns its own invariants; per‑load write‑back in `updateState` becomes exact rather
   than participation‑smeared; the `LfLoadImpl.java:190` FIXME goes away; `NetworkCache` could drop its
