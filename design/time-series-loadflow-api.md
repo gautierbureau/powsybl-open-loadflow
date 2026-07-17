@@ -1,8 +1,9 @@
 # Scoping — Time‑series load flow API (fixed structure, varying injection plan)
 
 **Status:** Implemented for generators and loads — `com.powsybl.openloadflow.ts`. Sections 5, 6, 8, 9
-and 12 have been reconciled with the engine as built and measured. HVDC setpoints and the sequential
-warm‑start mode remain proposals; relative setpoints are settled as a caller concern (§6).
+and 12 have been reconciled with the engine as built and measured. Angle‑droop HVDC offsets are
+implemented (§12.3); fixed‑set‑point HVDC and the sequential warm‑start mode remain proposals;
+relative setpoints are settled as a caller concern (§6).
 **Scope:** a new `com.powsybl.openloadflow.ts` API in powsybl‑open‑loadflow, reusing the
 security‑analysis compute machinery and the streaming‑output seam introduced by **PR #23**
 (*"Stream all branch flows out of a security analysis (CSV / Parquet)"*) and its companion
@@ -445,12 +446,17 @@ core that both consumers share (or add a lean TS‑specific sibling if extractio
    consumer wanting an integer step derives it — ISO‑8601 UTC instants sort lexicographically in
    chronological order — or joins the returned summary, which carries both `stepIndex` and
    `timestamp` (§7.4). Revisit if that join proves painful in practice, not before.
-3. ~~**Which injections are controllable**~~ — **settled: generators and loads** (this PR, on the
-   model change in OLF PR #29). HVDC setpoints remain a proposal. Worth carrying
-   forward what loads cost: adding an injection type is not "call the other setter". It is "find
-   everything the network loader derives from that input, and make sure it is maintained when the
-   input moves" — for loads that was the slack participation factors, the constant‑power‑factor flag
-   and the power factor itself, none of which the model could keep straight before PR #29.
+3. ~~**Which injections are controllable**~~ — **settled: generators, loads and angle‑droop HVDC.**
+   Generators and loads land together (on the model change in OLF PR #29); an HVDC in AC emulation is
+   planned through its offset `p0` in `p0 + k(theta1 - theta2)`. A **fixed‑set‑point** HVDC has no
+   such offset — its flow is its two converter stations' set points — so a series naming one is
+   rejected, pointing the caller at the stations, which are already planned as generators (VSC) or a
+   load (LCC). The lesson each type taught is worth keeping: adding an injection is not "call the
+   other setter" but "find everything the loader derives from that input and keep it maintained when
+   the input moves". For loads that was the slack participation factors, the constant‑power‑factor
+   flag and the power factor. For the droop HVDC it was the opposite surprise — `p0` is a plain
+   constant in the flow equation, outside both the Jacobian and the target vector, so making it live
+   was the whole change. HVDC **fixed** set points and reactive/voltage schedules remain proposals.
 4. ~~**Voltage/angle extension columns**~~ — **settled: always emitted, gated per dataset.** V and
    angle are the bus dataset's own columns (`stateId;subStateId;status;busId;v;angle`); the switch is
    `isStreamBusResults()`, whole‑dataset, not per column. PR #23's `createResultExtension` gating
