@@ -80,13 +80,12 @@ public class LfVscConverterStationImpl extends AbstractLfGenerator implements Lf
     }
 
     @Override
-    public void setInitialTargetP(double initialTargetP) {
-        // no-op
-    }
-
-    @Override
     public void setInitialTargetPToTargetP() {
-        // no-op
+        // Deliberately not moving the initial target P to the current one. In AC emulation linear mode getTargetP() is
+        // zero (the injection comes from the equation terms), and NetworkState.save calls this on every generator, so
+        // moving it would drop the station's own set point -- the value LfHvdcImpl.setDisabled restores it to. The
+        // per-element setInitialTargetP below is left working, so a caller changing a fixed set point in place can keep
+        // the initial target P in step with it.
     }
 
     @Override
