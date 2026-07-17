@@ -455,6 +455,31 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                     lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().getFirst(), -1d);
         }
 
+        // Guard the FUNCTION side of the boundary, the mirror of an absent variable on the output side:
+        // a cotangent whose (functionType, functionId) key matches NO emitted factor is silently dropped
+        // below, so its contribution to x̄ vanishes and θ̄ is wrong with no error. That is precisely the
+        // shape of the resolved-vs-caller id bug this class carried — caught here, unambiguously, because
+        // every block function produces a factor carrying the CALLER's id (buildAdjointFactors), so an
+        // unmatched cotangent means the caller keyed a function that is in no block. The out-of-component
+        // "legitimate zero" case does NOT trip this: that function still has an emitted factor (only its
+        // validity is dropped later), so its key is present here.
+        Set<String> declaredFunctionKeys = new HashSet<>();
+        for (SensitivityFactor f : factors) {
+            declaredFunctionKeys.add(functionCotangentKey(f.getFunctionType(), f.getFunctionId()));
+        }
+        List<String> orphanCotangents = functionCotangentsById.entrySet().stream()
+                .filter(e -> e.getValue() != null && e.getValue() != 0.0)
+                .map(Map.Entry::getKey)
+                .filter(k -> !declaredFunctionKeys.contains(k))
+                .sorted()
+                .toList();
+        if (!orphanCotangents.isEmpty()) {
+            throw new PowsyblException("runAdjoint: " + orphanCotangents.size() + " cotangent(s) key no "
+                    + "monitored function in any block, so they would be silently dropped and θ̄ would omit "
+                    + "their contribution. Check the function ids match the block's (same id convention on "
+                    + "both sides): " + orphanCotangents);
+        }
+
         // cotangent per factor = the cotangent of its monitored function, matched by the caller's
         // (functionType, functionId): a branch can be monitored by several function types (current and
         // active power, on both sides) that share the same functionId, so the key must include the type.

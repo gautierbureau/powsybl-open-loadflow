@@ -563,6 +563,36 @@ class AcSensitivityAnalysisAdjointTest {
     }
 
     @Test
+    void runAdjointRejectsCotangentThatKeysNoBlockFunction() {
+        // The mirror on the FUNCTION side of the boundary: a cotangent whose (type, id) key matches no
+        // block function is silently dropped, so its term never reaches x-bar and theta-bar is wrong with
+        // no error. This is the exact shape of the resolved-vs-caller id bug (a BUS_VOLTAGE cotangent keyed
+        // by a bus id that no factor carried) -- here it must fail loudly instead. A block over "L1-2-1"
+        // with a cotangent for the absent "L2-3-1" reproduces it.
+        Network network = IeeeCdfNetworkFactory.create14();
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        SensitivityFunctionType ft = SensitivityFunctionType.BRANCH_ACTIVE_POWER_1;
+        SensitivityVariableType vt = SensitivityVariableType.BRANCH_ADMITTANCE;
+        List<AcSensitivityAnalysis.AdjointBlock> blocks =
+                adjointBlocks(List.of(ft), List.of(List.of("L1-2-1")), vt, List.of("L1-2-1"));
+        Map<String, Double> cot = Map.of(
+                AcSensitivityAnalysis.functionCotangentKey(ft, "L1-2-1"), 1.0,   // in the block -> fine
+                AcSensitivityAnalysis.functionCotangentKey(ft, "L2-3-1"), 1.0);  // in NO block -> must throw
+
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+        String variantId = network.getVariantManager().getWorkingVariantId();
+
+        PowsyblException e = assertThrows(PowsyblException.class,
+            () -> analysis.runAdjoint(network, variantId, List.of(), blocks, cot));
+        assertTrue(e.getMessage().contains("L2-3-1"), e.getMessage());
+    }
+
+    @Test
     void buildAdjointFactorsRejectsEmptyDeclarations() {
         // An empty declaration has no meaningful θ̄, and the failure must NAME what is empty: before this
         // guard each case died on an IndexOutOfBoundsException from inside buildAdjointFactors, and an
