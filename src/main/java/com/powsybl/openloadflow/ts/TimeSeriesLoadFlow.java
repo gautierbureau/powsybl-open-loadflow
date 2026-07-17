@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ts;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.iidm.network.ComponentConstants;
+import com.powsybl.iidm.network.HvdcConverterStation;
 import com.powsybl.iidm.network.HvdcLine;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControl;
@@ -38,6 +39,7 @@ import com.powsybl.openloadflow.network.LfLoad;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkParameters;
 import com.powsybl.openloadflow.network.LfTopoConfig;
+import com.powsybl.openloadflow.network.LfVscConverterStation;
 import com.powsybl.openloadflow.network.LfZeroImpedanceNetwork;
 import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.network.NetworkState;
@@ -81,9 +83,10 @@ import java.util.stream.Collectors;
  * <p>The plan is supplied as powsybl-core {@link DoubleTimeSeries}: one series per controllable generator, load or
  * angle-droop HVDC line (its {@link com.powsybl.timeseries.TimeSeriesMetadata#getName() name} is the element id, its
  * values are the per-step active power in MW — a generator's target P, a load's p0, or the AC emulation offset p0 of an
- * HVDC whose flow is {@code p0 + k(theta1 - theta2)}). A fixed-set-point HVDC has no such offset and is planned through
- * its converter stations, which are generators (VSC) or a load (LCC). All series share one {@link TimeSeriesIndex},
- * which defines the number of steps and their instants.
+ * HVDC whose flow is {@code p0 + k(theta1 - theta2)}). A fixed-set-point HVDC has no such offset: a VSC line is planned
+ * by its set point, split across its two converter stations (which are generators); an LCC line, whose stations fold
+ * into a bus load, is not handled yet. All series share one {@link TimeSeriesIndex}, which defines the number of steps
+ * and their instants.
  *
  * <p>A load series carries active power. Its q0 is a separate input the plan does not describe, and by default it is
  * left untouched, which is what makes a step equal to a load flow on a network carrying that p0 — so a load does not
@@ -142,17 +145,19 @@ public final class TimeSeriesLoadFlow {
         if (!unknownElements.isEmpty()) {
             throw new PowsyblException("Unknown generator, load or HVDC id(s) in the plan: " + unknownElements);
         }
-        // an HVDC line can only be planned through its AC emulation offset, so it must have one: an enabled angle-droop
-        // control and AC emulation on. A fixed-set-point line has none, and is planned through its converter stations.
-        List<String> nonDroopHvdc = plan.stream()
+        // An HVDC line is planned either through its AC emulation offset (angle-droop) or, without one, through its
+        // fixed set point. The fixed path handles VSC lines, whose converter stations are generators; LCC stations fold
+        // into a bus load and are not handled yet.
+        List<String> lccHvdc = plan.stream()
                 .map(series -> series.getMetadata().getName())
                 .filter(id -> network.getHvdcLine(id) != null)
                 .filter(id -> !hasSchedulableAcEmulation(network.getHvdcLine(id), parameters.getLoadFlowParameters()))
+                .filter(id -> network.getHvdcLine(id).getConverterStation1().getHvdcType() == HvdcConverterStation.HvdcType.LCC)
                 .sorted()
                 .toList();
-        if (!nonDroopHvdc.isEmpty()) {
-            throw new PowsyblException("HVDC id(s) in the plan without an enabled AC emulation to schedule: " + nonDroopHvdc
-                    + " (plan a fixed-set-point HVDC through its converter stations instead)");
+        if (!lccHvdc.isEmpty()) {
+            throw new PowsyblException("LCC HVDC id(s) in the plan are not supported yet: " + lccHvdc
+                    + " (only angle-droop and fixed-set-point VSC HVDC can be planned)");
         }
         // two series for one element would silently leave the last one applied
         List<String> duplicatedElements = plan.stream()
@@ -185,6 +190,9 @@ public final class TimeSeriesLoadFlow {
 
         // read the plan once, here, before any partition thread exists
         List<PlanSeries> planSeries = readPlan(plan);
+        // resolve the fixed-set-point VSC HVDC lines here too: which station is the rectifier comes from the converters
+        // mode, which is variant state and so must be read on the main thread, before the partition variants diverge
+        Map<String, VscHvdcPlanInfo> vscHvdcInfo = resolveVscHvdcInfo(network, planSeries, parameters.getLoadFlowParameters());
 
         LoadFlowParameters lfParameters = parameters.getLoadFlowParameters();
         MatrixFactory matrixFactory = new SparseMatrixFactory();
@@ -204,11 +212,11 @@ public final class TimeSeriesLoadFlow {
                 network.getVariantManager().setWorkingVariant(workingVariantId);
                 try (LfNetworkList lfNetworks = Networks.loadWithReconnectableElements(network, new LfTopoConfig(),
                         enginePlan.networkParameters(), ReportNode.NO_OP)) {
-                    results = runSteps(lfNetworks, ranges.get(0), enginePlan, planSeries, index, parameters, writer);
+                    results = runSteps(lfNetworks, ranges.get(0), enginePlan, planSeries, vscHvdcInfo, index, parameters, writer);
                 }
             }
         } else {
-            results = runMultiThread(network, workingVariantId, planSeries, index, ranges, parameters,
+            results = runMultiThread(network, workingVariantId, planSeries, vscHvdcInfo, index, ranges, parameters,
                     matrixFactory, connectivityFactory, writerFactory);
         }
 
@@ -217,6 +225,7 @@ public final class TimeSeriesLoadFlow {
     }
 
     private static List<StepResult> runMultiThread(Network network, String workingVariantId, List<PlanSeries> plan,
+                                                   Map<String, VscHvdcPlanInfo> vscHvdcInfo,
                                                    TimeSeriesIndex index, List<int[]> ranges, TimeSeriesLoadFlowParameters parameters,
                                                    MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory,
                                                    NetworkResultWriterFactory writerFactory) {
@@ -241,7 +250,7 @@ public final class TimeSeriesLoadFlow {
             for (PartitionJob job : jobs) {
                 futures.add(CompletableFuture.supplyAsync(() -> {
                     try (NetworkResultWriter writer = writerFactory.create(job.partitionIndex())) {
-                        return runSteps(job.lfNetworks(), job.range(), job.enginePlan(), plan, index, parameters, writer);
+                        return runSteps(job.lfNetworks(), job.range(), job.enginePlan(), plan, vscHvdcInfo, index, parameters, writer);
                     }
                 }, executor));
             }
@@ -275,7 +284,7 @@ public final class TimeSeriesLoadFlow {
     }
 
     private static List<StepResult> runSteps(LfNetworkList lfNetworks, int[] range, EnginePlan enginePlan,
-                                             List<PlanSeries> plan, TimeSeriesIndex index,
+                                             List<PlanSeries> plan, Map<String, VscHvdcPlanInfo> vscHvdcInfo, TimeSeriesIndex index,
                                              TimeSeriesLoadFlowParameters parameters, NetworkResultWriter writer) {
         LoadFlowParameters lfParameters = parameters.getLoadFlowParameters();
         LoadFlowModel loadFlowModel = enginePlan.loadFlowModel();
@@ -287,7 +296,7 @@ public final class TimeSeriesLoadFlow {
         try {
             for (LfNetwork lfNetwork : networks) {
                 StepEngine engine = enginePlan.createEngine(lfNetwork);
-                List<Setpoint> setpoints = resolveSetpoints(lfNetwork, plan, parameters.isKeepLoadPowerFactorConstant());
+                List<Setpoint> setpoints = resolveSetpoints(lfNetwork, plan, vscHvdcInfo, parameters.isKeepLoadPowerFactorConstant());
                 // Snapshot the network as loaded, before anything is solved. Solving mutates far more than the
                 // injection targets it distributes the slack over: outer loops move tap positions and shunt sections,
                 // and switch buses between PV and PQ. Restoring a snapshot taken after a solve would make every step
@@ -364,7 +373,8 @@ public final class TimeSeriesLoadFlow {
      * Binds each plan series to the element it drives in this network. A series naming an element of another connected
      * component resolves to nothing here and is left to the network that does own it.
      */
-    private static List<Setpoint> resolveSetpoints(LfNetwork lfNetwork, List<PlanSeries> plan, boolean keepLoadPowerFactorConstant) {
+    private static List<Setpoint> resolveSetpoints(LfNetwork lfNetwork, List<PlanSeries> plan,
+                                                   Map<String, VscHvdcPlanInfo> vscHvdcInfo, boolean keepLoadPowerFactorConstant) {
         List<Setpoint> setpoints = new ArrayList<>();
         for (PlanSeries series : plan) {
             LfGenerator generator = lfNetwork.getGeneratorById(series.elementId());
@@ -383,13 +393,52 @@ public final class TimeSeriesLoadFlow {
                 setpoints.add(new LoadSetpoint(load, series.elementId(), series.values(), powerFactor));
                 continue;
             }
-            // an angle-droop HVDC line: run() has already rejected any HVDC series with no AC emulation offset to move
+            // an angle-droop HVDC line moves its AC emulation offset p0
             LfHvdc hvdc = lfNetwork.getHvdcById(series.elementId());
             if (hvdc != null && hvdc.getAcEmulationControl() != null) {
                 setpoints.add(new HvdcSetpoint(hvdc, series.values()));
+                continue;
+            }
+            // a fixed-set-point VSC HVDC line, resolved on the main thread (run() rejected the LCC case): the series
+            // value is the line set point, which the two converter stations split between them. They can sit in
+            // different connected components -- an HVDC link is often the only tie between two -- so each station is set
+            // in the network that owns it, independently.
+            VscHvdcPlanInfo info = vscHvdcInfo.get(series.elementId());
+            if (info != null) {
+                LfVscConverterStation rectifier = (LfVscConverterStation) lfNetwork.getGeneratorById(info.rectifierStationId());
+                if (rectifier != null) {
+                    setpoints.add(new VscHvdcStationSetpoint(rectifier, true, info, series.values()));
+                }
+                LfVscConverterStation inverter = (LfVscConverterStation) lfNetwork.getGeneratorById(info.inverterStationId());
+                if (inverter != null) {
+                    setpoints.add(new VscHvdcStationSetpoint(inverter, false, info, series.values()));
+                }
             }
         }
         return setpoints;
+    }
+
+    /**
+     * Resolves, on the main thread, what a plan needs of each fixed-set-point VSC HVDC line that the variant state would
+     * otherwise hide from a partition thread: which converter station is the rectifier (from the converters mode), and
+     * the loss factors, nominal voltage and resistance the station split is computed from. All are structural or
+     * variant state read here, once, so the partition threads only bind the {@code LfVscConverterStation} objects.
+     */
+    private static Map<String, VscHvdcPlanInfo> resolveVscHvdcInfo(Network network, List<PlanSeries> plan, LoadFlowParameters lfParameters) {
+        Map<String, VscHvdcPlanInfo> info = new HashMap<>();
+        for (PlanSeries series : plan) {
+            HvdcLine hvdcLine = network.getHvdcLine(series.elementId());
+            if (hvdcLine == null || hasSchedulableAcEmulation(hvdcLine, lfParameters)
+                    || hvdcLine.getConverterStation1().getHvdcType() != HvdcConverterStation.HvdcType.VSC) {
+                continue;
+            }
+            boolean side1Rectifier = hvdcLine.getConvertersMode() == HvdcLine.ConvertersMode.SIDE_1_RECTIFIER_SIDE_2_INVERTER;
+            HvdcConverterStation<?> rectifier = side1Rectifier ? hvdcLine.getConverterStation1() : hvdcLine.getConverterStation2();
+            HvdcConverterStation<?> inverter = side1Rectifier ? hvdcLine.getConverterStation2() : hvdcLine.getConverterStation1();
+            info.put(series.elementId(), new VscHvdcPlanInfo(rectifier.getId(), inverter.getId(),
+                    rectifier.getLossFactor(), inverter.getLossFactor(), hvdcLine.getNominalV(), hvdcLine.getR()));
+        }
+        return info;
     }
 
     private static void emit(LfNetwork lfNetwork, String stateId, LoadFlowResult.ComponentResult.Status status,
@@ -616,6 +665,39 @@ public final class TimeSeriesLoadFlow {
         @Override
         public void apply(int step, LfNetworkParameters networkParameters) {
             hvdc.getAcEmulationControl().setP0(values.get(step) / PerUnit.SB);
+        }
+    }
+
+    /** The variant and structural state of a fixed-set-point VSC HVDC line, resolved once on the main thread. */
+    private record VscHvdcPlanInfo(String rectifierStationId, String inverterStationId,
+                                   double rectifierLossFactor, double inverterLossFactor, double nominalV, double r) {
+    }
+
+    /**
+     * One converter station of a fixed-set-point VSC HVDC line. The series value is the line's active power set point in
+     * MW. In generator convention the rectifier consumes it ({@code -setpoint}); the inverter delivers it less the
+     * AC/DC and cable losses. The two stations can sit in different connected components, so each is a setpoint of its
+     * own, set in the network that owns it. It is set as a generator target, initial included, so the streamed dispatch
+     * reflects the plan and the state restored between steps is the planned set point, not the built one.
+     */
+    private record VscHvdcStationSetpoint(LfVscConverterStation station, boolean rectifier,
+                                          VscHvdcPlanInfo info, DoubleTimeSeriesValues values) implements Setpoint {
+
+        @Override
+        public void apply(int step, LfNetworkParameters networkParameters) {
+            double setpoint = values.get(step);
+            double targetP = rectifier ? -setpoint : inverterAbsPAc(setpoint);
+            station.setTargetP(targetP / PerUnit.SB);
+            station.setInitialTargetP(targetP / PerUnit.SB);
+            station.reApplyActivePowerControlChecks(networkParameters, null);
+        }
+
+        // The active power the inverter delivers, per HvdcConverterStations.getAbsoluteValueInverterPAc: the set point
+        // less the rectifier's conversion loss, the resistive cable loss, then the inverter's conversion loss.
+        private double inverterAbsPAc(double setpoint) {
+            double rectifierPDc = setpoint * (1 - info.rectifierLossFactor() / 100);
+            double inverterPDc = rectifierPDc - info.r() * rectifierPDc * rectifierPDc / (info.nominalV() * info.nominalV());
+            return inverterPDc * (1 - info.inverterLossFactor() / 100);
         }
     }
 

@@ -708,15 +708,56 @@ class TimeSeriesLoadFlowTest {
                 "two steps at the same p0 must match; the offset is restored between steps");
     }
 
+    /**
+     * The whole contract, for a fixed-set-point VSC HVDC: the series value is the line set point, split between the two
+     * converter stations. Each step must equal a load flow on a network carrying that set point. FourSubstations HVDC1
+     * is VSC with no angle-droop control, so it takes the fixed path.
+     */
     @Test
-    void planningAFixedSetpointHvdcThrows() {
-        // FourSubstations HVDC1 is VSC but carries no angle-droop control, so it has no offset to schedule
-        List<DoubleTimeSeries> hvdcPlan = List.of(TimeSeries.createDouble("HVDC1", index, 10.0, 20.0, 30.0));
+    void fixedVscHvdcStepsMatchIndependentLoadFlow() {
+        double[] setpoints = {10.0, 100.0, 50.0};
+        List<DoubleTimeSeries> hvdcPlan = List.of(TimeSeries.createDouble("HVDC1", index, setpoints));
+        Map<String, StringWriter> csv = new HashMap<>();
+        TimeSeriesLoadFlow.run(FourSubstationsNodeBreakerFactory.create(), hvdcPlan, new TimeSeriesLoadFlowParameters(),
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+
+        Map<String, Double> streamedP1 = new HashMap<>();
+        csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedP1.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+        });
+        // the converter station dispatch is streamed in the generators dataset; targetP is the requested set point
+        Map<String, Double> streamedGenTargetP = new HashMap<>();
+        csv.get("generators").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedGenTargetP.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+        });
+
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        for (int step = 0; step < setpoints.length; step++) {
+            Network ref = FourSubstationsNodeBreakerFactory.create();
+            ref.getHvdcLine("HVDC1").setActivePowerSetpoint(setpoints[step]);
+            assertTrue(runner.run(ref, new LoadFlowParameters()).isFullyConverged());
+            String ts = index.getInstantAt(step).toString();
+            for (Branch<?> branch : ref.getBranches()) {
+                assertEquals(branch.getTerminal1().getP(), streamedP1.get(ts + "|" + branch.getId()), 1e-2,
+                        "p1 mismatch on " + branch.getId() + " at step " + step);
+            }
+            // the rectifier's streamed targetP tracks the plan set point (it consumes it, generator convention: negative)
+            assertEquals(-setpoints[step], streamedGenTargetP.get(ts + "|VSC1"), 1e-2,
+                    "VSC1 targetP must reflect the planned set point at step " + step);
+        }
+    }
+
+    @Test
+    void planningAnLccHvdcThrows() {
+        // FourSubstations HVDC2 is an LCC line, whose stations fold into a bus load: not supported yet
+        List<DoubleTimeSeries> hvdcPlan = List.of(TimeSeries.createDouble("HVDC2", index, 10.0, 20.0, 30.0));
         PowsyblException e = assertThrows(PowsyblException.class,
                 () -> TimeSeriesLoadFlow.run(FourSubstationsNodeBreakerFactory.create(), hvdcPlan,
                         new TimeSeriesLoadFlowParameters(), NetworkResultWriterFactory.NO_OP));
-        assertTrue(e.getMessage().contains("HVDC1"), e.getMessage());
-        assertTrue(e.getMessage().contains("without an enabled AC emulation"), e.getMessage());
+        assertTrue(e.getMessage().contains("HVDC2"), e.getMessage());
+        assertTrue(e.getMessage().contains("LCC HVDC"), e.getMessage());
     }
 
     private static Set<String> readBranchRows(Path datasetDir) throws IOException {
