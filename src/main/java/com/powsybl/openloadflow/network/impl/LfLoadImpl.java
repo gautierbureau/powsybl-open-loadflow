@@ -41,9 +41,11 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
 
     private final HashMap<String, Double> loadsAbsVariableTargetP = new HashMap<>();
 
-    // active power set point of each original load, in per unit: what the load consumes before slack distribution
-    // moves the aggregate around. Everything below that is derived from p0 is rebuilt from this map.
+    // active and reactive power set points of each original load, in per unit: what the load consumes before slack
+    // distribution moves the aggregate around. Everything below derived from p0 or q0 is rebuilt from these.
     private final HashMap<String, Double> loadsP0 = new HashMap<>();
+
+    private final HashMap<String, Double> loadsQ0 = new HashMap<>();
 
     private double absVariableTargetP = 0;
 
@@ -101,7 +103,8 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
         initialTargetP += p0 / PerUnit.SB;
         targetQ += q0 / PerUnit.SB;
         loadsP0.put(load.getId(), p0 / PerUnit.SB);
-        if (needsPowerFactorConstantByLoad(load, p0, distributedOnConformLoad)) {
+        loadsQ0.put(load.getId(), q0 / PerUnit.SB);
+        if (needsPowerFactorConstantByLoad(load, p0, q0, distributedOnConformLoad)) {
             ensurePowerFactorConstantByLoad = true;
         }
         double absTargetP = getAbsVariableTargetPPerUnit(load, distributedOnConformLoad);
@@ -112,7 +115,7 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
     /**
      * A load whose reactive power cannot be rescaled from the aggregated power factor, and needs its own.
      */
-    private static boolean needsPowerFactorConstantByLoad(Load load, double p0, boolean distributedOnConformLoad) {
+    private static boolean needsPowerFactorConstantByLoad(Load load, double p0, double q0, boolean distributedOnConformLoad) {
         boolean hasVariableActivePower = false;
         if (distributedOnConformLoad) {
             LoadDetail loadDetail = load.getExtension(LoadDetail.class);
@@ -120,7 +123,7 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
                 hasVariableActivePower = loadDetail.getFixedActivePower() != p0;
             }
         }
-        boolean reactiveOnlyLoad = p0 == 0 && load.getQ0() != 0;
+        boolean reactiveOnlyLoad = p0 == 0 && q0 != 0;
         return p0 < 0 || hasVariableActivePower || reactiveOnlyLoad;
     }
 
@@ -130,7 +133,8 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
      */
     private void updateEnsurePowerFactorConstantByLoad() {
         ensurePowerFactorConstantByLoad = loadsRefs.entrySet().stream()
-                .anyMatch(e -> needsPowerFactorConstantByLoad(e.getValue().get(), loadsP0.get(e.getKey()) * PerUnit.SB, distributedOnConformLoad));
+                .anyMatch(e -> needsPowerFactorConstantByLoad(e.getValue().get(), loadsP0.get(e.getKey()) * PerUnit.SB,
+                        loadsQ0.get(e.getKey()) * PerUnit.SB, distributedOnConformLoad));
     }
 
     void add(LccConverterStation lccCs, LfNetworkParameters parameters) {
@@ -191,12 +195,43 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
         updateEnsurePowerFactorConstantByLoad();
     }
 
+    @Override
+    public double getOriginalLoadQ0(String originalId) {
+        return getLoadQ0(originalId);
+    }
+
+    @Override
+    public Map<String, Double> getOriginalLoadsQ0() {
+        return Collections.unmodifiableMap(loadsQ0);
+    }
+
+    @Override
+    public void setOriginalLoadQ0(String originalId, double q0) {
+        double oldQ0 = getLoadQ0(originalId);
+        if (q0 == oldQ0) {
+            return;
+        }
+        loadsQ0.put(originalId, q0);
+        // No initial counterpart to keep in step, unlike p0: reactive power has no equivalent of the initial target the
+        // active power distribution measures its own movement against.
+        setTargetQ(targetQ + q0 - oldQ0);
+        updateEnsurePowerFactorConstantByLoad();
+    }
+
     private double getLoadP0(String originalId) {
-        Double p0 = loadsP0.get(originalId);
-        if (p0 == null) {
+        return get(loadsP0, originalId);
+    }
+
+    private double getLoadQ0(String originalId) {
+        return get(loadsQ0, originalId);
+    }
+
+    private double get(Map<String, Double> setPoints, String originalId) {
+        Double value = setPoints.get(originalId);
+        if (value == null) {
             throw new PowsyblException("Load '" + originalId + "' is not an original load of '" + getId() + "'");
         }
-        return p0;
+        return value;
     }
 
     @Override
@@ -305,7 +340,7 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
         double newLoadTargetQ = 0;
         for (Ref<Load> refLoad : loadsRefs.values()) {
             Load load = refLoad.get();
-            double updatedQ0 = load.getQ0() / PerUnit.SB + getPowerFactor(load) * diffTargetP * getParticipationFactor(load.getId());
+            double updatedQ0 = getLoadQ0(load.getId()) + getPowerFactor(load) * diffTargetP * getParticipationFactor(load.getId());
             newLoadTargetQ += updatedQ0;
         }
         return newLoadTargetQ;
@@ -332,13 +367,13 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
     }
 
     /**
-     * Taken from the set point this load carries rather than from the IIDM one, so that it stays the power factor of
-     * the load as simulated once the two have been made to differ by {@link #setOriginalLoadP0}. They are equal for a
-     * load that has only ever been built and solved.
+     * Taken from the set points this load carries rather than from the IIDM ones, so that it stays the power factor of
+     * the load as simulated once the two have been made to differ by {@link #setOriginalLoadP0} or
+     * {@link #setOriginalLoadQ0}. They are equal for a load that has only ever been built and solved.
      */
     private double getPowerFactor(Load load) {
-        double p0 = getLoadP0(load.getId()) * PerUnit.SB;
-        return p0 != 0 ? load.getQ0() / p0 : 1;
+        double p0 = getLoadP0(load.getId());
+        return p0 != 0 ? getLoadQ0(load.getId()) / p0 : 1;
     }
 
     /**

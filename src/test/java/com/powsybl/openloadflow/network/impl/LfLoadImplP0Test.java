@@ -67,6 +67,7 @@ class LfLoadImplP0Test {
 
     private static void assertEquivalent(LfLoad expected, LfLoad actual) {
         assertEquals(expected.getOriginalLoadsP0(), actual.getOriginalLoadsP0(), "original loads p0");
+        assertEquals(expected.getOriginalLoadsQ0(), actual.getOriginalLoadsQ0(), "original loads q0");
         assertEquals(expected.getTargetP(), actual.getTargetP(), TOLERANCE, "targetP");
         assertEquals(expected.getInitialTargetP(), actual.getInitialTargetP(), TOLERANCE, "initialTargetP");
         assertEquals(expected.getTargetQ(), actual.getTargetQ(), TOLERANCE, "targetQ");
@@ -156,6 +157,76 @@ class LfLoadImplP0Test {
 
         LfNetwork reference = build(twoLoadsOnOneBus(), false);
         assertEquivalent(reference.getLoadById("LOAD"), load);
+    }
+
+    @Test
+    void movingQ0MatchesANetworkBuiltWithIt() {
+        double newQ0 = 350;
+
+        LfNetwork subject = build(twoLoadsOnOneBus(), false);
+        subject.getLoadById("LOAD").setOriginalLoadQ0("LOAD", newQ0 / PerUnit.SB);
+
+        Network referenceNetwork = twoLoadsOnOneBus();
+        referenceNetwork.getLoad("LOAD").setQ0(newQ0);
+        LfNetwork reference = build(referenceNetwork, false);
+
+        assertEquivalent(reference.getLoadById("LOAD"), subject.getLoadById("LOAD"));
+        assertEquals(4.0, subject.getLoadById("LOAD").getTargetQ(), TOLERANCE, "350 MVar + 50 MVar");
+    }
+
+    /**
+     * Moving both is the shape a plan that keeps a load's power factor takes.
+     */
+    @Test
+    void movingP0AndQ0TogetherMatchesANetworkBuiltWithThem() {
+        LfNetwork subject = build(twoLoadsOnOneBus(), false);
+        LfLoad load = subject.getLoadById("LOAD");
+        // 600 MW / 200 MVar scaled by 4/3, so the power factor is unchanged
+        load.setOriginalLoadP0("LOAD", 800 / PerUnit.SB);
+        load.setOriginalLoadQ0("LOAD", 800.0 / 600.0 * 200 / PerUnit.SB);
+
+        Network referenceNetwork = twoLoadsOnOneBus();
+        referenceNetwork.getLoad("LOAD").setP0(800);
+        referenceNetwork.getLoad("LOAD").setQ0(800.0 / 600.0 * 200);
+        LfNetwork reference = build(referenceNetwork, false);
+
+        assertEquivalent(reference.getLoadById("LOAD"), load);
+    }
+
+    /**
+     * A load with no active power and some reactive power needs its own power factor. The flag has to follow q0 as
+     * well as p0, and back off again.
+     */
+    @Test
+    void powerFactorConstantByLoadFollowsQ0() {
+        LfNetwork subject = build(twoLoadsOnOneBus(), false);
+        LfLoad load = subject.getLoadById("LOAD");
+        load.setOriginalLoadP0("LOAD", 0.0);
+        assertTrue(load.ensurePowerFactorConstantByLoad(), "no active power but 200 MVar of reactive");
+
+        load.setOriginalLoadQ0("LOAD", 0.0);
+        assertFalse(load.ensurePowerFactorConstantByLoad(), "neither active nor reactive power is not the same case");
+    }
+
+    @Test
+    void restoreUndoesAQ0Change() {
+        LfNetwork subject = build(twoLoadsOnOneBus(), false);
+        LfLoad load = subject.getLoadById("LOAD");
+        NetworkState state = NetworkState.save(subject);
+
+        load.setOriginalLoadQ0("LOAD", 350 / PerUnit.SB);
+        state.restore();
+
+        LfNetwork reference = build(twoLoadsOnOneBus(), false);
+        assertEquivalent(reference.getLoadById("LOAD"), load);
+    }
+
+    @Test
+    void movingQ0OfAnUnknownLoadThrows() {
+        LfNetwork subject = build(twoLoadsOnOneBus(), false);
+        LfLoad load = subject.getLoadById("LOAD");
+        PowsyblException e = assertThrows(PowsyblException.class, () -> load.setOriginalLoadQ0("UNKNOWN", 1.0));
+        assertTrue(e.getMessage().contains("UNKNOWN"), e.getMessage());
     }
 
     @Test

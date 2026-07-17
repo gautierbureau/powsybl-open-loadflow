@@ -58,6 +58,27 @@ public interface LfLoad extends PropertyBag {
      */
     void setOriginalLoadP0(String originalId, double p0);
 
+    /**
+     * Returns the reactive power set point of one of the original loads aggregated in this load, in per unit.
+     */
+    double getOriginalLoadQ0(String originalId);
+
+    /**
+     * Returns the reactive power set point of every original load aggregated in this load, in per unit, by load id.
+     * Original loads that are not IIDM loads, such as LCC converter stations, are not part of it.
+     */
+    Map<String, Double> getOriginalLoadsQ0();
+
+    /**
+     * Sets the reactive power set point of one of the original loads aggregated in this load, in per unit, and updates
+     * everything this load derives from that set point, so that it stays equivalent to a load built from a network
+     * carrying it.
+     *
+     * <p>The counterpart of {@link #setOriginalLoadP0} for reactive power, and not {@link #setTargetQ(double)} on one
+     * load, which rescales the aggregate around its set points rather than changing them.
+     */
+    void setOriginalLoadQ0(String originalId, double q0);
+
     double getTargetQ();
 
     void setTargetQ(double targetQ);
