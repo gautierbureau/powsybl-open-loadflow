@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.sensi;
 
+import com.powsybl.commons.PowsyblException;
 import com.powsybl.contingency.ContingencyContext;
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Generator;
@@ -32,6 +33,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -572,5 +574,31 @@ class AcSensitivityAnalysisAdjointTest {
             assertEquals(thetaFull.get(v), thetaBlocks.get(v), 1e-13 * Math.abs(thetaFull.get(v)) + 1e-14,
                     "structured blocks runAdjoint must match the full cross product for " + v);
         }
+    }
+
+    @Test
+    void buildAdjointFactorsRejectsEmptyDeclarations() {
+        // An empty declaration has no meaningful θ̄, and the failure must NAME what is empty: before this
+        // guard each case died on an IndexOutOfBoundsException from inside buildAdjointFactors, and an
+        // empty θ̄ returned quietly would have read as "none of your levers can help".
+        Network network = IeeeCdfNetworkFactory.create14();
+        SensitivityFunctionType ft = SensitivityFunctionType.BRANCH_ACTIVE_POWER_1;
+        SensitivityVariableType vt = SensitivityVariableType.BRANCH_ADMITTANCE;
+        List<String> functions = List.of("L1-2-1");
+        List<String> variables = List.of("L2-3-1");
+
+        PowsyblException noBlocks = assertThrows(PowsyblException.class,
+            () -> AcSensitivityAnalysis.buildAdjointFactors(network, List.of()));
+        assertTrue(noBlocks.getMessage().contains("at least one AdjointBlock"), noBlocks.getMessage());
+
+        PowsyblException noFunctions = assertThrows(PowsyblException.class,
+            () -> AcSensitivityAnalysis.buildAdjointFactors(network,
+                    adjointBlocks(List.of(ft), List.of(List.of()), vt, variables)));
+        assertTrue(noFunctions.getMessage().contains("no monitored function"), noFunctions.getMessage());
+
+        PowsyblException noVariables = assertThrows(PowsyblException.class,
+            () -> AcSensitivityAnalysis.buildAdjointFactors(network,
+                    adjointBlocks(List.of(ft), List.of(functions), vt, List.of())));
+        assertTrue(noVariables.getMessage().contains("no variable"), noVariables.getMessage());
     }
 }

@@ -519,6 +519,29 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      * to live in the pypowsybl caller; owning it here keeps it under the OLF equivalence gates.
      */
     static List<SensitivityFactor> buildAdjointFactors(Network network, List<AdjointBlock> blocks) {
+        // Reject an empty declaration rather than index into it. Each of these is a caller error with no
+        // meaningful answer — a VJP with no function has no cotangent to propagate, and one with no
+        // variable has no θ̄ to return — and the alternative to naming it is an IndexOutOfBoundsException
+        // thrown from the middle of this method (blocks.get(0) / functionIds().get(0) / variables().get(0)),
+        // which says nothing about which block was empty. An empty θ̄ returned quietly would be worse
+        // still: it reads exactly like "none of your levers can help".
+        if (blocks.isEmpty()) {
+            throw new PowsyblException("runAdjoint needs at least one AdjointBlock: with no monitored "
+                    + "function there is no cotangent to propagate and no gradient to return.");
+        }
+        for (AdjointBlock block : blocks) {
+            if (block.functionIds().isEmpty()) {
+                throw new PowsyblException("AdjointBlock for function type " + block.functionType()
+                        + " declares no monitored function; a block exists to say which functions to "
+                        + "differentiate, so an empty one cannot contribute to x̄ nor anchor a θ̄ group.");
+            }
+            if (block.variables().isEmpty()) {
+                throw new PowsyblException("AdjointBlock for function type " + block.functionType()
+                        + " declares no variable to differentiate against; θ̄ = Sᵀ·ȳ would be empty. "
+                        + "Skip the runAdjoint call instead when a lever family is empty.");
+            }
+        }
+
         List<SensitivityFactor> factors = new ArrayList<>();
         Set<String> emittedPairs = new HashSet<>();       // functionType|resolvedFunctionId|variableId
         Set<String> variablesWithGroup = new HashSet<>();
