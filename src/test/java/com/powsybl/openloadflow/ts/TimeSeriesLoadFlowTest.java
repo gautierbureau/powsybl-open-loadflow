@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ts;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.iidm.network.Branch;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.extensions.LoadDetailAdder;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
 import com.powsybl.iidm.network.test.FourSubstationsNodeBreakerFactory;
 import com.powsybl.loadflow.LoadFlow;
@@ -392,6 +393,90 @@ class TimeSeriesLoadFlowTest {
             for (Branch<?> branch : ref.getBranches()) {
                 assertEquals(branch.getTerminal1().getP(), streamedP1.get(ts + "|" + branch.getId()), 1e-2,
                         "p1 mismatch on " + branch.getId() + " at step " + step);
+            }
+        }
+    }
+
+    /**
+     * The same conform loads, with the fixed/variable split a LoadDetail describes. A plan moves p0 and nothing else,
+     * so fixed + variable no longer add up to p0 -- which is what a grid model whose p0 was set and whose LoadDetail
+     * was not looks like, and is exactly what the reference run below is built as.
+     */
+    private static Network networkWithTwoConformLoadBuses() {
+        Network network = networkWithTwoLoadBuses();
+        network.getLoad("LOAD").newExtension(LoadDetailAdder.class)
+                .withFixedActivePower(400).withVariableActivePower(200)
+                .withFixedReactivePower(150).withVariableReactivePower(50)
+                .add();
+        network.getLoad("LOAD2").newExtension(LoadDetailAdder.class)
+                .withFixedActivePower(150).withVariableActivePower(50)
+                .withFixedReactivePower(40).withVariableReactivePower(20)
+                .add();
+        return network;
+    }
+
+    /**
+     * The mode where slack participation must <b>not</b> follow p0: on conform load it comes from the LoadDetail
+     * variable active power, which the plan does not touch. Recomputing it from p0 here would be as wrong as never
+     * recomputing it in PROPORTIONAL_TO_LOAD, and only a reference run can tell.
+     */
+    @Test
+    void loadStepsMatchIndependentLoadFlowWhenSlackIsDistributedOnConformLoad() {
+        double[] p0s = {600.0, 1200.0, 300.0};
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", index, p0s));
+        TimeSeriesLoadFlowParameters parameters = new TimeSeriesLoadFlowParameters();
+        parameters.getLoadFlowParameters().setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD);
+        Map<String, StringWriter> csv = new HashMap<>();
+        TimeSeriesLoadFlow.run(networkWithTwoConformLoadBuses(), loadPlan, parameters,
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+
+        Map<String, Double> streamedP1 = new HashMap<>();
+        csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedP1.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+        });
+
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        for (int step = 0; step < p0s.length; step++) {
+            Network ref = networkWithTwoConformLoadBuses();
+            ref.getLoad("LOAD").setP0(p0s[step]);
+            assertTrue(runner.run(ref, new LoadFlowParameters()
+                    .setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD)).isFullyConverged());
+            String ts = index.getInstantAt(step).toString();
+            for (Branch<?> branch : ref.getBranches()) {
+                assertEquals(branch.getTerminal1().getP(), streamedP1.get(ts + "|" + branch.getId()), 1e-2,
+                        "p1 mismatch on " + branch.getId() + " at step " + step);
+            }
+        }
+    }
+
+    @Test
+    void dcLoadStepsMatchIndependentDcLoadFlow() {
+        double[] p0s = {600.0, 1200.0, 300.0};
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", index, p0s));
+        TimeSeriesLoadFlowParameters parameters = new TimeSeriesLoadFlowParameters();
+        parameters.getLoadFlowParameters().setDc(true)
+                .setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD);
+        Map<String, StringWriter> csv = new HashMap<>();
+        TimeSeriesLoadFlow.run(networkWithTwoLoadBuses(), loadPlan, parameters,
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+
+        Map<String, Double> streamedP1 = new HashMap<>();
+        csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedP1.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+        });
+
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        for (int step = 0; step < p0s.length; step++) {
+            Network ref = networkWithTwoLoadBuses();
+            ref.getLoad("LOAD").setP0(p0s[step]);
+            assertTrue(runner.run(ref, new LoadFlowParameters().setDc(true)
+                    .setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD)).isFullyConverged());
+            String ts = index.getInstantAt(step).toString();
+            for (Branch<?> branch : ref.getBranches()) {
+                assertEquals(branch.getTerminal1().getP(), streamedP1.get(ts + "|" + branch.getId()), 1e-2,
+                        "DC p1 mismatch on " + branch.getId() + " at step " + step);
             }
         }
     }
