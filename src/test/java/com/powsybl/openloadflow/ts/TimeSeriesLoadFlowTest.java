@@ -481,6 +481,97 @@ class TimeSeriesLoadFlowTest {
         }
     }
 
+    /**
+     * With the option on, a step must equal a load flow on a network carrying both this step's p0 and the q0 that keeps
+     * the load's power factor -- the same contract as everything else here, over two values instead of one.
+     */
+    @Test
+    void loadStepsKeepingPowerFactorMatchIndependentLoadFlow() {
+        // 1200 MW converges with q0 left at 200 MVar but collapses once q0 follows it to 400, so this stops at 1000
+        double[] p0s = {600.0, 1000.0, 300.0};
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", index, p0s));
+        TimeSeriesLoadFlowParameters parameters = new TimeSeriesLoadFlowParameters().setKeepLoadPowerFactorConstant(true);
+        Map<String, StringWriter> csv = new HashMap<>();
+        TimeSeriesLoadFlow.run(networkWithTwoLoadBuses(), loadPlan, parameters,
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+
+        Map<String, Double> streamedP1 = new HashMap<>();
+        Map<String, Double> streamedQ1 = new HashMap<>();
+        csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedP1.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+            streamedQ1.put(c[0] + "|" + c[3], Double.parseDouble(c[5]));
+        });
+
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        for (int step = 0; step < p0s.length; step++) {
+            Network ref = networkWithTwoLoadBuses();
+            // LOAD is 600 MW / 200 MVar as built, so keeping its power factor means q0 = p0 / 3
+            ref.getLoad("LOAD").setP0(p0s[step]).setQ0(p0s[step] / 600.0 * 200.0);
+            assertTrue(runner.run(ref, new LoadFlowParameters()).isFullyConverged());
+            String ts = index.getInstantAt(step).toString();
+            for (Branch<?> branch : ref.getBranches()) {
+                assertEquals(branch.getTerminal1().getP(), streamedP1.get(ts + "|" + branch.getId()), 1e-2,
+                        "p1 mismatch on " + branch.getId() + " at step " + step);
+                assertEquals(branch.getTerminal1().getQ(), streamedQ1.get(ts + "|" + branch.getId()), 1e-2,
+                        "q1 mismatch on " + branch.getId() + " at step " + step);
+            }
+        }
+    }
+
+    /**
+     * The option is what makes reactive power move. Without it the same plan must leave q0 where the grid model put it,
+     * which is the difference the two tests exist to hold apart.
+     */
+    @Test
+    void keepingPowerFactorIsWhatMovesReactivePower() {
+        double[] p0s = {600.0, 1000.0, 300.0};
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", index, p0s));
+
+        Map<String, StringWriter> scaled = new HashMap<>();
+        TimeSeriesLoadFlow.run(networkWithTwoLoadBuses(), loadPlan,
+                new TimeSeriesLoadFlowParameters().setKeepLoadPowerFactorConstant(true),
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(scaled)));
+
+        Map<String, StringWriter> untouched = new HashMap<>();
+        TimeSeriesLoadFlow.run(networkWithTwoLoadBuses(), loadPlan, new TimeSeriesLoadFlowParameters(),
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(untouched)));
+
+        Function<Map<String, StringWriter>, Map<String, Double>> q1Of = csv -> {
+            Map<String, Double> q1 = new HashMap<>();
+            csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+                String[] c = line.split(";");
+                q1.put(c[0] + "|" + c[3], Double.parseDouble(c[5]));
+            });
+            return q1;
+        };
+        Map<String, Double> scaledQ1 = q1Of.apply(scaled);
+        Map<String, Double> untouchedQ1 = q1Of.apply(untouched);
+
+        // step 0 replays the load as built, so the option has nothing to change there
+        String step0 = index.getInstantAt(0).toString();
+        assertEquals(untouchedQ1.get(step0 + "|NHV2_NLOAD"), scaledQ1.get(step0 + "|NHV2_NLOAD"), 1e-2,
+                "at the as-built p0 there is no scaling to do");
+        // at 1000 MW q0 follows from 200 to 333 MVar, and the flow to the load bus has to show it
+        String step1 = index.getInstantAt(1).toString();
+        assertTrue(Math.abs(scaledQ1.get(step1 + "|NHV2_NLOAD") - untouchedQ1.get(step1 + "|NHV2_NLOAD")) > 100.0,
+                () -> "expected the option to move q1 at step 1, got " + scaledQ1.get(step1 + "|NHV2_NLOAD")
+                        + " against " + untouchedQ1.get(step1 + "|NHV2_NLOAD"));
+    }
+
+    @Test
+    void keepingPowerFactorOfAZeroP0LoadThrows() {
+        Network network = networkWithTwoLoadBuses();
+        network.getLoad("LOAD").setP0(0).setQ0(50);
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", index, 600.0, 800.0, 400.0));
+        PowsyblException e = assertThrows(PowsyblException.class,
+                () -> TimeSeriesLoadFlow.run(network, loadPlan,
+                        new TimeSeriesLoadFlowParameters().setKeepLoadPowerFactorConstant(true),
+                        NetworkResultWriterFactory.NO_OP));
+        assertTrue(e.getMessage().contains("zero p0"), e.getMessage());
+        assertTrue(e.getMessage().contains("LOAD"), e.getMessage());
+    }
+
     @Test
     void generatorAndLoadCanBePlannedTogether() {
         List<DoubleTimeSeries> mixedPlan = List.of(TimeSeries.createDouble("GEN", index, targets),

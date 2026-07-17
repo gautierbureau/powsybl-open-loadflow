@@ -80,9 +80,11 @@ import java.util.stream.Collectors;
  * active power in MW — a generator's target P, or a load's p0). All series share one {@link TimeSeriesIndex}, which
  * defines the number of steps and their instants.
  *
- * <p>A load series carries active power only. Its q0 is a separate input the plan does not describe, and it is left
- * untouched, which is what makes a step equal to a load flow on a network carrying that p0. A load therefore does not
- * hold its power factor across steps.
+ * <p>A load series carries active power. Its q0 is a separate input the plan does not describe, and by default it is
+ * left untouched, which is what makes a step equal to a load flow on a network carrying that p0 — so a load does not
+ * hold its power factor across steps. Set
+ * {@link TimeSeriesLoadFlowParameters#setKeepLoadPowerFactorConstant(boolean)} to have the reactive power follow the
+ * active power instead, at the power factor the load was built with.
  *
  * <p>Because the result set ({@code branches x steps}, plus buses and generators) does not fit in memory for large
  * runs, the per-step results are <b>streamed</b> to a {@link NetworkResultWriter} (CSV or Parquet). Only a compact
@@ -103,8 +105,9 @@ public final class TimeSeriesLoadFlow {
      *
      * @param network       the network (its structure is fixed across all steps)
      * @param plan          the plan: one {@link DoubleTimeSeries} per generator or load (series name = element id,
-     *                      values = per-step active power in MW, a generator's target P or a load's p0, the load's q0
-     *                      being left untouched); all series must share the same time-series index
+     *                      values = per-step active power in MW, a generator's target P or a load's p0; a load's q0
+     *                      follows only under {@link TimeSeriesLoadFlowParameters#setKeepLoadPowerFactorConstant});
+     *                      all series must share the same time-series index
      * @param parameters    the time-series load flow parameters (AC/DC, thread count, which datasets to stream)
      * @param writerFactory builds one {@link NetworkResultWriter} per partition; use
      *                      {@link NetworkResultWriterFactory#NO_OP} to disable streaming
@@ -145,6 +148,18 @@ public final class TimeSeriesLoadFlow {
                 .toList();
         if (!duplicatedElements.isEmpty()) {
             throw new PowsyblException("Duplicated generator or load id(s) in the plan: " + duplicatedElements);
+        }
+        if (parameters.isKeepLoadPowerFactorConstant()) {
+            // q = p * q0/p0 says nothing when p0 is zero. Better to say so than to leave those loads' reactive power
+            // silently behind while every other planned load's follows.
+            List<String> loadsWithoutPowerFactor = plan.stream()
+                    .map(series -> series.getMetadata().getName())
+                    .filter(id -> network.getLoad(id) != null && network.getLoad(id).getP0() == 0)
+                    .sorted()
+                    .toList();
+            if (!loadsWithoutPowerFactor.isEmpty()) {
+                throw new PowsyblException("Cannot keep the power factor of load(s) with a zero p0: " + loadsWithoutPowerFactor);
+            }
         }
 
         if (stepCount == 0) {
@@ -255,7 +270,7 @@ public final class TimeSeriesLoadFlow {
         try {
             for (LfNetwork lfNetwork : networks) {
                 StepEngine engine = enginePlan.createEngine(lfNetwork);
-                List<Setpoint> setpoints = resolveSetpoints(lfNetwork, plan);
+                List<Setpoint> setpoints = resolveSetpoints(lfNetwork, plan, parameters.isKeepLoadPowerFactorConstant());
                 // Snapshot the network as loaded, before anything is solved. Solving mutates far more than the
                 // injection targets it distributes the slack over: outer loops move tap positions and shunt sections,
                 // and switch buses between PV and PQ. Restoring a snapshot taken after a solve would make every step
@@ -319,7 +334,7 @@ public final class TimeSeriesLoadFlow {
      * Binds each plan series to the element it drives in this network. A series naming an element of another connected
      * component resolves to nothing here and is left to the network that does own it.
      */
-    private static List<Setpoint> resolveSetpoints(LfNetwork lfNetwork, List<PlanSeries> plan) {
+    private static List<Setpoint> resolveSetpoints(LfNetwork lfNetwork, List<PlanSeries> plan, boolean keepLoadPowerFactorConstant) {
         List<Setpoint> setpoints = new ArrayList<>();
         for (PlanSeries series : plan) {
             LfGenerator generator = lfNetwork.getGeneratorById(series.elementId());
@@ -330,7 +345,12 @@ public final class TimeSeriesLoadFlow {
             // getLoadById maps an original load id to the aggregate its bus carries, which is the object to set it on
             LfLoad load = lfNetwork.getLoadById(series.elementId());
             if (load != null) {
-                setpoints.add(new LoadSetpoint(load, series.elementId(), series.values()));
+                // read here, before any step has moved them: this is the network as loaded. A zero p0 has no power
+                // factor to take, and run() has already rejected the plan if it asked to keep one.
+                double powerFactor = keepLoadPowerFactorConstant
+                        ? load.getOriginalLoadQ0(series.elementId()) / load.getOriginalLoadP0(series.elementId())
+                        : Double.NaN;
+                setpoints.add(new LoadSetpoint(load, series.elementId(), series.values(), powerFactor));
             }
         }
         return setpoints;
@@ -528,15 +548,24 @@ public final class TimeSeriesLoadFlow {
     }
 
     /**
-     * Only the active power set point moves: q0 is a separate input this plan does not carry, and a step has to stay
-     * equal to a load flow on a network whose p0 is this step's value and whose q0 is untouched. A load therefore does
+     * By default only the active power set point moves: q0 is a separate input this plan does not carry, so a step
+     * stays equal to a load flow on a network whose p0 is this step's value and whose q0 is untouched, and a load does
      * not keep its power factor across steps.
+     *
+     * <p>With {@link TimeSeriesLoadFlowParameters#isKeepLoadPowerFactorConstant()} the reactive power follows, at the
+     * power factor the load was built with: {@code powerFactor} is {@code q0 / p0} as the network was loaded, so a step
+     * equals a load flow on a network carrying both, and it is {@code NaN} when the plan is to leave q0 alone.
      */
-    private record LoadSetpoint(LfLoad load, String originalLoadId, DoubleTimeSeriesValues values) implements Setpoint {
+    private record LoadSetpoint(LfLoad load, String originalLoadId, DoubleTimeSeriesValues values,
+                                double powerFactor) implements Setpoint {
 
         @Override
         public void apply(int step, LfNetworkParameters networkParameters) {
-            load.setOriginalLoadP0(originalLoadId, values.get(step) / PerUnit.SB);
+            double p0 = values.get(step) / PerUnit.SB;
+            load.setOriginalLoadP0(originalLoadId, p0);
+            if (!Double.isNaN(powerFactor)) {
+                load.setOriginalLoadQ0(originalLoadId, p0 * powerFactor);
+            }
         }
     }
 

@@ -132,11 +132,14 @@ The time‑series engine keeps steps 1–3 verbatim, replaces step 4's "apply co
 - **One plan, resolved by id.** A series names a generator *or* a load and carries the same thing
   either way — the element's active power at that step. Equipment ids are unique across a grid model,
   so the engine resolves what a series drives rather than making the caller declare it. *Decided.*
-- **A load series carries active power only.** Its `q0` is a separate input the plan does not
-  describe, and is left untouched. This is what makes a step equal to a load flow on a network
-  carrying that `p0`; the cost is that a load does not hold its power factor across steps. Scaling
-  `q0` with `p0` is a *second input*, and inferring it from the first would bake in an assumption the
-  plan never stated — worth having as an option, in its own change (§6). *Decided.*
+- **A load series carries active power; reactive power follows only if asked.** By default `q0` is a
+  separate input the plan does not describe and is left untouched, which is what makes a step equal to
+  a load flow on a network carrying that `p0` — the cost being that a load does not hold its power
+  factor across steps. `setKeepLoadPowerFactorConstant(true)` applies `q = p × q0/p0`, both taken as
+  the network was loaded, and the contract is unchanged: the step then equals a load flow on a network
+  carrying **both** values. Off by default, because inferring the second input from the first is an
+  assumption the plan never stated. A planned load whose `p0` is zero has no power factor to keep and
+  is rejected rather than silently left behind. *Decided.*
 
 ## 6. Input — the production plan as time series
 
@@ -165,6 +168,14 @@ no relative/absolute per‑series flag, and it is not an omission:
   partitioned across threads and executed in arbitrary order, each restored to the base snapshot
   first. There is no "previous step" to be relative to. Any shift means "shift from the as‑built
   value".
+
+**Reactive power.** A load series describes active power. Under
+`TimeSeriesLoadFlowParameters.setKeepLoadPowerFactorConstant(true)` the reactive power follows it at
+the power factor the load was built with (`q = p × q0/p0`, both as loaded), through
+`LfLoad.setOriginalLoadQ0` — the `q0` mirror of the `p0` operation below, and needed for the same
+reason: `q0` has derived state of its own (the power factor is `q0/p0`, and a load with no active
+power and some reactive power needs its own), so shifting the aggregate's `targetQ` cannot express
+"this load now consumes something else" any more than shifting `targetP` could.
 
 **Applying a step** reuses the existing primitive for generators —
 `LfGenerator.setTargetP(newP)` + `setInitialTargetP(newP)` + `reApplyActivePowerControlChecks(...)`,
