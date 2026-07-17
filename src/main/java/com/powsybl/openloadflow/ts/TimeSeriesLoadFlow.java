@@ -31,6 +31,7 @@ import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
+import com.powsybl.openloadflow.network.LfLoad;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkParameters;
 import com.powsybl.openloadflow.network.LfTopoConfig;
@@ -62,22 +63,28 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
- * Time-series (multi-step) load flow: solves the <b>same</b> network many times, changing only the active-power targets
- * of generators from one step to the next (the "generation plan"). The network structure — buses, branches, switches,
- * controls — is fixed, so each step is a cheap re-solve on a persistent load flow context (the equation system, the
- * Jacobian structure and, in DC, the factorization are built once and only the target vector changes), exactly like a
+ * Time-series (multi-step) load flow: solves the <b>same</b> network many times, changing only the active power of its
+ * injections from one step to the next (the "plan"). The network structure — buses, branches, switches, controls — is
+ * fixed, so each step is a cheap re-solve on a persistent load flow context (the equation system, the Jacobian
+ * structure and, in DC, the factorization are built once and only the target vector changes), exactly like a
  * security-analysis post-contingency re-solve minus the topology change.
  *
- * <p>Each step is <b>independent</b>: the network is restored to its as-loaded state before the step's targets are
+ * <p>Each step is <b>independent</b>: the network is restored to its as-loaded state before the step's values are
  * applied, and the step is then solved with the full outer loop configuration of the supplied
  * {@link LoadFlowParameters}. A step therefore yields the same result as running a classical
- * {@link com.powsybl.loadflow.LoadFlow} on the network with that step's generator targets, and results do not depend on
- * the order the steps are solved in nor on how they are partitioned across threads.
+ * {@link com.powsybl.loadflow.LoadFlow} on the network carrying that step's values, and results do not depend on the
+ * order the steps are solved in nor on how they are partitioned across threads.
  *
- * <p>The generation plan is supplied as powsybl-core {@link DoubleTimeSeries}: one series per controllable generator
- * (its {@link com.powsybl.timeseries.TimeSeriesMetadata#getName() name} is the generator id, its values are the
- * per-step active-power targets in MW). All series share one {@link TimeSeriesIndex}, which defines the number of steps
- * and their instants.
+ * <p>The plan is supplied as powsybl-core {@link DoubleTimeSeries}: one series per controllable generator or load (its
+ * {@link com.powsybl.timeseries.TimeSeriesMetadata#getName() name} is the element id, its values are the per-step
+ * active power in MW — a generator's target P, or a load's p0). All series share one {@link TimeSeriesIndex}, which
+ * defines the number of steps and their instants.
+ *
+ * <p>A load series carries active power. Its q0 is a separate input the plan does not describe, and by default it is
+ * left untouched, which is what makes a step equal to a load flow on a network carrying that p0 — so a load does not
+ * hold its power factor across steps. Set
+ * {@link TimeSeriesLoadFlowParameters#setKeepLoadPowerFactorConstant(boolean)} to have the reactive power follow the
+ * active power instead, at the power factor the load was built with.
  *
  * <p>Because the result set ({@code branches x steps}, plus buses and generators) does not fit in memory for large
  * runs, the per-step results are <b>streamed</b> to a {@link NetworkResultWriter} (CSV or Parquet). Only a compact
@@ -97,8 +104,10 @@ public final class TimeSeriesLoadFlow {
      * Run a time-series load flow.
      *
      * @param network       the network (its structure is fixed across all steps)
-     * @param plan          the generation plan: one {@link DoubleTimeSeries} per generator (series name = generator id,
-     *                      values = per-step active-power targets in MW); all series must share the same time-series index
+     * @param plan          the plan: one {@link DoubleTimeSeries} per generator or load (series name = element id,
+     *                      values = per-step active power in MW, a generator's target P or a load's p0; a load's q0
+     *                      follows only under {@link TimeSeriesLoadFlowParameters#setKeepLoadPowerFactorConstant});
+     *                      all series must share the same time-series index
      * @param parameters    the time-series load flow parameters (AC/DC, thread count, which datasets to stream)
      * @param writerFactory builds one {@link NetworkResultWriter} per partition; use
      *                      {@link NetworkResultWriterFactory#NO_OP} to disable streaming
@@ -111,25 +120,25 @@ public final class TimeSeriesLoadFlow {
         Objects.requireNonNull(parameters, "parameters");
         Objects.requireNonNull(writerFactory, "writerFactory");
         if (plan.isEmpty()) {
-            throw new PowsyblException("Time-series load flow requires at least one generation plan series");
+            throw new PowsyblException("Time-series load flow requires at least one plan series");
         }
 
         TimeSeriesIndex index = plan.get(0).getMetadata().getIndex();
         int stepCount = index.getPointCount();
         for (DoubleTimeSeries series : plan) {
             if (series.getMetadata().getIndex().getPointCount() != stepCount) {
-                throw new PowsyblException("All generation plan series must share the same time-series index length");
+                throw new PowsyblException("All plan series must share the same time-series index length");
             }
         }
-        List<String> unknownGenerators = plan.stream()
+        List<String> unknownElements = plan.stream()
                 .map(series -> series.getMetadata().getName())
-                .filter(id -> network.getGenerator(id) == null)
+                .filter(id -> network.getGenerator(id) == null && network.getLoad(id) == null)
                 .toList();
-        if (!unknownGenerators.isEmpty()) {
-            throw new PowsyblException("Unknown generator id(s) in the generation plan: " + unknownGenerators);
+        if (!unknownElements.isEmpty()) {
+            throw new PowsyblException("Unknown generator or load id(s) in the plan: " + unknownElements);
         }
-        // two series for one generator would silently leave the last one applied
-        List<String> duplicatedGenerators = plan.stream()
+        // two series for one element would silently leave the last one applied
+        List<String> duplicatedElements = plan.stream()
                 .map(series -> series.getMetadata().getName())
                 .collect(Collectors.groupingBy(Function.identity(), Collectors.counting()))
                 .entrySet().stream()
@@ -137,8 +146,20 @@ public final class TimeSeriesLoadFlow {
                 .map(Map.Entry::getKey)
                 .sorted()
                 .toList();
-        if (!duplicatedGenerators.isEmpty()) {
-            throw new PowsyblException("Duplicated generator id(s) in the generation plan: " + duplicatedGenerators);
+        if (!duplicatedElements.isEmpty()) {
+            throw new PowsyblException("Duplicated generator or load id(s) in the plan: " + duplicatedElements);
+        }
+        if (parameters.isKeepLoadPowerFactorConstant()) {
+            // q = p * q0/p0 says nothing when p0 is zero. Better to say so than to leave those loads' reactive power
+            // silently behind while every other planned load's follows.
+            List<String> loadsWithoutPowerFactor = plan.stream()
+                    .map(series -> series.getMetadata().getName())
+                    .filter(id -> network.getLoad(id) != null && network.getLoad(id).getP0() == 0)
+                    .sorted()
+                    .toList();
+            if (!loadsWithoutPowerFactor.isEmpty()) {
+                throw new PowsyblException("Cannot keep the power factor of load(s) with a zero p0: " + loadsWithoutPowerFactor);
+            }
         }
 
         if (stepCount == 0) {
@@ -249,9 +270,9 @@ public final class TimeSeriesLoadFlow {
         try {
             for (LfNetwork lfNetwork : networks) {
                 StepEngine engine = enginePlan.createEngine(lfNetwork);
-                List<GeneratorSetpoint> setpoints = resolveSetpoints(lfNetwork, plan);
+                List<Setpoint> setpoints = resolveSetpoints(lfNetwork, plan, parameters.isKeepLoadPowerFactorConstant());
                 // Snapshot the network as loaded, before anything is solved. Solving mutates far more than the
-                // generator targets it distributes the slack over: outer loops move tap positions and shunt sections,
+                // injection targets it distributes the slack over: outer loops move tap positions and shunt sections,
                 // and switch buses between PV and PQ. Restoring a snapshot taken after a solve would make every step
                 // start from that solve's control state instead of the network's own, so a step would no longer equal
                 // an independent load flow run. There is nothing to warm-start from either: the solver initializes its
@@ -303,22 +324,33 @@ public final class TimeSeriesLoadFlow {
                 .toList();
     }
 
-    private static void applySetpoints(List<GeneratorSetpoint> setpoints, int step, LfNetworkParameters networkParameters) {
-        for (GeneratorSetpoint setpoint : setpoints) {
-            double targetP = setpoint.values().get(step) / PerUnit.SB;
-            LfGenerator generator = setpoint.generator();
-            generator.setTargetP(targetP);
-            generator.setInitialTargetP(targetP);
-            generator.reApplyActivePowerControlChecks(networkParameters, null);
+    private static void applySetpoints(List<Setpoint> setpoints, int step, LfNetworkParameters networkParameters) {
+        for (Setpoint setpoint : setpoints) {
+            setpoint.apply(step, networkParameters);
         }
     }
 
-    private static List<GeneratorSetpoint> resolveSetpoints(LfNetwork lfNetwork, List<PlanSeries> plan) {
-        List<GeneratorSetpoint> setpoints = new ArrayList<>();
+    /**
+     * Binds each plan series to the element it drives in this network. A series naming an element of another connected
+     * component resolves to nothing here and is left to the network that does own it.
+     */
+    private static List<Setpoint> resolveSetpoints(LfNetwork lfNetwork, List<PlanSeries> plan, boolean keepLoadPowerFactorConstant) {
+        List<Setpoint> setpoints = new ArrayList<>();
         for (PlanSeries series : plan) {
-            LfGenerator generator = lfNetwork.getGeneratorById(series.generatorId());
+            LfGenerator generator = lfNetwork.getGeneratorById(series.elementId());
             if (generator != null) {
                 setpoints.add(new GeneratorSetpoint(generator, series.values()));
+                continue;
+            }
+            // getLoadById maps an original load id to the aggregate its bus carries, which is the object to set it on
+            LfLoad load = lfNetwork.getLoadById(series.elementId());
+            if (load != null) {
+                // read here, before any step has moved them: this is the network as loaded. A zero p0 has no power
+                // factor to take, and run() has already rejected the plan if it asked to keep one.
+                double powerFactor = keepLoadPowerFactorConstant
+                        ? load.getOriginalLoadQ0(series.elementId()) / load.getOriginalLoadP0(series.elementId())
+                        : Double.NaN;
+                setpoints.add(new LoadSetpoint(load, series.elementId(), series.values(), powerFactor));
             }
         }
         return setpoints;
@@ -495,14 +527,49 @@ public final class TimeSeriesLoadFlow {
                                double distributedActivePower) {
     }
 
-    /** One plan series, read once: the generator it targets and its per-step values. */
-    private record PlanSeries(String generatorId, DoubleTimeSeriesValues values) {
+    /** One plan series, read once: the element it targets and its per-step values. */
+    private record PlanSeries(String elementId, DoubleTimeSeriesValues values) {
     }
 
-    private record GeneratorSetpoint(LfGenerator generator, DoubleTimeSeriesValues values) {
+    /** One plan series bound to the network element it drives, for one step to apply it to. */
+    private sealed interface Setpoint {
+        void apply(int step, LfNetworkParameters networkParameters);
     }
 
-    private record NetworkRun(LfNetwork lfNetwork, StepEngine engine, List<GeneratorSetpoint> setpoints, NetworkState baseState) {
+    private record GeneratorSetpoint(LfGenerator generator, DoubleTimeSeriesValues values) implements Setpoint {
+
+        @Override
+        public void apply(int step, LfNetworkParameters networkParameters) {
+            double targetP = values.get(step) / PerUnit.SB;
+            generator.setTargetP(targetP);
+            generator.setInitialTargetP(targetP);
+            generator.reApplyActivePowerControlChecks(networkParameters, null);
+        }
+    }
+
+    /**
+     * By default only the active power set point moves: q0 is a separate input this plan does not carry, so a step
+     * stays equal to a load flow on a network whose p0 is this step's value and whose q0 is untouched, and a load does
+     * not keep its power factor across steps.
+     *
+     * <p>With {@link TimeSeriesLoadFlowParameters#isKeepLoadPowerFactorConstant()} the reactive power follows, at the
+     * power factor the load was built with: {@code powerFactor} is {@code q0 / p0} as the network was loaded, so a step
+     * equals a load flow on a network carrying both, and it is {@code NaN} when the plan is to leave q0 alone.
+     */
+    private record LoadSetpoint(LfLoad load, String originalLoadId, DoubleTimeSeriesValues values,
+                                double powerFactor) implements Setpoint {
+
+        @Override
+        public void apply(int step, LfNetworkParameters networkParameters) {
+            double p0 = values.get(step) / PerUnit.SB;
+            load.setOriginalLoadP0(originalLoadId, p0);
+            if (!Double.isNaN(powerFactor)) {
+                load.setOriginalLoadQ0(originalLoadId, p0 * powerFactor);
+            }
+        }
+    }
+
+    private record NetworkRun(LfNetwork lfNetwork, StepEngine engine, List<Setpoint> setpoints, NetworkState baseState) {
     }
 
     private record PartitionJob(int partitionIndex, int[] range, EnginePlan enginePlan, LfNetworkList lfNetworks) {

@@ -8,7 +8,9 @@
 package com.powsybl.openloadflow.ts;
 
 import com.powsybl.commons.PowsyblException;
+import com.powsybl.iidm.network.Branch;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.extensions.LoadDetailAdder;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
 import com.powsybl.iidm.network.test.FourSubstationsNodeBreakerFactory;
 import com.powsybl.loadflow.LoadFlow;
@@ -288,11 +290,11 @@ class TimeSeriesLoadFlowTest {
         PowsyblException e = assertThrows(PowsyblException.class,
                 () -> TimeSeriesLoadFlow.run(EurostagTutorialExample1Factory.create(), List.of(),
                         new TimeSeriesLoadFlowParameters(), NetworkResultWriterFactory.NO_OP));
-        assertTrue(e.getMessage().contains("at least one generation plan series"));
+        assertTrue(e.getMessage().contains("at least one plan series"));
     }
 
     /**
-     * Two series naming the same generator would otherwise silently leave only the last one applied.
+     * Two series naming the same element would otherwise silently leave only the last one applied.
      */
     @Test
     void duplicatedGeneratorInPlanThrows() {
@@ -301,7 +303,7 @@ class TimeSeriesLoadFlowTest {
         PowsyblException e = assertThrows(PowsyblException.class,
                 () -> TimeSeriesLoadFlow.run(EurostagTutorialExample1Factory.create(), duplicatedPlan,
                         new TimeSeriesLoadFlowParameters(), NetworkResultWriterFactory.NO_OP));
-        assertTrue(e.getMessage().contains("Duplicated generator id(s) in the generation plan: [GEN]"));
+        assertTrue(e.getMessage().contains("Duplicated generator or load id(s) in the plan: [GEN]"));
     }
 
     @Test
@@ -310,7 +312,326 @@ class TimeSeriesLoadFlowTest {
         List<DoubleTimeSeries> badPlan = List.of(TimeSeries.createDouble("MISSING", index, targets));
         PowsyblException e = assertThrows(PowsyblException.class,
                 () -> TimeSeriesLoadFlow.run(network, badPlan, new TimeSeriesLoadFlowParameters(), NetworkResultWriterFactory.NO_OP));
-        assertTrue(e.getMessage().contains("Unknown generator id"));
+        assertTrue(e.getMessage().contains("Unknown generator or load id"));
+    }
+
+    /**
+     * The whole contract, for a load: each step must come out of the engine equal to a load flow run on its own, on a
+     * network whose p0 is that step's value.
+     */
+    @Test
+    void loadStepsMatchIndependentLoadFlow() {
+        double[] p0s = {600.0, 800.0, 400.0};
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", index, p0s));
+        Map<String, StringWriter> csv = new HashMap<>();
+        TimeSeriesLoadFlow.run(EurostagTutorialExample1Factory.create(), loadPlan, new TimeSeriesLoadFlowParameters(),
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+
+        Map<String, Double> streamedP1 = new HashMap<>();
+        csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedP1.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+        });
+
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        for (int step = 0; step < p0s.length; step++) {
+            Network ref = EurostagTutorialExample1Factory.create();
+            ref.getLoad("LOAD").setP0(p0s[step]);
+            assertTrue(runner.run(ref, new LoadFlowParameters()).isFullyConverged());
+            String ts = index.getInstantAt(step).toString();
+            assertEquals(ref.getLine("NHV1_NHV2_1").getTerminal1().getP(), streamedP1.get(ts + "|NHV1_NHV2_1"), 1e-2,
+                    "p1 mismatch at step " + step);
+        }
+    }
+
+    /**
+     * A second load, on its own bus, so that slack distributed over the loads has a split to get wrong. With a single
+     * load its participation factor is 1 whatever p0 does, which is how a one-load golden test can pass on a network
+     * whose participation factors are stale.
+     */
+    private static Network networkWithTwoLoadBuses() {
+        Network network = EurostagTutorialExample1Factory.create();
+        network.getVoltageLevel("VLHV2").newLoad()
+                .setId("LOAD2")
+                .setBus("NHV2")
+                .setConnectableBus("NHV2")
+                .setP0(200)
+                .setQ0(60)
+                .add();
+        return network;
+    }
+
+    /**
+     * Slack distributed over the loads is the case the model had no way to get right: the participation factors come
+     * from p0, so a step that moves p0 has to move them with it or it distributes by the first step's proportions.
+     */
+    @Test
+    void loadStepsMatchIndependentLoadFlowWhenSlackIsDistributedOnLoads() {
+        double[] p0s = {600.0, 1200.0, 300.0};
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", index, p0s));
+        TimeSeriesLoadFlowParameters parameters = new TimeSeriesLoadFlowParameters();
+        parameters.getLoadFlowParameters().setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD);
+        Map<String, StringWriter> csv = new HashMap<>();
+        TimeSeriesLoadFlow.run(networkWithTwoLoadBuses(), loadPlan, parameters,
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+
+        Map<String, Double> streamedP1 = new HashMap<>();
+        csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedP1.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+        });
+
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        for (int step = 0; step < p0s.length; step++) {
+            Network ref = networkWithTwoLoadBuses();
+            ref.getLoad("LOAD").setP0(p0s[step]);
+            assertTrue(runner.run(ref, new LoadFlowParameters()
+                    .setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD)).isFullyConverged());
+            String ts = index.getInstantAt(step).toString();
+            // every branch, not just one: both loads sit behind NHV1_NHV2_1, so its flow is the same whichever way the
+            // slack splits between them. NHV2_NLOAD carries LOAD alone and is what a wrong split actually shows up on.
+            for (Branch<?> branch : ref.getBranches()) {
+                assertEquals(branch.getTerminal1().getP(), streamedP1.get(ts + "|" + branch.getId()), 1e-2,
+                        "p1 mismatch on " + branch.getId() + " at step " + step);
+            }
+        }
+    }
+
+    /**
+     * The same conform loads, with the fixed/variable split a LoadDetail describes. A plan moves p0 and nothing else,
+     * so fixed + variable no longer add up to p0 -- which is what a grid model whose p0 was set and whose LoadDetail
+     * was not looks like, and is exactly what the reference run below is built as.
+     */
+    private static Network networkWithTwoConformLoadBuses() {
+        Network network = networkWithTwoLoadBuses();
+        network.getLoad("LOAD").newExtension(LoadDetailAdder.class)
+                .withFixedActivePower(400).withVariableActivePower(200)
+                .withFixedReactivePower(150).withVariableReactivePower(50)
+                .add();
+        network.getLoad("LOAD2").newExtension(LoadDetailAdder.class)
+                .withFixedActivePower(150).withVariableActivePower(50)
+                .withFixedReactivePower(40).withVariableReactivePower(20)
+                .add();
+        return network;
+    }
+
+    /**
+     * The mode where slack participation must <b>not</b> follow p0: on conform load it comes from the LoadDetail
+     * variable active power, which the plan does not touch. Recomputing it from p0 here would be as wrong as never
+     * recomputing it in PROPORTIONAL_TO_LOAD, and only a reference run can tell.
+     */
+    @Test
+    void loadStepsMatchIndependentLoadFlowWhenSlackIsDistributedOnConformLoad() {
+        double[] p0s = {600.0, 1200.0, 300.0};
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", index, p0s));
+        TimeSeriesLoadFlowParameters parameters = new TimeSeriesLoadFlowParameters();
+        parameters.getLoadFlowParameters().setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD);
+        Map<String, StringWriter> csv = new HashMap<>();
+        TimeSeriesLoadFlow.run(networkWithTwoConformLoadBuses(), loadPlan, parameters,
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+
+        Map<String, Double> streamedP1 = new HashMap<>();
+        csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedP1.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+        });
+
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        for (int step = 0; step < p0s.length; step++) {
+            Network ref = networkWithTwoConformLoadBuses();
+            ref.getLoad("LOAD").setP0(p0s[step]);
+            assertTrue(runner.run(ref, new LoadFlowParameters()
+                    .setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD)).isFullyConverged());
+            String ts = index.getInstantAt(step).toString();
+            for (Branch<?> branch : ref.getBranches()) {
+                assertEquals(branch.getTerminal1().getP(), streamedP1.get(ts + "|" + branch.getId()), 1e-2,
+                        "p1 mismatch on " + branch.getId() + " at step " + step);
+            }
+        }
+    }
+
+    @Test
+    void dcLoadStepsMatchIndependentDcLoadFlow() {
+        double[] p0s = {600.0, 1200.0, 300.0};
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", index, p0s));
+        TimeSeriesLoadFlowParameters parameters = new TimeSeriesLoadFlowParameters();
+        parameters.getLoadFlowParameters().setDc(true)
+                .setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD);
+        Map<String, StringWriter> csv = new HashMap<>();
+        TimeSeriesLoadFlow.run(networkWithTwoLoadBuses(), loadPlan, parameters,
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+
+        Map<String, Double> streamedP1 = new HashMap<>();
+        csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedP1.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+        });
+
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        for (int step = 0; step < p0s.length; step++) {
+            Network ref = networkWithTwoLoadBuses();
+            ref.getLoad("LOAD").setP0(p0s[step]);
+            assertTrue(runner.run(ref, new LoadFlowParameters().setDc(true)
+                    .setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD)).isFullyConverged());
+            String ts = index.getInstantAt(step).toString();
+            for (Branch<?> branch : ref.getBranches()) {
+                assertEquals(branch.getTerminal1().getP(), streamedP1.get(ts + "|" + branch.getId()), 1e-2,
+                        "DC p1 mismatch on " + branch.getId() + " at step " + step);
+            }
+        }
+    }
+
+    /**
+     * With the option on, a step must equal a load flow on a network carrying both this step's p0 and the q0 that keeps
+     * the load's power factor -- the same contract as everything else here, over two values instead of one.
+     */
+    @Test
+    void loadStepsKeepingPowerFactorMatchIndependentLoadFlow() {
+        // 1200 MW converges with q0 left at 200 MVar but collapses once q0 follows it to 400, so this stops at 1000
+        double[] p0s = {600.0, 1000.0, 300.0};
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", index, p0s));
+        TimeSeriesLoadFlowParameters parameters = new TimeSeriesLoadFlowParameters().setKeepLoadPowerFactorConstant(true);
+        Map<String, StringWriter> csv = new HashMap<>();
+        TimeSeriesLoadFlow.run(networkWithTwoLoadBuses(), loadPlan, parameters,
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+
+        Map<String, Double> streamedP1 = new HashMap<>();
+        Map<String, Double> streamedQ1 = new HashMap<>();
+        csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedP1.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+            streamedQ1.put(c[0] + "|" + c[3], Double.parseDouble(c[5]));
+        });
+
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        for (int step = 0; step < p0s.length; step++) {
+            Network ref = networkWithTwoLoadBuses();
+            // LOAD is 600 MW / 200 MVar as built, so keeping its power factor means q0 = p0 / 3
+            ref.getLoad("LOAD").setP0(p0s[step]).setQ0(p0s[step] / 600.0 * 200.0);
+            assertTrue(runner.run(ref, new LoadFlowParameters()).isFullyConverged());
+            String ts = index.getInstantAt(step).toString();
+            for (Branch<?> branch : ref.getBranches()) {
+                assertEquals(branch.getTerminal1().getP(), streamedP1.get(ts + "|" + branch.getId()), 1e-2,
+                        "p1 mismatch on " + branch.getId() + " at step " + step);
+                assertEquals(branch.getTerminal1().getQ(), streamedQ1.get(ts + "|" + branch.getId()), 1e-2,
+                        "q1 mismatch on " + branch.getId() + " at step " + step);
+            }
+        }
+    }
+
+    /**
+     * The option is what makes reactive power move. Without it the same plan must leave q0 where the grid model put it,
+     * which is the difference the two tests exist to hold apart.
+     */
+    @Test
+    void keepingPowerFactorIsWhatMovesReactivePower() {
+        double[] p0s = {600.0, 1000.0, 300.0};
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", index, p0s));
+
+        Map<String, StringWriter> scaled = new HashMap<>();
+        TimeSeriesLoadFlow.run(networkWithTwoLoadBuses(), loadPlan,
+                new TimeSeriesLoadFlowParameters().setKeepLoadPowerFactorConstant(true),
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(scaled)));
+
+        Map<String, StringWriter> untouched = new HashMap<>();
+        TimeSeriesLoadFlow.run(networkWithTwoLoadBuses(), loadPlan, new TimeSeriesLoadFlowParameters(),
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(untouched)));
+
+        Function<Map<String, StringWriter>, Map<String, Double>> q1Of = csv -> {
+            Map<String, Double> q1 = new HashMap<>();
+            csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+                String[] c = line.split(";");
+                q1.put(c[0] + "|" + c[3], Double.parseDouble(c[5]));
+            });
+            return q1;
+        };
+        Map<String, Double> scaledQ1 = q1Of.apply(scaled);
+        Map<String, Double> untouchedQ1 = q1Of.apply(untouched);
+
+        // step 0 replays the load as built, so the option has nothing to change there
+        String step0 = index.getInstantAt(0).toString();
+        assertEquals(untouchedQ1.get(step0 + "|NHV2_NLOAD"), scaledQ1.get(step0 + "|NHV2_NLOAD"), 1e-2,
+                "at the as-built p0 there is no scaling to do");
+        // at 1000 MW q0 follows from 200 to 333 MVar, and the flow to the load bus has to show it
+        String step1 = index.getInstantAt(1).toString();
+        assertTrue(Math.abs(scaledQ1.get(step1 + "|NHV2_NLOAD") - untouchedQ1.get(step1 + "|NHV2_NLOAD")) > 100.0,
+                () -> "expected the option to move q1 at step 1, got " + scaledQ1.get(step1 + "|NHV2_NLOAD")
+                        + " against " + untouchedQ1.get(step1 + "|NHV2_NLOAD"));
+    }
+
+    @Test
+    void keepingPowerFactorOfAZeroP0LoadThrows() {
+        Network network = networkWithTwoLoadBuses();
+        network.getLoad("LOAD").setP0(0).setQ0(50);
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", index, 600.0, 800.0, 400.0));
+        PowsyblException e = assertThrows(PowsyblException.class,
+                () -> TimeSeriesLoadFlow.run(network, loadPlan,
+                        new TimeSeriesLoadFlowParameters().setKeepLoadPowerFactorConstant(true),
+                        NetworkResultWriterFactory.NO_OP));
+        assertTrue(e.getMessage().contains("zero p0"), e.getMessage());
+        assertTrue(e.getMessage().contains("LOAD"), e.getMessage());
+    }
+
+    @Test
+    void generatorAndLoadCanBePlannedTogether() {
+        List<DoubleTimeSeries> mixedPlan = List.of(TimeSeries.createDouble("GEN", index, targets),
+                TimeSeries.createDouble("LOAD", index, 600.0, 800.0, 400.0));
+        Map<String, StringWriter> csv = new HashMap<>();
+        TimeSeriesLoadFlowResult result = TimeSeriesLoadFlow.run(EurostagTutorialExample1Factory.create(), mixedPlan,
+                new TimeSeriesLoadFlowParameters(), partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+
+        assertEquals(3, result.getStepResults().size());
+        assertTrue(result.getStepResults().stream()
+                .allMatch(s -> s.status() == LoadFlowResult.ComponentResult.Status.CONVERGED));
+
+        Map<String, Double> streamedP1 = new HashMap<>();
+        csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedP1.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+        });
+
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        double[] p0s = {600.0, 800.0, 400.0};
+        for (int step = 0; step < targets.length; step++) {
+            Network ref = EurostagTutorialExample1Factory.create();
+            ref.getGenerator("GEN").setTargetP(targets[step]);
+            ref.getLoad("LOAD").setP0(p0s[step]);
+            assertTrue(runner.run(ref, new LoadFlowParameters()).isFullyConverged());
+            String ts = index.getInstantAt(step).toString();
+            assertEquals(ref.getLine("NHV1_NHV2_1").getTerminal1().getP(), streamedP1.get(ts + "|NHV1_NHV2_1"), 1e-2,
+                    "p1 mismatch at step " + step);
+        }
+    }
+
+    /**
+     * A plan series carries active power only. q0 is a separate input it does not describe, so it stays where the grid
+     * model put it and the load's power factor moves across steps.
+     */
+    @Test
+    void loadPlanLeavesReactivePowerAlone() {
+        double[] p0s = {600.0, 800.0, 400.0};
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", index, p0s));
+        Map<String, StringWriter> csv = new HashMap<>();
+        TimeSeriesLoadFlow.run(EurostagTutorialExample1Factory.create(), loadPlan, new TimeSeriesLoadFlowParameters(),
+                partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+
+        // q1 of the line feeding the load bus, per step, against a run whose p0 moved and whose q0 did not
+        Map<String, Double> streamedQ1 = new HashMap<>();
+        csv.get("branches").toString().strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedQ1.put(c[0] + "|" + c[3], Double.parseDouble(c[5]));
+        });
+
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        for (int step = 0; step < p0s.length; step++) {
+            Network ref = EurostagTutorialExample1Factory.create();
+            ref.getLoad("LOAD").setP0(p0s[step]);
+            assertEquals(200.0, ref.getLoad("LOAD").getQ0(), 1e-9, "q0 is not the plan's to move");
+            assertTrue(runner.run(ref, new LoadFlowParameters()).isFullyConverged());
+            String ts = index.getInstantAt(step).toString();
+            assertEquals(ref.getLine("NHV1_NHV2_1").getTerminal1().getQ(), streamedQ1.get(ts + "|NHV1_NHV2_1"), 1e-2,
+                    "q1 mismatch at step " + step);
+        }
     }
 
     private static Set<String> readBranchRows(Path datasetDir) throws IOException {

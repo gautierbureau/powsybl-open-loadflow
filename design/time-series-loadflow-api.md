@@ -1,8 +1,8 @@
-# Scoping — Time‑series load flow API (fixed structure, varying generation plan)
+# Scoping — Time‑series load flow API (fixed structure, varying injection plan)
 
-**Status:** Implemented for generators — `com.powsybl.openloadflow.ts`. Sections 8 and 9 have been
-reconciled with the engine as built and measured; loads/HVDC setpoints, relative setpoints and the
-sequential warm‑start mode below remain proposals.
+**Status:** Implemented for generators and loads — `com.powsybl.openloadflow.ts`. Sections 5, 6, 8, 9
+and 12 have been reconciled with the engine as built and measured. HVDC setpoints and the sequential
+warm‑start mode remain proposals; relative setpoints are settled as a caller concern (§6).
 **Scope:** a new `com.powsybl.openloadflow.ts` API in powsybl‑open‑loadflow, reusing the
 security‑analysis compute machinery and the streaming‑output seam introduced by **PR #23**
 (*"Stream all branch flows out of a security analysis (CSV / Parquet)"*) and its companion
@@ -10,7 +10,7 @@ powsybl‑core PR.
 **Author:** Gautier Bureau
 
 > **One‑line summary.** Run *many* load flows on **one fixed network topology** where only the
-> **injection setpoints change** per time step (the generation plan, plus optionally loads),
+> **injection setpoints change** per time step (generators and loads),
 > parallelised across steps, streaming the (large) per‑step results to a columnar dataset on
 > disk instead of accumulating them in memory. The per‑step re‑solve, the network
 > save/restore, the multi‑threaded partitioning and the streaming writer are **already present
@@ -23,8 +23,8 @@ powsybl‑core PR.
 
 OLF today exposes single‑shot load flow (`LoadFlow.run`) and security analysis (N‑1 + operator
 strategies). There is **no API for a *time series* / *multi‑variant* load flow**: the same
-network solved repeatedly while only the **production plan of generators** (their active‑power
-targets) — and optionally loads — changes from one step to the next.
+network solved repeatedly while only the **injection plan** — generator active‑power targets and
+load `p0` — changes from one step to the next.
 
 Use cases: hourly/quarter‑hourly market or adequacy runs, Monte‑Carlo generation dispatches,
 RES scenario sweeps. Two properties dominate the requirements:
@@ -101,8 +101,8 @@ The time‑series engine keeps steps 1–3 verbatim, replaces step 4's "apply co
 
 ## 4. Requirements
 
-- **R1 — Fixed structure, varying targets.** Change generator (and optional load) active‑power
-  targets per step; solve; repeat. No topology/contingency handling.
+- **R1 — Fixed structure, varying targets.** Change generator and load active power per step; solve;
+  repeat. No topology/contingency handling. *Done.*
 - **R2 — Efficient re‑solve.** Reuse the equation system, Jacobian pattern and (DC) matrix
   factorisation across steps; only the target vector changes.
 - **R3 — Multithreaded.** Partition steps across threads, one `LfNetwork` + context per
@@ -110,7 +110,7 @@ The time‑series engine keeps steps 1–3 verbatim, replaces step 4's "apply co
 - **R4 — Streamed, bounded‑memory output.** *Output* peak memory independent of the number of
   steps: the bulk (branch flows, bus voltages, generator dispatch) goes to a columnar dataset
   (CSV / Parquet); only a compact per‑step status summary stays in memory. Note this constrains the
-  output only — the *input* plan is read once and so scales with `generators × steps`; see the
+  output only — the *input* plan is read once and so scales with `planned elements × steps`; see the
   known limitation in §8.
 - **R5 — Standard input.** The production plan is supplied as **powsybl‑core time series**
   (`DoubleTimeSeries`), so it interoperates with existing PowSyBl TS tooling.
@@ -129,6 +129,17 @@ The time‑series engine keeps steps 1–3 verbatim, replaces step 4's "apply co
   `subStateId = ""`). One CSV impl + one Parquet module serve both. See §7.
 - **Streamed content — three sibling datasets:** branch flows (PR #23 schema), bus voltages, and
   generator dispatch (§7.2).
+- **One plan, resolved by id.** A series names a generator *or* a load and carries the same thing
+  either way — the element's active power at that step. Equipment ids are unique across a grid model,
+  so the engine resolves what a series drives rather than making the caller declare it. *Decided.*
+- **A load series carries active power; reactive power follows only if asked.** By default `q0` is a
+  separate input the plan does not describe and is left untouched, which is what makes a step equal to
+  a load flow on a network carrying that `p0` — the cost being that a load does not hold its power
+  factor across steps. `setKeepLoadPowerFactorConstant(true)` applies `q = p × q0/p0`, both taken as
+  the network was loaded, and the contract is unchanged: the step then equals a load flow on a network
+  carrying **both** values. Off by default, because inferring the second input from the first is an
+  assumption the plan never stated. A planned load whose `p0` is zero has no power factor to keep and
+  is rejected rather than silently left behind. *Decided.*
 
 ## 6. Input — the production plan as time series
 
@@ -138,22 +149,46 @@ The time‑series engine keeps steps 1–3 verbatim, replaces step 4's "apply co
 - **the number of steps** = `index.getPointCount()`, and
 - **the per‑step timestamp** (`index.getInstantAt(i)`), used as the output state key.
 
-**Series → equipment mapping.** By default a series' *name* is the IIDM equipment id
-(generator or load); a step applies, for each series `s`, `value = s.at(i)` as the new
-active‑power target of the mapped injection. An explicit
-`Map<String, InjectionType>`/mapping override is supported for the cases where the series name
-is not the equipment id, and a per‑series flag distinguishes **absolute** vs **relative** (delta
-on the base target) setpoints — mirroring `GeneratorAction.isActivePowerRelativeValue`
-(`network/action/LfGeneratorAction.java:36-41`).
+**Series → equipment mapping.** A series' *name* is the IIDM equipment id, of a **generator or a
+load**; a step applies, for each series `s`, `value = s.at(i)` as that element's active power — a
+generator's target P, or a load's `p0`. Equipment ids are unique across a grid model, so the engine
+resolves which of the two a series drives rather than being told; there is no mapping override and no
+`InjectionType` to declare. A series naming neither is rejected up front; a series naming an element
+of another connected component simply resolves to nothing in the networks that do not own it.
 
-**Applying a step** reuses the existing primitive: `LfGenerator.setTargetP(newP)` +
-`setInitialTargetP(newP)` + `reApplyActivePowerControlChecks(...)` (exactly
-`LfGeneratorAction.apply`), and the load equivalent (`LfLoadAction` /
-`onLoadActivePowerTargetChange`). Both already trigger `TargetVector.invalidateValues()`.
+**Absolute only, and why.** A value is the element's active power at that step, full stop. There is
+no relative/absolute per‑series flag, and it is not an omission:
+
+- Absolute is the only reading under which the contract — step N equals an independent
+  `LoadFlow.run` — is expressible without reference to another step.
+- A delta reduces to it. The engine restores the base state before every step, so the as‑built value
+  is in hand when the step is applied: a shift plan is `base + delta`, a scaling plan `base × factor`,
+  both computable by the caller before the plan is handed over.
+- A delta relative to the *previous* step is not merely undesirable here, it is undefined: steps are
+  partitioned across threads and executed in arbitrary order, each restored to the base snapshot
+  first. There is no "previous step" to be relative to. Any shift means "shift from the as‑built
+  value".
+
+**Reactive power.** A load series describes active power. Under
+`TimeSeriesLoadFlowParameters.setKeepLoadPowerFactorConstant(true)` the reactive power follows it at
+the power factor the load was built with (`q = p × q0/p0`, both as loaded), through
+`LfLoad.setOriginalLoadQ0` — the `q0` mirror of the `p0` operation below, and needed for the same
+reason: `q0` has derived state of its own (the power factor is `q0/p0`, and a load with no active
+power and some reactive power needs its own), so shifting the aggregate's `targetQ` cannot express
+"this load now consumes something else" any more than shifting `targetP` could.
+
+**Applying a step** reuses the existing primitive for generators —
+`LfGenerator.setTargetP(newP)` + `setInitialTargetP(newP)` + `reApplyActivePowerControlChecks(...)`,
+exactly `LfGeneratorAction.apply`. For loads it is `LfLoad.setOriginalLoadP0(id, p0)`, added for this
+(OLF PR #29): `LfLoad` aggregates the loads of a bus, and everything it derives from `p0` was
+computed once at build time, so moving the aggregate's `targetP` — what `LfLoadAction` does — would
+have left the participation factors, the constant‑power‑factor flag and the power factor itself
+describing the network as it was loaded rather than as it is being solved. Both paths trigger
+`TargetVector.invalidateValues()`.
 
 **Partitioning for MT.** The step range `[0, pointCount)` is split into contiguous blocks (one
 per thread). Each thread reads only its block's values from the plan, which is read **once on the
-main thread** into an immutable `double[]` per series (see §8) — threads never touch a
+main thread** into one `DoubleTimeSeriesValues` per series (see §8) — threads never touch a
 `DoubleTimeSeries` themselves, so there is no locking and no lazy‑init race on the input.
 
 ## 7. Output — generalised streaming writer (built on PR #23)
@@ -246,7 +281,7 @@ to touch concurrently: `CalculatedTimeSeries` lazily computes and caches its ind
 non‑volatile field, so partitions sharing a plan would race on it (fixed upstream in core PR #33,
 but the engine no longer depends on it either way). Reading once fixes both.
 
-> **Known limitation — plan memory.** Reading once materialises the full `generators × steps`
+> **Known limitation — plan memory.** Reading once materialises the full `planned elements × steps`
 > matrix of doubles, which this document previously ruled out ("never materialise the full
 > `injections × steps` matrix"). That promise was traded for the 343× above, deliberately and with
 > eyes open. The cost is bounded: 500 generators × 8760 hourly steps ≈ **35 MB**, quarter‑hourly for
@@ -358,8 +393,9 @@ core that both consumers share (or add a lean TS‑specific sibling if extractio
    per‑step `restore → applySetpoints → run → emit`. Branch emit reuses
    `LfBranch.emitBranchResults`; add bus + generator emit. Prove golden equality vs. N
    independent `LoadFlow.run`s on a small network.
-4. **Time‑series input adapter.** `List<DoubleTimeSeries>` + `TimeSeriesIndex` → per‑step
-   setpoints; name→equipment mapping; absolute/relative flag.
+4. **Time‑series input adapter.** *Done.* `List<DoubleTimeSeries>` + `TimeSeriesIndex` → per‑step
+   setpoints; series name resolved to a generator or a load. No mapping override and no
+   absolute/relative flag: both were dropped as scope that buys nothing a caller cannot express (§6).
 5. **Multithread + per‑partition writer.** Partition the step range; reuse/generalise the SA MT
    helper (one LfNetwork per partition) and PR #23's `runPartition` ThreadLocal writer → one
    `part-<i>` set per thread; validate the union equals the single‑thread output.
@@ -373,7 +409,14 @@ core that both consumers share (or add a lean TS‑specific sibling if extractio
 ## 11. Testing strategy
 
 - **Golden:** per‑step streamed values equal an independent `LoadFlow.run` with the same
-  setpoints applied to a fresh network (small network, a few steps), AC and DC.
+  setpoints applied to a fresh network (small network, a few steps), AC and DC, for generators and
+  for loads. **A golden test needs more than one of whatever it varies, and an observable that can
+  see the difference.** Both traps were hit and both passed a broken engine: with a single load its
+  slack participation factor is 1 whatever `p0` does, so nothing can split wrongly; and with two
+  loads behind the same branch, that branch's flow is identical however the slack splits between
+  them. The test that bites uses two load buses and compares every branch — removing the set point
+  upkeep from `LfLoad` then moves `NHV2_NLOAD` by 85 MW. The same shape of blind spot let a generator
+  dispatch bug through a single‑generator test earlier in this work.
 - **Memory:** large synthetic network + many steps → peak heap flat in the number of steps
   (streaming) vs. accumulation.
 - **Concurrency:** `threadCount > 1` produces N `part-<i>` sets whose union equals the
@@ -382,25 +425,53 @@ core that both consumers share (or add a lean TS‑specific sibling if extractio
   solve/factorisation counter) and results still match.
 - **Parquet round‑trip:** write → read back for each of the three datasets; schema + row counts +
   sampled values.
-- **Input mapping:** absolute vs relative setpoints, series‑name→equipment mapping, mismatched /
-  missing ids.
+- **Input validation:** unknown ids, duplicate ids, mismatched index lengths, empty plan — all
+  rejected before any network is built.
 - **SA regression:** the generalised writer leaves security‑analysis output byte‑identical to
   PR #23.
 
-## 12. Open questions
+## 12. Open questions — answered
 
-1. **Core package/home for the generalised `NetworkResultWriter`** — inside `security-analysis-api`
-   (SA already there, OLF depends on it) vs. a new neutral module both depend on. To settle with
-   core maintainers; PR #23 being unmerged gives room to shape it.
-2. **Timestamp encoding** of `stateId` — ISO‑8601 string vs. an added integer `stepIndex` (+
-   epoch‑millis) column. Leaning: both a `timestamp` and a `stepIndex` column, `stateId` = ISO
-   string for schema‑sharing with SA.
-3. **Which injections are controllable** — generators only (v1) vs. generators + loads (+ HVDC
-   setpoints) from step one.
-4. **Voltage/angle extension columns** — always emit V/angle, or gate like PR #23's
-   `createResultExtension` (`OlfBranchResult`).
+1. ~~**Core package/home for the generalised `NetworkResultWriter`**~~ — **settled: `loadflow-api`**,
+   package `com.powsybl.loadflow.resultswriter` (core PR #30). Neither option as posed:
+   *not* `security-analysis-api`, which would make every load‑flow consumer of the writer depend on
+   security analysis to stream a bus voltage; and *not* a new module, because `loadflow-api` already
+   **is** the module both consumers depend on. Still needs core maintainer sign‑off — core PR #30 is
+   unmerged, so there is room to move it.
+2. ~~**Timestamp encoding of `stateId`**~~ — **settled: the ISO‑8601 instant, alone.** The leaning
+   recorded here (add `timestamp` and `stepIndex` columns) was **not** followed. Adding a column for
+   one consumer un‑generalises the seam whose entire point is that SA and the time‑series LF share
+   one schema, one CSV impl and one Parquet module per dataset. The cost is real and is accepted: a
+   consumer wanting an integer step derives it — ISO‑8601 UTC instants sort lexicographically in
+   chronological order — or joins the returned summary, which carries both `stepIndex` and
+   `timestamp` (§7.4). Revisit if that join proves painful in practice, not before.
+3. ~~**Which injections are controllable**~~ — **settled: generators and loads** (this PR, on the
+   model change in OLF PR #29). HVDC setpoints remain a proposal. Worth carrying
+   forward what loads cost: adding an injection type is not "call the other setter". It is "find
+   everything the network loader derives from that input, and make sure it is maintained when the
+   input moves" — for loads that was the slack participation factors, the constant‑power‑factor flag
+   and the power factor itself, none of which the model could keep straight before PR #29.
+4. ~~**Voltage/angle extension columns**~~ — **settled: always emitted, gated per dataset.** V and
+   angle are the bus dataset's own columns (`stateId;subStateId;status;busId;v;angle`); the switch is
+   `isStreamBusResults()`, whole‑dataset, not per column. PR #23's `createResultExtension` gating
+   exists because `OlfBranchResult` bolts provider‑specific columns onto a shared branch schema —
+   V/angle extend nothing, they are what a bus row *is*.
 5. ~~**Non‑convergent steps**~~ — **settled:** emit the step's rows like any other, tagged with its
    own `status`, so callers can tell a failed step from a missing one without the in‑memory
    summary. See §8 and `TimeSeriesLoadFlowTest#nonConvergedStepIsStreamedWithItsStatus`.
-6. **Sequential warm‑start mode** — expose it, and if so, document its order‑dependence within a
-   partition.
+6. **Sequential warm‑start mode** — **recommended: not planned.** Needs a maintainer's call, so it
+   stays open, but the case against is strong on three counts:
+   - **It contradicts the contract.** This API's defining property is that a step equals an
+     independent `LoadFlow.run`, whatever order steps run in and however they are partitioned. A warm
+     start makes step N depend on step N−1. That is a different product, not a mode of this one.
+   - **It is not the cheap change it sounds like.** The solver initialises its state vector from the
+     configured voltage initializer, *not* from restored network state — which is precisely why the
+     base solve was removed (§8): it was warming nothing. A real warm start means switching to
+     `PreviousValueVoltageInitializer`, as `AcSecurityAnalysis` does, *and* not restoring the base
+     state — i.e. deleting the mechanism that makes steps independent, not adding to it.
+   - **It would make results depend on thread count.** Steps split differently across partitions
+     would warm‑start from different predecessors. For a tool whose output is a reproducible dataset,
+     that is a bad trade for iterations saved.
+
+   Reopen with a measured case showing the iterations saved on a real plan — the answer may well be
+   "run it as a different engine", not "add a flag here".

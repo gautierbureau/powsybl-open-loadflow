@@ -36,6 +36,30 @@ public class TimeSeriesLoadFlowParameters {
 
     private boolean streamGeneratorResults = true;
 
+    private boolean keepLoadPowerFactorConstant = false;
+
+    /**
+     * Whether a load series moves the load's reactive power along with its active power, keeping the power factor the
+     * load was built with. Off by default: a plan series describes active power, and q0 is left where the grid model
+     * put it.
+     *
+     * <p>Not to be confused with {@code OpenLoadFlowParameters.isLoadPowerFactorConstant()}, which is about the
+     * reactive power of a load that <b>slack distribution</b> moved. This one is about the plan.
+     */
+    public boolean isKeepLoadPowerFactorConstant() {
+        return keepLoadPowerFactorConstant;
+    }
+
+    /**
+     * When on, a load series with a value of {@code p} applies {@code q = p * q0 / p0}, both taken as the network was
+     * loaded. A planned load whose {@code p0} is zero has no power factor to keep, and is rejected rather than
+     * silently left alone.
+     */
+    public TimeSeriesLoadFlowParameters setKeepLoadPowerFactorConstant(boolean keepLoadPowerFactorConstant) {
+        this.keepLoadPowerFactorConstant = keepLoadPowerFactorConstant;
+        return this;
+    }
+
     public LoadFlowParameters getLoadFlowParameters() {
         return loadFlowParameters;
     }
