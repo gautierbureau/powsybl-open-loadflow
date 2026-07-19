@@ -21,6 +21,27 @@ import java.util.Optional;
  */
 public interface LfShunt extends LfElement {
 
+    /**
+     * (Re)connects or disconnects one shunt compensator of this aggregate by setting its section
+     * controller to its network section count (connected) or 0 (disconnected). Only supported by
+     * aggregates whose per-compensator controllers were built (operated or closable shunts).
+     *
+     * @return true if the compensator was found and updated
+     */
+    default boolean setCompensatorConnected(String shuntCompensatorId, boolean connected) {
+        return false;
+    }
+
+    /**
+     * True when the given compensator of this aggregate was DISCONNECTED in the base network and
+     * retained only because an action may reconnect it (LfTopoConfig closable shunts): it
+     * contributes nothing until {@link #setCompensatorConnected} is called. Reliable regardless of
+     * the temporary loading variant's terminal state (which is connected by construction).
+     */
+    default boolean isCompensatorInitiallyDisconnected(String shuntCompensatorId) {
+        return false;
+    }
+
     Logger LOGGER = LoggerFactory.getLogger(LfShunt.class);
 
     class Controller {

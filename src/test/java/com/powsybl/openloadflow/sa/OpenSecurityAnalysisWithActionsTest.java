@@ -930,7 +930,7 @@ class OpenSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnalysisTe
             new AllViolationCondition(List.of("S_SO_2")), List.of("openLine")));
         exception = assertThrows(CompletionException.class, () -> runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
                 operatorStrategies2, actions2, ReportNode.NO_OP));
-        assertEquals("Branch or three windings transformer 'line' not found in the network", exception.getCause().getMessage());
+        assertEquals("Branch, three windings transformer or shunt compensator 'line' not found in the network", exception.getCause().getMessage());
 
         List<Action> actions3 = List.of(new PhaseTapChangerTapPositionAction("pst", "pst1", false, 1));
         List<OperatorStrategy> operatorStrategies3 = List.of(new OperatorStrategy("strategy3", ContingencyContext.specificContingency("S_SO_1"),
@@ -2366,5 +2366,66 @@ class OpenSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnalysisTe
                 n -> contingencies, runParameters)
                 .join().getResult();
         assertSame(PostContingencyComputationStatus.CONVERGED, result.getOperatorStrategyResults().getFirst().getStatus());
+    }
+
+    /** A LINEAR shunt compensator DISCONNECTED in the base network can be reconnected by a
+     *  TerminalsConnectionAction: the compensator is retained (LfTopoConfig.shuntIdsToClose),
+     *  loaded into the bus aggregate at section 0, and the action restores its section count.
+     *  Cross-check: the strategy state must EQUAL the post-contingency state of the same network
+     *  with the shunt connected at base — identical equations, so 1e-6. */
+    @Test
+    void testReconnectBaseOpenShuntAction() {
+        java.util.function.Function<Boolean, Network> build = connectShunt -> {
+            Network network = Network.create("shunt-reconnect", "test");
+            var s1 = network.newSubstation().setId("S1").add();
+            var vl1 = s1.newVoltageLevel().setId("vl1").setNominalV(400).setTopologyKind(TopologyKind.BUS_BREAKER).add();
+            vl1.getBusBreakerView().newBus().setId("b1").add();
+            vl1.newGenerator().setId("g1").setBus("b1").setConnectableBus("b1").setTargetP(102).setTargetV(400)
+                    .setMinP(0).setMaxP(500).setVoltageRegulatorOn(true).add();
+            var s2 = network.newSubstation().setId("S2").add();
+            var vl2 = s2.newVoltageLevel().setId("vl2").setNominalV(400).setTopologyKind(TopologyKind.BUS_BREAKER).add();
+            vl2.getBusBreakerView().newBus().setId("b2").add();
+            vl2.newLoad().setId("ld1").setBus("b2").setConnectableBus("b2").setP0(100).setQ0(60).add();
+            var sh = vl2.newShuntCompensator().setId("SH").setBus("b2").setConnectableBus("b2")
+                    .setSectionCount(2)
+                    .newLinearModel().setBPerSection(1e-4).setGPerSection(0.0).setMaximumSectionCount(2).add()
+                    .add();
+            network.newLine().setId("l12a").setVoltageLevel1("vl1").setBus1("b1").setVoltageLevel2("vl2").setBus2("b2")
+                    .setR(1).setX(10).add();
+            network.newLine().setId("l12b").setVoltageLevel1("vl1").setBus1("b1").setVoltageLevel2("vl2").setBus2("b2")
+                    .setR(1).setX(10).add();
+            if (!connectShunt) {
+                sh.getTerminal().disconnect();
+            }
+            return network;
+        };
+        List<StateMonitor> monitors = List.of(new StateMonitor(ContingencyContext.all(), Collections.emptySet(),
+                Set.of("vl2"), Collections.emptySet()));
+        List<Contingency> contingencies = List.of(new Contingency("l12b", new BranchContingency("l12b")));
+
+        // Arm 1: shunt DISCONNECTED at base, reconnected by the strategy after the l12b outage.
+        Network network = build.apply(false);
+        List<Action> actions = List.of(new TerminalsConnectionAction("closeShunt", "SH", false));
+        List<OperatorStrategy> operatorStrategies = List.of(new OperatorStrategy("reconnect",
+                ContingencyContext.specificContingency("l12b"), new TrueCondition(), List.of("closeShunt")));
+        SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, monitors,
+                new SecurityAnalysisParameters(), operatorStrategies, actions, ReportNode.NO_OP);
+        assertEquals(1, result.getOperatorStrategyResults().size());
+        double strategyV = result.getOperatorStrategyResults().getFirst().getConditionalActionsResults().getFirst()
+                .getNetworkResult().getBusResults().getFirst().getV();
+
+        // Arm 2 (reference): shunt CONNECTED at base, same contingency, no strategy.
+        SecurityAnalysisResult reference = runSecurityAnalysis(build.apply(true), contingencies, monitors,
+                new SecurityAnalysisParameters());
+        double referenceV = reference.getPostContingencyResults().getFirst().getNetworkResult()
+                .getBusResults().getFirst().getV();
+
+        double postContingencyV = result.getPostContingencyResults().getFirst().getNetworkResult()
+                .getBusResults().getFirst().getV();
+        assertEquals(referenceV, strategyV, 1e-6,
+                "post-ctg(no shunt)=" + postContingencyV + " strategy=" + strategyV + " reference=" + referenceV);
+        // and the reconnection is MATERIAL (the capacitive bank raises the bus voltage)
+        assertTrue(strategyV > postContingencyV + 0.1,
+                "reconnected shunt must raise b2 (got post-ctg " + postContingencyV + " -> strategy " + strategyV + ")");
     }
 }

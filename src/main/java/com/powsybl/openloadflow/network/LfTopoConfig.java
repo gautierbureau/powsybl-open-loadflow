@@ -30,6 +30,8 @@ public class LfTopoConfig {
 
     private final Set<String> shuntIdsToOperate;
 
+    private final Set<String> shuntIdsToClose;
+
     private final Set<String> branchIdsOpenableSide1;
 
     private final Set<String> branchIdsOpenableSide2;
@@ -43,6 +45,7 @@ public class LfTopoConfig {
         branchIdsWithPtcToRetain = new HashSet<>();
         branchIdsWithRtcToRetain = new HashSet<>();
         shuntIdsToOperate = new HashSet<>();
+        shuntIdsToClose = new HashSet<>();
         branchIdsOpenableSide1 = new HashSet<>();
         branchIdsOpenableSide2 = new HashSet<>();
         branchIdsToClose = new HashSet<>();
@@ -56,6 +59,7 @@ public class LfTopoConfig {
         this.branchIdsWithPtcToRetain = new HashSet<>(other.branchIdsWithPtcToRetain);
         this.branchIdsWithRtcToRetain = new HashSet<>(other.branchIdsWithRtcToRetain);
         this.shuntIdsToOperate = new HashSet<>(other.shuntIdsToOperate);
+        this.shuntIdsToClose = new HashSet<>(other.shuntIdsToClose);
         this.branchIdsOpenableSide1 = new HashSet<>(other.branchIdsOpenableSide1);
         this.branchIdsOpenableSide2 = new HashSet<>(other.branchIdsOpenableSide2);
         this.branchIdsToClose = new HashSet<>(other.branchIdsToClose);
@@ -100,6 +104,19 @@ public class LfTopoConfig {
     public boolean isOperatedShunt(String shuntId) {
         return shuntIdsToOperate.contains(shuntId);
     }
+
+    /** Shunt compensators DISCONNECTED in the base network that an action may (re)connect: they are
+     *  connected in the temporary loading variant so they enter the bus's shunt aggregate, then
+     *  initialized at section 0 (electrically identical to disconnected) — a TerminalsConnectionAction
+     *  close restores their actual section count. */
+    public Set<String> getShuntIdsToClose() {
+        return shuntIdsToClose;
+    }
+
+    public boolean isClosableShunt(String shuntId) {
+        return shuntIdsToClose.contains(shuntId);
+    }
+
 
     public Set<String> getBranchIdsOpenableSide1() {
         return branchIdsOpenableSide1;

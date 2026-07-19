@@ -160,6 +160,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         Actions.addAllRtcToOperate(topoConfig, actions);
         // try to find all shunts which section can change through actions.
         Actions.addAllShuntsToOperate(topoConfig, actions);
+        // try to find disconnected shunts that a terminals connection action may reconnect.
+        Actions.addAllShuntsToClose(topoConfig, network, actions);
 
         // try to find branches (lines and two windings transformers).
         // tie lines and three windings transformers missing.

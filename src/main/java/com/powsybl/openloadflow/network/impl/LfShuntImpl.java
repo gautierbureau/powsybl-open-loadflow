@@ -63,6 +63,8 @@ public class LfShuntImpl extends AbstractLfShunt {
 
     private final List<Controller> controllers = new ArrayList<>();
 
+    private final Set<String> initiallyDisconnectedCompensators;
+
     private double b;
 
     private final double zb;
@@ -92,19 +94,29 @@ public class LfShuntImpl extends AbstractLfShunt {
         this.voltageControlCapability = voltageControlCapability;
         double nominalV = shuntCompensators.getFirst().getTerminal().getVoltageLevel().getNominalV(); // has to be the same for all shunts
         zb = PerUnit.zb(nominalV);
-        b = computeB(shuntCompensators, zb);
-        g = computeG(shuntCompensators, zb);
+        // A CLOSABLE shunt (disconnected in the base network, connected only in the temporary loading
+        // variant so it joins this aggregate) contributes NOTHING initially: its controller starts at
+        // section 0 and a terminals-connection action restores its actual section count.
+        List<ShuntCompensator> initiallyConnected = shuntCompensators.stream()
+                .filter(sc -> !topoConfig.isClosableShunt(sc.getId()))
+                .toList();
+        initiallyDisconnectedCompensators = shuntCompensators.stream().map(ShuntCompensator::getId)
+                .filter(topoConfig::isClosableShunt)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        b = computeB(initiallyConnected, zb);
+        g = computeG(initiallyConnected, zb);
 
-        boolean keepSections = shuntCompensators.stream().map(ShuntCompensator::getId).anyMatch(topoConfig::isOperatedShunt);
+        boolean keepSections = shuntCompensators.stream().map(ShuntCompensator::getId)
+                .anyMatch(id -> topoConfig.isOperatedShunt(id) || topoConfig.isClosableShunt(id));
 
         if (voltageControlCapability || keepSections) {
-            shuntCompensatorsRefs.forEach(shuntCompensatorRef -> initShuntCompensator(parameters, shuntCompensatorRef));
+            shuntCompensatorsRefs.forEach(shuntCompensatorRef -> initShuntCompensator(parameters, topoConfig, shuntCompensatorRef));
             // Controllers are always enabled, a contingency with shunt compensator with voltage control on is not supported yet.
             controllers.sort(Comparator.comparingDouble(Controller::getBMagnitude).reversed());
         }
     }
 
-    private void initShuntCompensator(LfNetworkParameters parameters, Ref<ShuntCompensator> shuntCompensatorRef) {
+    private void initShuntCompensator(LfNetworkParameters parameters, LfTopoConfig topoConfig, Ref<ShuntCompensator> shuntCompensatorRef) {
         var shuntCompensator = shuntCompensatorRef.get();
         List<Double> sectionsB = new ArrayList<>(1);
         List<Double> sectionsG = new ArrayList<>(1);
@@ -115,9 +127,13 @@ public class LfShuntImpl extends AbstractLfShunt {
         switch (shuntCompensator.getModelType()) {
             case LINEAR:
                 ShuntCompensatorLinearModel linearModel = (ShuntCompensatorLinearModel) model;
+                // gPerSection is OPTIONAL in iidm and reads NaN when unset — a NaN section
+                // conductance would poison the aggregate (singular Jacobian) on the first
+                // section change of an operated or reconnected compensator.
+                double gPerSection = Double.isNaN(linearModel.getGPerSection()) ? 0 : linearModel.getGPerSection();
                 for (int section = 1; section <= shuntCompensator.getMaximumSectionCount(); section++) {
                     sectionsB.add(linearModel.getBPerSection() * section * zb);
-                    sectionsG.add(linearModel.getGPerSection() * section * zb);
+                    sectionsG.add(gPerSection * section * zb);
                 }
                 break;
             case NON_LINEAR:
@@ -129,7 +145,8 @@ public class LfShuntImpl extends AbstractLfShunt {
                 }
                 break;
         }
-        controllers.add(new ControllerImpl(shuntCompensatorRef, sectionsB, sectionsG, shuntCompensator.getSectionCount(), minPosition));
+        int initialPosition = topoConfig.isClosableShunt(shuntCompensator.getId()) ? 0 : shuntCompensator.getSectionCount();
+        controllers.add(new ControllerImpl(shuntCompensatorRef, sectionsB, sectionsG, initialPosition, minPosition));
     }
 
     private static double computeG(List<ShuntCompensator> shuntCompensators, double zb) {
@@ -142,6 +159,25 @@ public class LfShuntImpl extends AbstractLfShunt {
         return zb * shuntCompensators.stream()
                 .mapToDouble(ShuntCompensator::getB)
                 .sum();
+    }
+
+    @Override
+    public boolean isCompensatorInitiallyDisconnected(String shuntCompensatorId) {
+        return initiallyDisconnectedCompensators.contains(shuntCompensatorId);
+    }
+
+    @Override
+    public boolean setCompensatorConnected(String shuntCompensatorId, boolean connected) {
+        for (Controller controller : controllers) {
+            if (controller.getId().equals(shuntCompensatorId)) {
+                int position = connected
+                        ? ((ControllerImpl) controller).getShuntCompensatorRef().get().getSectionCount()
+                        : 0;
+                controller.updateSectionB(position);
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
