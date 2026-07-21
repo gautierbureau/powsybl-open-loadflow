@@ -504,8 +504,12 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
     /**
      * One monitored-function-type block of a {@link #runAdjoint} request: the functions monitored under
      * {@code functionType}, and the variables to differentiate against (each carrying its resolved
-     * {@link SensitivityVariableType} and whether it is a {@link SensitivityVariableSet} id). The variable
-     * list is the same across a request's blocks.
+     * {@link SensitivityVariableType} and whether it is a {@link SensitivityVariableSet} id).
+     *
+     * <p>Blocks may carry DIFFERENT variable lists: one request can serve several lever families at once,
+     * since they all contract the same cotangent and differ only in the per-variable contraction. Every
+     * block's variables get a θ̄ group (gated by {@code runAdjointGivesEveryVariableSetItsOwnGradient}) —
+     * do not narrow that to the first block's, which silently zeroed every other family.</p>
      */
     public record AdjointBlock(SensitivityFunctionType functionType, List<String> functionIds,
                                List<AdjointVariable> variables) {

@@ -593,6 +593,72 @@ class AcSensitivityAnalysisAdjointTest {
     }
 
     @Test
+    void runAdjointGivesEveryVariableSetItsOwnGradient() {
+        // Blocks may carry DIFFERENT variable sets, which is what lets one runAdjoint serve several lever
+        // families at once: the cotangent is the same for all of them (it depends only on the monitored
+        // functions), so N per-family calls repeat one identical transpose solve N times.
+        //
+        // The regression this pins: the group guarantee used to walk only the FIRST block's variables, on
+        // the then-true assumption that every block shared one variable list. Every other set's variables
+        // then got no θ̄ group and vanished from the returned map — and a caller rendering a missing
+        // variable as 0.0 reads that as "these levers cannot help". Only the first variable of each set
+        // survived (it anchors a group through the x-bar loop), which is what made it so easy to miss.
+        //
+        // Oracle: the same variables asked for ONE SET AT A TIME, which is the path every other gate here
+        // already validates. Fused must equal per-set, variable for variable.
+        Network network = IeeeCdfNetworkFactory.create14();
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        SensitivityFunctionType ft = SensitivityFunctionType.BRANCH_ACTIVE_POWER_1;
+        List<String> functions = List.of("L1-2-1", "L2-3-1");
+        // >1 variable per set, so a guarantee loop that covers only the first is caught; and the shunt set
+        // is never a monitored function, so its variables can only be grouped by that loop.
+        List<String> lines = List.of("L1-5-1", "L3-4-1", "L4-5-1");
+        List<String> shunts = List.of("B9-SH");
+        Map<String, Double> cot = Map.of(powerKey("L1-2-1"), 0.75, powerKey("L2-3-1"), -1.5);
+
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+        String variantId = network.getVariantManager().getWorkingVariantId();
+
+        AcSensitivityAnalysis.AdjointBlock lineBlock = new AcSensitivityAnalysis.AdjointBlock(ft, functions,
+                adjointVariables(lines, SensitivityVariableType.BRANCH_ADMITTANCE));
+        AcSensitivityAnalysis.AdjointBlock shuntBlock = new AcSensitivityAnalysis.AdjointBlock(ft, functions,
+                adjointVariables(shunts, SensitivityVariableType.SHUNT_COMPENSATOR_SUSCEPTANCE));
+
+        Map<String, Double> lineOnly = analysis.runAdjoint(network, variantId, List.of(),
+                adjointBlocks(List.of(ft), List.of(functions), SensitivityVariableType.BRANCH_ADMITTANCE, lines), cot);
+        Map<String, Double> shuntOnly = analysis.runAdjoint(network, variantId, List.of(),
+                adjointBlocks(List.of(ft), List.of(functions), SensitivityVariableType.SHUNT_COMPENSATOR_SUSCEPTANCE, shunts), cot);
+
+        // BOTH orders: whichever set comes second is the one a first-block-only guarantee loop drops, so
+        // testing one order would leave the other half of the defect uncovered.
+        for (List<AcSensitivityAnalysis.AdjointBlock> fused : List.of(List.of(shuntBlock, lineBlock),
+                                                                     List.of(lineBlock, shuntBlock))) {
+            Map<String, Double> theta = analysis.runAdjoint(network, variantId, List.of(), fused, cot);
+            for (Map<String, Double> perSet : List.of(lineOnly, shuntOnly)) {
+                for (Map.Entry<String, Double> e : perSet.entrySet()) {
+                    assertTrue(theta.containsKey(e.getKey()),
+                            "fused runAdjoint dropped variable " + e.getKey() + "; θ̄ held " + theta.keySet());
+                    assertEquals(e.getValue(), theta.get(e.getKey()), 1e-12 * Math.abs(e.getValue()) + 1e-13,
+                            "fused runAdjoint must match the per-variable-set answer for " + e.getKey());
+                }
+            }
+            // and the comparison must not be vacuous: the variables a broken guarantee loop drops are the
+            // non-first ones, so at least one of those has to be genuinely non-zero.
+            assertTrue(Math.abs(theta.get(lines.get(2))) > 1e-6,
+                    "expected a non-trivial θ̄ on a non-first variable, got " + theta.get(lines.get(2)));
+        }
+    }
+
+    private static List<AcSensitivityAnalysis.AdjointVariable> adjointVariables(List<String> ids, SensitivityVariableType vt) {
+        return ids.stream().map(v -> new AcSensitivityAnalysis.AdjointVariable(v, vt, false)).toList();
+    }
+
+    @Test
     void buildAdjointFactorsRejectsEmptyDeclarations() {
         // An empty declaration has no meaningful θ̄, and the failure must NAME what is empty: before this
         // guard each case died on an IndexOutOfBoundsException from inside buildAdjointFactors, and an
