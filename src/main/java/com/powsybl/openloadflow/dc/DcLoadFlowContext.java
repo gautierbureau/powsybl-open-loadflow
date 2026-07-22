@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.dc;
 
 import com.powsybl.openloadflow.dc.equations.DcEquationSystemCreator;
 import com.powsybl.openloadflow.dc.equations.DcEquationType;
+import com.powsybl.openloadflow.dc.equations.DcJacobianMatrix;
 import com.powsybl.openloadflow.dc.equations.DcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.JacobianMatrix;
@@ -37,7 +38,7 @@ public class DcLoadFlowContext extends AbstractLoadFlowContext<DcVariableType, D
     @Override
     public JacobianMatrix<DcVariableType, DcEquationType> getJacobianMatrix() {
         if (jacobianMatrix == null) {
-            jacobianMatrix = new JacobianMatrix<>(getEquationSystem(), parameters.getMatrixFactory());
+            jacobianMatrix = new DcJacobianMatrix(getEquationSystem(), parameters.getMatrixFactory(), network);
         }
         return jacobianMatrix;
     }
