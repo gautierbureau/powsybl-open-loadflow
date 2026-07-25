@@ -332,6 +332,31 @@ public interface LfBranch extends LfElement {
                                           boolean createExtension, Map<String, LfBranchResults> zeroImpedanceFlows,
                                           LoadFlowModel loadFlowModel);
 
+    /**
+     * Consumes the flows (SI units) of one branch result: side 1/2 active and reactive power, current, and the flow
+     * transfer ratio. Primitive-only, so a caller can stream branch flows without allocating a {@link BranchResult} per
+     * branch.
+     */
+    @FunctionalInterface
+    interface BranchFlowConsumer {
+        void accept(String branchId, double p1, double q1, double i1, double p2, double q2, double i2, double flowTransfer);
+    }
+
+    /**
+     * Emits this branch's flow result(s) to the given consumer, without allocating any {@link BranchResult}. This is the
+     * allocation-free equivalent of {@link #createBranchResult} (without result extensions) used on the streaming path.
+     * The default implementation delegates to {@link #createBranchResult}; branch types that are reported as results
+     * override it to emit directly, and types that are not reported (switches, three-winding transformer legs) emit
+     * nothing.
+     */
+    default void emitBranchResults(double preContingencyBranchP1, double preContingencyBranchOfContingencyP1,
+                                   Map<String, LfBranchResults> zeroImpedanceFlows, LoadFlowModel loadFlowModel, BranchFlowConsumer consumer) {
+        for (BranchResult branchResult : createBranchResult(preContingencyBranchP1, preContingencyBranchOfContingencyP1, false, zeroImpedanceFlows, loadFlowModel)) {
+            consumer.accept(branchResult.getBranchId(), branchResult.getP1(), branchResult.getQ1(), branchResult.getI1(),
+                    branchResult.getP2(), branchResult.getQ2(), branchResult.getI2(), branchResult.getFlowTransfer());
+        }
+    }
+
     double computeApparentPower1();
 
     double computeApparentPower2();

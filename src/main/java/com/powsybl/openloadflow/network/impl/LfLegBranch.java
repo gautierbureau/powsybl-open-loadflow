@@ -148,6 +148,12 @@ public final class LfLegBranch extends AbstractImpedantLfBranch {
         throw new PowsyblException("Unsupported type of branch for branch result: " + getId());
     }
 
+    @Override
+    public void emitBranchResults(double preContingencyBranchP1, double preContingencyBranchOfContingencyP1,
+                                  Map<String, LfBranch.LfBranchResults> zeroImpedanceFlows, LoadFlowModel loadFlowModel, BranchFlowConsumer consumer) {
+        // three-winding transformer legs are not reported as branch results
+    }
+
     private <T extends LoadingLimits> Supplier<Map<String, T>> toMapIndexedByOperationalLimitsGroupId(Function<OperationalLimitsGroup, Optional<T>> limitsGetter) {
         return () -> getLeg()
                 .getAllSelectedOperationalLimitsGroups()

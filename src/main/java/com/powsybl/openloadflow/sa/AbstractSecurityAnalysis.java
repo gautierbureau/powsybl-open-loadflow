@@ -25,6 +25,8 @@ import com.powsybl.iidm.network.ComponentConstants;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
+import com.powsybl.loadflow.resultswriter.NetworkResultWriter;
+import com.powsybl.loadflow.resultswriter.NetworkResultWriterFactory;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.equations.Quantity;
@@ -41,6 +43,7 @@ import com.powsybl.openloadflow.network.impl.LfNetworkList;
 import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
 import com.powsybl.openloadflow.network.impl.PropagatedContingencyCreationParameters;
+import com.powsybl.openloadflow.network.util.ZeroImpedanceFlows;
 import com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters;
 import com.powsybl.openloadflow.util.Indexed;
 import com.powsybl.openloadflow.util.Lists2;
@@ -62,6 +65,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -86,6 +91,18 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
     protected final ReportNode reportNode;
 
+    // factory building one streaming sink per contingency partition; defaults to a no-op so that behaviour is unchanged
+    // unless a factory is set. Each partition thread gets its own writer, so writing is lock-free.
+    protected NetworkResultWriterFactory resultWriterFactory = NetworkResultWriterFactory.NO_OP;
+
+    // when true, all branch flows are streamed for the base case and every contingency, bypassing the state monitors.
+    protected boolean monitorAllBranches;
+
+    // the writer of the partition currently being processed by this thread (set by runPartition).
+    private final ThreadLocal<NetworkResultWriter> partitionWriter = ThreadLocal.withInitial(() -> NetworkResultWriter.NO_OP);
+    // whether the current partition is the one responsible for streaming the base-case rows (partition 0 only).
+    private final ThreadLocal<Boolean> partitionWritesPreContingency = ThreadLocal.withInitial(() -> Boolean.FALSE);
+
     protected Level logLevel = Level.INFO; // level of the post contingency and action logs
 
     protected AbstractSecurityAnalysis(Network network, MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory,
@@ -95,6 +112,41 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         this.connectivityFactory = Objects.requireNonNull(connectivityFactory);
         this.monitorIndex = new StateMonitorIndex(stateMonitors);
         this.reportNode = Objects.requireNonNull(reportNode);
+    }
+
+    /**
+     * Sets the factory building the per-partition streaming sinks used to write results (base case and each contingency)
+     * as they are computed, instead of keeping the full network results in memory. Defaults to
+     * {@link NetworkResultWriterFactory#NO_OP}.
+     */
+    public void setResultWriterFactory(NetworkResultWriterFactory resultWriterFactory) {
+        this.resultWriterFactory = Objects.requireNonNull(resultWriterFactory);
+    }
+
+    public void setMonitorAllBranches(boolean monitorAllBranches) {
+        this.monitorAllBranches = monitorAllBranches;
+    }
+
+    protected boolean isStreaming() {
+        return resultWriterFactory != NetworkResultWriterFactory.NO_OP;
+    }
+
+    /**
+     * Runs one contingency partition with a dedicated streaming writer. The writer is created for the partition, exposed
+     * to the (same-thread) downstream code through {@link #partitionWriter}, and closed when the partition completes.
+     * Because each partition thread has its own writer, no locking is needed while streaming.
+     *
+     * @param partitionIndex the partition number (0 for the single-threaded case); only partition 0 streams the base case.
+     */
+    protected SecurityAnalysisResult runPartition(int partitionIndex, Supplier<SecurityAnalysisResult> body) {
+        try (NetworkResultWriter writer = resultWriterFactory.create(partitionIndex)) {
+            partitionWriter.set(writer);
+            partitionWritesPreContingency.set(partitionIndex == 0);
+            return body.get();
+        } finally {
+            partitionWriter.remove();
+            partitionWritesPreContingency.remove();
+        }
     }
 
     protected abstract LoadFlowModel getLoadFlowModel();
@@ -181,8 +233,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
             // create networks including all necessary switches
             try (LfNetworkList lfNetworks = Networks.loadWithReconnectableElements(network, topoConfig, parameters.getNetworkParameters(), saReportNode)) {
-                finalResult = runSimulationsOnAllComponents(lfNetworks, propagatedContingencies, parameters,
-                        securityAnalysisParameters, operatorStrategies, actions, limitReductions, lfParameters);
+                finalResult = runPartition(0, () -> runSimulationsOnAllComponents(lfNetworks, propagatedContingencies, parameters,
+                        securityAnalysisParameters, operatorStrategies, actions, limitReductions, lfParameters));
             }
 
         } else {
@@ -198,9 +250,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             ContingencyMultiThreadHelper.ParameterProvider<P> parameterProvider = partitionTopoConfig ->
                 createParameters(lfParameters, lfParametersExt, partitionTopoConfig.isBreaker(), isAreaInterchangeControl(lfParametersExt, contingencies));
             ContingencyMultiThreadHelper.ContingencyRunner<P> contingencyRunner = (partitionNum, lfNetworks, propagatedContingencies, parameters) ->
-                    partitionResults.set(partitionNum, runSimulationsOnAllComponents(
+                    partitionResults.set(partitionNum, runPartition(partitionNum, () -> runSimulationsOnAllComponents(
                             lfNetworks, propagatedContingencies, parameters, securityAnalysisParameters, operatorStrategies,
-                            actions, limitReductions, lfParameters));
+                            actions, limitReductions, lfParameters)));
             ContingencyMultiThreadHelper.ReportMerger reportMerger = ContingencyMultiThreadHelper::mergeReportThreadResults;
             ContingencyMultiThreadHelper.createLFNetworksPerContingencyPartitionAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
                     parameterProvider, contingencyRunner, saReportNode, reportMerger, executor);
@@ -541,11 +593,21 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             if (preContingencyComputationOk) {
                 afterPreContingencySimulation(p);
 
-                // update network result
-                preContingencyNetworkResult.update();
+                // update network result (skipped in "monitor all branches" mode: flows are streamed directly instead of
+                // being accumulated through the state monitors)
+                if (!monitorAllBranches) {
+                    preContingencyNetworkResult.update();
+                }
 
                 // detect violations
                 preContingencyLimitViolationManager.detectViolations(lfNetwork);
+
+                // in "monitor all branches" mode, stream all base-case branch flows (only partition 0 writes the base case
+                // to avoid duplicating it across partitions)
+                if (monitorAllBranches && isPartitionWritingPreContingency()) {
+                    streamAllBranchFlows(lfNetwork, "", "", preContingencyLoadFlowResult.toComponentResultStatus().status().name(),
+                            loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor(), currentPartitionWriter(), LfBranch::isDisabled);
+                }
 
                 // save base state for later restoration after each contingency
                 NetworkState networkState = NetworkState.save(lfNetwork);
@@ -580,14 +642,64 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             }
 
             return new SecurityAnalysisResult(
-                    new PreContingencyResult(
-                            preContingencyLoadFlowResult.toComponentResultStatus().status(),
-                            new LimitViolationsResult(preContingencyLimitViolationManager.getLimitViolations()),
-                            new NetworkResult(preContingencyNetworkResult.getBranchResults(), preContingencyNetworkResult.getBusResults(),
-                            preContingencyNetworkResult.getThreeWindingsTransformerResults()),
-                            preContingencyLoadFlowResult.getDistributedActivePower() * PerUnit.SB),
+                    buildPreContingencyResult(preContingencyLoadFlowResult, preContingencyLimitViolationManager, preContingencyNetworkResult),
                     postContingencyResults, operatorStrategyResults);
         }
+    }
+
+    private PreContingencyResult buildPreContingencyResult(R preContingencyLoadFlowResult,
+                                                           LimitViolationManager preContingencyLimitViolationManager,
+                                                           PreContingencyNetworkResult preContingencyNetworkResult) {
+        return new PreContingencyResult(
+                preContingencyLoadFlowResult.toComponentResultStatus().status(),
+                new LimitViolationsResult(preContingencyLimitViolationManager.getLimitViolations()),
+                new NetworkResult(preContingencyNetworkResult.getBranchResults(), preContingencyNetworkResult.getBusResults(),
+                        preContingencyNetworkResult.getThreeWindingsTransformerResults()),
+                preContingencyLoadFlowResult.getDistributedActivePower() * PerUnit.SB);
+    }
+
+    protected static final NetworkResult EMPTY_NETWORK_RESULT =
+            new NetworkResult(Collections.emptyList(), Collections.emptyList(), Collections.emptyList());
+
+    /** The streaming writer of the contingency partition currently processed by this thread. */
+    protected NetworkResultWriter currentPartitionWriter() {
+        return partitionWriter.get();
+    }
+
+    /** Whether the current partition is the one responsible for streaming the base-case rows (partition 0 only). */
+    protected boolean isPartitionWritingPreContingency() {
+        return Boolean.TRUE.equals(partitionWritesPreContingency.get());
+    }
+
+    /**
+     * Vectorized "monitor all branches" path: iterate all branches of the solved network and stream one flow row per
+     * branch directly to the writer, without going through the state monitors and without allocating a persistent
+     * {@link NetworkResult}. This is used for both the base case and each post-contingency state.
+     *
+     * @param isBranchDisabled tells which branches are disabled in the current state (e.g. {@code LfBranch::isDisabled}
+     *                         for the base case, or a contingency-specific predicate for the fast-DC path)
+     */
+    protected void streamAllBranchFlows(LfNetwork lfNetwork, String contingencyId, String operatorStrategyId, String status, LoadFlowModel loadFlowModel,
+                                        double dcPowerFactor, NetworkResultWriter writer, Predicate<LfBranch> isBranchDisabled) {
+        Map<String, LfBranch.LfBranchResults> zeroImpedanceFlows = computeAllZeroImpedanceFlows(lfNetwork, loadFlowModel, dcPowerFactor);
+        // one consumer per state (not per branch); each branch emits its flows straight to the writer with no BranchResult
+        // allocation. Branch types not reported as results (switches, three-winding transformer legs) emit nothing.
+        LfBranch.BranchFlowConsumer sink = (branchId, p1, q1, i1, p2, q2, i2, flowTransfer) ->
+                writer.writeBranchResult(contingencyId, operatorStrategyId, status, branchId, p1, q1, i1, p2, q2, i2, flowTransfer);
+        for (LfBranch branch : lfNetwork.getBranches()) {
+            if (!isBranchDisabled.test(branch)) {
+                branch.emitBranchResults(Double.NaN, Double.NaN, zeroImpedanceFlows, loadFlowModel, sink);
+            }
+        }
+    }
+
+    private Map<String, LfBranch.LfBranchResults> computeAllZeroImpedanceFlows(LfNetwork lfNetwork, LoadFlowModel loadFlowModel, double dcPowerFactor) {
+        Map<String, LfBranch.LfBranchResults> zeroImpedanceFlows = new HashMap<>();
+        for (LfZeroImpedanceNetwork zeroImpedanceNetwork : lfNetwork.getZeroImpedanceNetworks(loadFlowModel)) {
+            new ZeroImpedanceFlows(zeroImpedanceNetwork.getGraph(), zeroImpedanceNetwork.getSpanningTree(), loadFlowModel, dcPowerFactor)
+                    .computeFlows(true, zeroImpedanceFlows);
+        }
+        return zeroImpedanceFlows;
     }
 
     /**
@@ -643,16 +755,32 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions, securityAnalysisParameters.getIncreasedViolationsParameters());
 
         LoadFlowModel loadFlowModel = securityAnalysisParameters.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC;
-        var postContingencyNetworkResult = new PostContingencyNetworkResult(network, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex),
-                createResultExtension, preContingencyNetworkResult, contingency, loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor(),
-                securityAnalysisParameters.getModifiedMonitoredElementsParameters());
+        double dcPowerFactor = securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor();
 
-        if (status.equals(PostContingencyComputationStatus.CONVERGED)) {
-            // update network result
-            postContingencyNetworkResult.update();
+        NetworkResult networkResult;
+        if (monitorAllBranches) {
+            // vectorized path: stream all branch flows straight to the partition writer and keep no network result in
+            // memory, bypassing the state monitors entirely
+            if (status.equals(PostContingencyComputationStatus.CONVERGED)) {
+                postContingencyLimitViolationManager.detectViolations(network);
+                streamAllBranchFlows(network, contingency.getId(), "", status.name(), loadFlowModel, dcPowerFactor, currentPartitionWriter(), LfBranch::isDisabled);
+            }
+            networkResult = EMPTY_NETWORK_RESULT;
+        } else {
+            var postContingencyNetworkResult = new PostContingencyNetworkResult(network, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex),
+                    createResultExtension, preContingencyNetworkResult, contingency, loadFlowModel, dcPowerFactor,
+                    securityAnalysisParameters.getModifiedMonitoredElementsParameters());
 
-            // detect violations
-            postContingencyLimitViolationManager.detectViolations(network);
+            if (status.equals(PostContingencyComputationStatus.CONVERGED)) {
+                // update network result
+                postContingencyNetworkResult.update();
+
+                // detect violations
+                postContingencyLimitViolationManager.detectViolations(network);
+            }
+            networkResult = new NetworkResult(postContingencyNetworkResult.getBranchResults(),
+                    postContingencyNetworkResult.getBusResults(),
+                    postContingencyNetworkResult.getThreeWindingsTransformerResults());
         }
 
         stopwatch.stop();
@@ -667,9 +795,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 contingency,
                 status,
                 new LimitViolationsResult(postContingencyLimitViolationManager.getLimitViolations()),
-                new NetworkResult(postContingencyNetworkResult.getBranchResults(),
-                postContingencyNetworkResult.getBusResults(),
-                postContingencyNetworkResult.getThreeWindingsTransformerResults()),
+                networkResult,
                 connectivityResult,
                 (preDistributedActivePower + result.getDistributedActivePower()) * PerUnit.SB);
     }
@@ -712,16 +838,33 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         PostContingencyComputationStatus status = postContingencyStatusFromLoadFlowResult(result);
         var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions, securityAnalysisParameters.getIncreasedViolationsParameters());
         LoadFlowModel loadFlowModel = securityAnalysisParameters.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC;
-        var postActionsNetworkResult = new PostContingencyNetworkResult(network, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex), createResultExtension,
-                preContingencyNetworkResult, contingency, loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor(),
-                securityAnalysisParameters.getModifiedMonitoredElementsParameters());
+        double dcPowerFactor = securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor();
 
-        if (status.equals(PostContingencyComputationStatus.CONVERGED)) {
-            // update network result
-            postActionsNetworkResult.update();
+        NetworkResult networkResult;
+        if (monitorAllBranches) {
+            // vectorized: stream all operator-strategy branch flows (tagged with the operator strategy id), keep no
+            // network result in memory
+            if (status.equals(PostContingencyComputationStatus.CONVERGED)) {
+                postActionsViolationManager.detectViolations(network);
+                streamAllBranchFlows(network, contingency.getId(), operatorStrategy.getId(), status.name(), loadFlowModel,
+                        dcPowerFactor, currentPartitionWriter(), LfBranch::isDisabled);
+            }
+            networkResult = EMPTY_NETWORK_RESULT;
+        } else {
+            var postActionsNetworkResult = new PostContingencyNetworkResult(network, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex), createResultExtension,
+                    preContingencyNetworkResult, contingency, loadFlowModel, dcPowerFactor,
+                    securityAnalysisParameters.getModifiedMonitoredElementsParameters());
 
-            // detect violations
-            postActionsViolationManager.detectViolations(network);
+            if (status.equals(PostContingencyComputationStatus.CONVERGED)) {
+                // update network result
+                postActionsNetworkResult.update();
+
+                // detect violations
+                postActionsViolationManager.detectViolations(network);
+            }
+            networkResult = new NetworkResult(postActionsNetworkResult.getBranchResults(),
+                    postActionsNetworkResult.getBusResults(),
+                    postActionsNetworkResult.getThreeWindingsTransformerResults());
         }
 
         stopwatch.stop();
@@ -731,9 +874,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         return new OperatorStrategyResult(operatorStrategy,
                 List.of(new OperatorStrategyResult.ConditionalActionsResult(operatorStrategy.getId(), status,
                                           new LimitViolationsResult(postActionsViolationManager.getLimitViolations()),
-                                          new NetworkResult(postActionsNetworkResult.getBranchResults(),
-                                                            postActionsNetworkResult.getBusResults(),
-                                                            postActionsNetworkResult.getThreeWindingsTransformerResults()),
+                                          networkResult,
                         result.getDistributedActivePower() * PerUnit.SB)
                 ));
     }
@@ -770,6 +911,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         double preDistributedActivePower = contingencyActivePowerLossDistribution.run(lfNetwork, lfContingency,
             propagatedContingency.getContingency(), securityAnalysisParameters, contingencyLoadFlowParameters, postContSimReportNode);
 
+        // in "monitor all branches" mode, runPostContingencySimulation streams all branch flows to the partition writer
+        // and returns a lightweight result (no network result) so that peak memory stays bounded whatever the number of
+        // contingencies. Limit violations, status and connectivity are still returned as usual.
         var postContingencyResult = runPostContingencySimulation(lfNetwork, context, propagatedContingency.getContingency(),
             lfContingency, preContingencyLimitViolationManager,
             securityAnalysisParameters,
