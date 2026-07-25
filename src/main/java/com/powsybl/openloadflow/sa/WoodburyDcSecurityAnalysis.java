@@ -59,7 +59,9 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
     private record WoodburyContext(DcLoadFlowContext dcLoadFlowContext, Map<String, List<Indexed<OperatorStrategy>>> operatorStrategiesByContingencyId, Map<String, LfAction> lfActionById,
                                    boolean createResultExtension, SecurityAnalysisParameters.IncreasedViolationsParameters violationsParameters,
-                                   List<LimitReduction> limitReductions, SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modifiedMonitoredElementsParameters) {
+                                   List<LimitReduction> limitReductions, SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modifiedMonitoredElementsParameters,
+                                   List<LimitViolationManager.BranchLimitsToCheck> branchLimitsToCheck,
+                                   OpenSecurityAnalysisParameters.LimitViolationReporting limitViolationReporting) {
     }
 
     private record ToFastDcResults(Function<ConnectivityAnalysisResult, double[]> toPostContingencyStates,
@@ -208,8 +210,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         postContingencyNetworkResult.update(isBranchDisabledDueToContingency);
 
         // detect violations
-        var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, woodburyContext.limitReductions, woodburyContext.violationsParameters);
-        postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency);
+        var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, woodburyContext.limitReductions, woodburyContext.violationsParameters, woodburyContext.limitViolationReporting());
+        postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency, woodburyContext.branchLimitsToCheck());
 
         // connectivity result due to the contingency
         var connectivityResult = new ConnectivityResult(
@@ -262,8 +264,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
         // detect violations
         var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager,
-                woodburyContext.limitReductions, woodburyContext.violationsParameters);
-        postActionsViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency);
+                woodburyContext.limitReductions, woodburyContext.violationsParameters, woodburyContext.limitViolationReporting());
+        postActionsViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency, woodburyContext.branchLimitsToCheck());
 
         return new OperatorStrategyResult(operatorStrategy,
             List.of(
@@ -430,11 +432,18 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
             preContingencyNetworkResult.update();
 
             // detect violations
-            var preContingencyLimitViolationManager = new LimitViolationManager(limitReductions);
+            OpenSecurityAnalysisParameters.LimitViolationReporting limitViolationReporting =
+                    OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters).getLimitViolationReporting();
+            var preContingencyLimitViolationManager = new LimitViolationManager(limitReductions, limitViolationReporting);
             preContingencyLimitViolationManager.detectViolations(lfNetwork);
+            // branch limits do not change between contingencies: resolve once the limit groups of the branches carrying
+            // limits (reduced to the most restrictive one per side/type when requested) so that the post contingency
+            // violation detection reuses them instead of looking up the limits of every branch of the network on each contingency
+            List<LimitViolationManager.BranchLimitsToCheck> branchLimitsToCheck =
+                    LimitViolationManager.getBranchLimitsToCheck(lfNetwork, preContingencyLimitViolationManager.getLimitReductionManager(), limitViolationReporting);
             WoodburyContext woodburyContext = new WoodburyContext(context, operatorStrategiesByContingencyId, lfActionById, createResultExtension,
                     securityAnalysisParameters.getIncreasedViolationsParameters(), limitReductions,
-                    securityAnalysisParameters.getModifiedMonitoredElementsParameters());
+                    securityAnalysisParameters.getModifiedMonitoredElementsParameters(), branchLimitsToCheck, limitViolationReporting);
 
             // compute states with +1 -1 to model the contingencies and run connectivity analysis
             ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivityBreakAnalysisResults = ConnectivityBreakAnalysis.run(context, propagatedContingencies);
