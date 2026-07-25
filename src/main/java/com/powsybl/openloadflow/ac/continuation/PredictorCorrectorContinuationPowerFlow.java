@@ -1,0 +1,611 @@
+/**
+ * Copyright (c) 2026, RTE (http://www.rte-france.com)
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ * SPDX-License-Identifier: MPL-2.0
+ */
+package com.powsybl.openloadflow.ac.continuation;
+
+import com.powsybl.commons.report.ReportNode;
+import com.powsybl.iidm.network.Network;
+import com.powsybl.loadflow.LoadFlowParameters;
+import com.powsybl.math.matrix.MatrixException;
+import com.powsybl.math.matrix.MatrixFactory;
+import com.powsybl.openloadflow.OpenLoadFlowParameters;
+import com.powsybl.openloadflow.ac.AcLoadFlowContext;
+import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
+import com.powsybl.openloadflow.ac.equations.AcEquationType;
+import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
+import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.equations.EquationVector;
+import com.powsybl.openloadflow.equations.JacobianMatrix;
+import com.powsybl.openloadflow.equations.StateVector;
+import com.powsybl.openloadflow.equations.TargetVector;
+import com.powsybl.openloadflow.equations.Variable;
+import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
+import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.network.LfGenerator;
+import com.powsybl.openloadflow.network.LfLoad;
+import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.impl.Networks;
+import com.powsybl.openloadflow.network.util.UniformValueVoltageInitializer;
+import com.powsybl.openloadflow.network.util.VoltageInitializer;
+import com.powsybl.openloadflow.util.PerUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+
+/**
+ * Predictor-corrector continuation power flow (a "true" continuation power flow, CPF).
+ *
+ * <p>The network state {@code x} (bus voltage magnitudes and angles) and a scalar load factor {@code lambda} are
+ * traced together along the P-V curve. Each step:</p>
+ * <ol>
+ *     <li><b>predictor</b>: computes the tangent to the curve by solving the bordered system
+ *         {@code [F_x F_lambda; e_k^T 0] . t = e_{n+1}} and moves an arc length {@code sigma} along it;</li>
+ *     <li><b>corrector</b>: a Newton method on the same bordered (augmented) system that projects the predicted
+ *         point back onto {@code F(x, lambda) = 0} using a local parameterization (the tangent component of
+ *         largest magnitude is frozen).</li>
+ * </ol>
+ *
+ * <p>Because the augmented (n+1)x(n+1) system stays non-singular at the nose of the curve (where the plain
+ * power-flow Jacobian {@code F_x} becomes singular), the continuation passes through the maximum loadability
+ * point and traces the lower (unstable) branch. The tangent at the nose gives the voltage participation factors,
+ * i.e. which buses drive the collapse.</p>
+ *
+ * <p>This is a mostly smooth continuation: the load is increased along a {@link LoadIncreaseDirection} and,
+ * optionally, generation is increased along a {@link GenerationParticipation} to pick it up; the slack bus
+ * absorbs whatever is left. Reactive limits can optionally be enforced
+ * ({@link PredictorCorrectorParameters#setEnforceReactiveLimits}): a voltage-controlled generator bus that hits
+ * its reactive limit is switched PV to PQ, which introduces a breakpoint on the curve (reported in the result)
+ * and usually brings the collapse point closer. Other discrete controls (distributed slack, tap changers, ...)
+ * are not applied. For a collapse point accounting for all of them, use the stepped {@link ContinuationPowerFlow}.</p>
+ *
+ * <p>The augmented linear system is solved by block elimination (bordering) that reuses the sparse LU
+ * factorization of {@code F_x} kept by the existing {@link JacobianMatrix}: each corrector iteration performs
+ * two sparse back-substitutions rather than factoring a separate {@code (n+1)x(n+1)} matrix. The bordering
+ * relies on {@code F_x} being non-singular; exactly at the nose it is singular, but the continuation points
+ * straddle that point, and a singular solve there is caught and turned into a step reduction.</p>
+ *
+ * @author Claude
+ */
+public class PredictorCorrectorContinuationPowerFlow {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(PredictorCorrectorContinuationPowerFlow.class);
+
+    private static final int PARAM_LAMBDA = -1;
+
+    private final PredictorCorrectorParameters parameters;
+
+    public PredictorCorrectorContinuationPowerFlow(PredictorCorrectorParameters parameters) {
+        this.parameters = Objects.requireNonNull(parameters);
+    }
+
+    private record ParticipatingLoad(LfLoad load, double weight, double baseTargetP, double baseTargetQ) {
+    }
+
+    private record ParticipatingGenerator(LfGenerator generator, double weight, double baseTargetP) {
+    }
+
+    /**
+     * Mutable state shared by the predictor and corrector of a single run.
+     */
+    private final class Continuation {
+
+        private final LfNetwork network;
+        private final EquationSystem<AcVariableType, AcEquationType> equationSystem;
+        private final JacobianMatrix<AcVariableType, AcEquationType> j;
+        private final TargetVector<AcVariableType, AcEquationType> targetVector;
+        private final EquationVector<AcVariableType, AcEquationType> equationVector;
+        private final StateVector stateVector;
+        private final List<ParticipatingLoad> participants;
+        private final List<ParticipatingGenerator> participatingGenerators;
+        private final int n;
+        private double[] fLambda;
+
+        private double lambda;
+
+        private Continuation(AcLoadFlowContext context, List<ParticipatingLoad> participants,
+                             List<ParticipatingGenerator> participatingGenerators) {
+            this.network = context.getNetwork();
+            this.equationSystem = context.getEquationSystem();
+            this.j = context.getJacobianMatrix();
+            this.targetVector = context.getTargetVector();
+            this.equationVector = context.getEquationVector();
+            this.stateVector = equationSystem.getStateVector();
+            this.participants = participants;
+            this.participatingGenerators = participatingGenerators;
+            this.n = equationSystem.getIndex().getColumnCount();
+            this.fLambda = computeFLambda();
+        }
+
+        /**
+         * F_lambda = d F / d lambda (the target is linear in lambda, so a single finite difference is exact).
+         * Since F = calc - target, F_lambda = -(target(lambda=1) - target(lambda=0)). The load level is restored
+         * to the current lambda afterwards, so this can be recomputed after a reactive-limit structure change.
+         */
+        private double[] computeFLambda() {
+            applyIncrease(0.0);
+            double[] t0 = targetVector.getArray().clone();
+            applyIncrease(1.0);
+            double[] t1 = targetVector.getArray().clone();
+            applyIncrease(lambda);
+            double[] result = new double[n];
+            for (int i = 0; i < n; i++) {
+                result[i] = -(t1[i] - t0[i]);
+            }
+            return result;
+        }
+
+        /**
+         * Checks every voltage-controlled generator bus (except the slack) against its reactive limits and, for
+         * those beyond a limit, switches them PV to PQ with their reactive power frozen at the limit. Returns the
+         * breakpoints created. After a switch the equation structure changes, so {@link #fLambda} is recomputed.
+         */
+        private List<ReactiveLimitBreakpoint> enforceReactiveLimits() {
+            List<ReactiveLimitBreakpoint> breakpoints = new ArrayList<>();
+            double tolerance = parameters.getReactivePowerLimitTolerance();
+            for (LfBus bus : network.getBuses()) {
+                if (bus.isDisabled() || bus.isSlack() || !bus.isGeneratorVoltageControlEnabled()) {
+                    continue;
+                }
+                double q = bus.getQ().eval() + bus.getLoadTargetQ();
+                if (q > bus.getMaxQ() + tolerance) {
+                    double qLimit = bus.getMaxQ();
+                    bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(qLimit);
+                    bus.setQLimitType(LfBus.QLimitType.MAX_Q);
+                    breakpoints.add(new ReactiveLimitBreakpoint(lambda, bus.getId(), qLimit * PerUnit.SB, true));
+                } else if (q < bus.getMinQ() - tolerance) {
+                    double qLimit = bus.getMinQ();
+                    bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(qLimit);
+                    bus.setQLimitType(LfBus.QLimitType.MIN_Q);
+                    breakpoints.add(new ReactiveLimitBreakpoint(lambda, bus.getId(), qLimit * PerUnit.SB, false));
+                }
+            }
+            if (!breakpoints.isEmpty()) {
+                fLambda = computeFLambda();
+            }
+            return breakpoints;
+        }
+
+        private void applyIncrease(double lambdaValue) {
+            for (ParticipatingLoad p : participants) {
+                double scaling = 1.0 + lambdaValue * p.weight();
+                p.load().setTargetP(p.baseTargetP() * scaling);
+                if (parameters.isScaleReactivePowerWithActivePower()) {
+                    p.load().setTargetQ(p.baseTargetQ() * scaling);
+                }
+            }
+            for (ParticipatingGenerator g : participatingGenerators) {
+                g.generator().setTargetP(g.baseTargetP() * (1.0 + lambdaValue * g.weight()));
+            }
+        }
+
+        /** Current power mismatch F = calc(x) - target(lambda), indexed by equation column. */
+        private double[] computeMismatch() {
+            double[] calc = equationVector.getArray();
+            double[] target = targetVector.getArray();
+            double[] f = new double[n];
+            for (int i = 0; i < n; i++) {
+                f[i] = calc[i] - target[i];
+            }
+            return f;
+        }
+
+        /**
+         * Solves the augmented system {@code [A b; c^T d] . [dx; dlambda] = [r1; r2]} where {@code A = F_x} and
+         * {@code b = F_lambda}, by block elimination (bordering) that reuses the sparse factorization of {@code A}
+         * held by the existing {@link JacobianMatrix} &mdash; no dense matrix is built:
+         * <pre>
+         *   u = A^-1 r1,   v = A^-1 b
+         *   dlambda = (r2 - c^T u) / (d - c^T v)
+         *   dx = u - dlambda v
+         * </pre>
+         * The parameterization row is {@code c = e_k, d = 0} for a state-variable parameter, or
+         * {@code c = 0, d = 1} for the lambda parameter. Each {@code A^-1} apply is a sparse back-substitution
+         * on the LU that the Jacobian keeps up to date at the current state.
+         *
+         * @return {@code [dx (variable indexed); dlambda]}, or an all-NaN vector if {@code A} is singular.
+         */
+        private double[] solveAugmented(int paramVariable, double[] rhs) {
+            double[] u = Arrays.copyOf(rhs, n); // r1, overwritten in place with A^-1 r1
+            double[] v = fLambda.clone();       // b, overwritten in place with A^-1 b
+            try {
+                // both solves reuse the same LU of the current F_x (state is unchanged between them)
+                j.solveTransposed(u);
+                j.solveTransposed(v);
+            } catch (MatrixException e) {
+                // A is singular (exactly at the nose): signal failure, the caller reduces the step
+                double[] nan = new double[n + 1];
+                Arrays.fill(nan, Double.NaN);
+                return nan;
+            }
+            double r2 = rhs[n];
+            double cu = paramVariable == PARAM_LAMBDA ? 0.0 : u[paramVariable];
+            double cv = paramVariable == PARAM_LAMBDA ? 0.0 : v[paramVariable];
+            double d = paramVariable == PARAM_LAMBDA ? 1.0 : 0.0;
+            double dLambda = (r2 - cu) / (d - cv);
+            double[] z = new double[n + 1];
+            for (int r = 0; r < n; r++) {
+                z[r] = u[r] - dLambda * v[r];
+            }
+            z[n] = dLambda;
+            return z;
+        }
+
+        private void addToState(double[] deltaX) {
+            // stateVector.minus subtracts, so negate to add
+            double[] neg = new double[n];
+            for (int r = 0; r < n; r++) {
+                neg[r] = -deltaX[r];
+            }
+            stateVector.minus(neg);
+        }
+
+        /**
+         * Newton corrector projecting the current (x, lambda) guess back onto the curve, with the given local
+         * parameterization frozen to eta.
+         */
+        private boolean correct(int paramVariable, double eta) {
+            for (int iteration = 0; iteration <= parameters.getMaxCorrectorIterations(); iteration++) {
+                double[] f = computeMismatch();
+                double fNorm = infinityNorm(f);
+                double paramResidual = (paramVariable == PARAM_LAMBDA)
+                        ? lambda - eta
+                        : stateVector.get(paramVariable) - eta;
+                if (fNorm < parameters.getConvergenceEpsilon() && Math.abs(paramResidual) < parameters.getConvergenceEpsilon()) {
+                    return true;
+                }
+                if (iteration == parameters.getMaxCorrectorIterations()) {
+                    break;
+                }
+                double[] rhs = new double[n + 1];
+                for (int i = 0; i < n; i++) {
+                    rhs[i] = -f[i];
+                }
+                rhs[n] = -paramResidual;
+                double[] z = solveAugmented(paramVariable, rhs);
+                double[] deltaX = new double[n];
+                System.arraycopy(z, 0, deltaX, 0, n);
+                addToState(deltaX);
+                lambda += z[n];
+                applyIncrease(lambda);
+                if (!Double.isFinite(lambda) || !Double.isFinite(infinityNorm(stateVector.get()))) {
+                    return false;
+                }
+            }
+            return false;
+        }
+
+        /** Unit tangent [dx; dlambda] to the curve at the current point, oriented to continue previous direction. */
+        private double[] computeTangent(int paramVariable, double[] previousTangent) {
+            double[] rhs = new double[n + 1];
+            rhs[n] = 1.0;
+            double[] t = solveAugmented(paramVariable, rhs);
+            double norm = euclideanNorm(t);
+            for (int i = 0; i <= n; i++) {
+                t[i] /= norm;
+            }
+            if (previousTangent == null) {
+                if (t[n] < 0) { // first step: move towards increasing load
+                    negate(t);
+                }
+            } else if (dot(t, previousTangent) < 0) {
+                negate(t);
+            }
+            return t;
+        }
+
+        private ContinuationPoint buildPoint(boolean stable, ContinuationPoint previous) {
+            double minVoltage = Double.MAX_VALUE;
+            String minVoltageBusId = null;
+            Map<String, Double> busVoltages = parameters.isRecordBusVoltages() ? new LinkedHashMap<>() : Map.of();
+            for (Variable<AcVariableType> variable : equationSystem.getIndex().getSortedVariablesToFind()) {
+                if (variable.getType() == AcVariableType.BUS_V) {
+                    LfBus bus = network.getBus(variable.getElementNum());
+                    if (bus.isFictitious() || bus.isDisabled()) {
+                        continue;
+                    }
+                    double v = stateVector.get(variable.getRow());
+                    if (v < minVoltage) {
+                        minVoltage = v;
+                        minVoltageBusId = bus.getId();
+                    }
+                    if (parameters.isRecordBusVoltages()) {
+                        busVoltages.put(bus.getId(), v);
+                    }
+                }
+            }
+            double participatingLoadTargetPMw = participants.stream()
+                    .mapToDouble(p -> p.load().getTargetP())
+                    .sum() * PerUnit.SB;
+            Map<String, Double> busDvDlambda = ContinuationPoint.derivativeVsLoadFactor(busVoltages, lambda, previous);
+            return new ContinuationPoint(lambda, participatingLoadTargetPMw, minVoltage, minVoltageBusId, stable,
+                    busVoltages, busDvDlambda);
+        }
+
+        /**
+         * Normalized voltage participation factors at the current point, from the tangent: for each bus, the
+         * absolute value of its voltage magnitude component in the tangent, normalized so the maximum is 1.
+         */
+        private Map<String, Double> tangentVoltageParticipation(double[] tangent) {
+            Map<String, Double> raw = new LinkedHashMap<>();
+            double max = 0.0;
+            for (Variable<AcVariableType> variable : equationSystem.getIndex().getSortedVariablesToFind()) {
+                if (variable.getType() == AcVariableType.BUS_V) {
+                    LfBus bus = network.getBus(variable.getElementNum());
+                    if (bus.isFictitious() || bus.isDisabled()) {
+                        continue;
+                    }
+                    double value = Math.abs(tangent[variable.getRow()]);
+                    raw.put(bus.getId(), value);
+                    max = Math.max(max, value);
+                }
+            }
+            Map<String, Double> normalized = new LinkedHashMap<>();
+            if (max > 0) {
+                for (var e : raw.entrySet()) {
+                    normalized.put(e.getKey(), e.getValue() / max);
+                }
+            }
+            return normalized;
+        }
+    }
+
+    public ContinuationResult run(AcLoadFlowContext context, LoadIncreaseDirection direction) {
+        return run(context, direction, GenerationParticipation.none());
+    }
+
+    public ContinuationResult run(AcLoadFlowContext context, LoadIncreaseDirection direction,
+                                  GenerationParticipation generationParticipation) {
+        Objects.requireNonNull(context);
+        Objects.requireNonNull(direction);
+        Objects.requireNonNull(generationParticipation);
+        LfNetwork network = context.getNetwork();
+
+        List<ParticipatingLoad> participants = new ArrayList<>();
+        List<ParticipatingGenerator> participatingGenerators = new ArrayList<>();
+        for (LfBus bus : network.getBuses()) {
+            if (bus.isDisabled()) {
+                continue;
+            }
+            for (LfLoad load : bus.getLoads()) {
+                double weight = direction.getWeight(load);
+                if (weight != 0.0) {
+                    participants.add(new ParticipatingLoad(load, weight, load.getTargetP(), load.getTargetQ()));
+                }
+            }
+            for (LfGenerator generator : bus.getGenerators()) {
+                double weight = generationParticipation.getWeight(generator);
+                if (weight != 0.0) {
+                    participatingGenerators.add(new ParticipatingGenerator(generator, weight, generator.getTargetP()));
+                }
+            }
+        }
+        if (participants.isEmpty()) {
+            LOGGER.warn("No load participates in the requested load increase direction");
+            return new ContinuationResult(ContinuationResult.Status.NO_PARTICIPATING_LOAD, List.of(), 0.0, null);
+        }
+
+        // initialize the state vector at a flat start
+        VoltageInitializer voltageInitializer = new UniformValueVoltageInitializer();
+        voltageInitializer.prepare(network, ReportNode.NO_OP);
+        AcSolverUtil.initStateVector(network, context.getEquationSystem(), voltageInitializer);
+
+        Continuation c = new Continuation(context, participants, participatingGenerators);
+
+        // base case (lambda = 0), solved with lambda frozen
+        c.applyIncrease(0.0);
+        c.lambda = 0.0;
+        if (!c.correct(PARAM_LAMBDA, 0.0)) {
+            LOGGER.warn("Continuation aborted: base case did not converge");
+            return new ContinuationResult(ContinuationResult.Status.BASE_CASE_NOT_CONVERGED, List.of(), 0.0, null);
+        }
+
+        List<ReactiveLimitBreakpoint> reactiveLimitBreakpoints = new ArrayList<>();
+        if (parameters.isEnforceReactiveLimits()) {
+            reactiveLimitBreakpoints.addAll(c.enforceReactiveLimits());
+            if (!reactiveLimitBreakpoints.isEmpty()) {
+                c.correct(PARAM_LAMBDA, 0.0);
+            }
+        }
+
+        List<ContinuationPoint> points = new ArrayList<>();
+        points.add(c.buildPoint(true, null));
+
+        double[] previousTangent = null;
+        int paramVariable = PARAM_LAMBDA;
+        double step = parameters.getInitialStepSize();
+        double previousLambda = 0.0;
+        boolean turned = false;
+        int consecutiveSuccesses = 0;
+
+        double maxLambda = 0.0;
+        ContinuationPoint nosePoint = points.get(0);
+        double[] noseState = c.stateVector.get().clone();
+        double noseLambda = 0.0;
+        int noseParamVariable = PARAM_LAMBDA;
+
+        ContinuationResult.Status status = ContinuationResult.Status.MAX_STEPS_REACHED;
+
+        for (int stepCount = 0; stepCount < parameters.getMaxSteps(); stepCount++) {
+            // predictor: tangent at the current converged point
+            double[] tangent = c.computeTangent(paramVariable, previousTangent);
+
+            // local parameterization: freeze the tangent component of largest magnitude
+            int argMax = argMaxAbs(tangent);
+            int stepParamVariable = argMax == c.n ? PARAM_LAMBDA : argMax;
+
+            // save the current converged point to be able to reject the step
+            double[] savedState = c.stateVector.get().clone();
+            double savedLambda = c.lambda;
+
+            // move along the tangent
+            double[] predictorDx = new double[c.n];
+            for (int r = 0; r < c.n; r++) {
+                predictorDx[r] = step * tangent[r];
+            }
+            c.addToState(predictorDx);
+            c.lambda = savedLambda + step * tangent[c.n];
+            c.applyIncrease(c.lambda);
+
+            double eta = stepParamVariable == PARAM_LAMBDA ? c.lambda : c.stateVector.get(stepParamVariable);
+
+            if (c.correct(stepParamVariable, eta)) {
+                // enforce reactive limits at this new point: switch violating PV buses to PQ and re-converge
+                if (parameters.isEnforceReactiveLimits()) {
+                    List<ReactiveLimitBreakpoint> newBreakpoints = c.enforceReactiveLimits();
+                    if (!newBreakpoints.isEmpty()) {
+                        if (c.equationSystem.getIndex().getColumnCount() != c.n
+                                || !c.correct(PARAM_LAMBDA, c.lambda)) {
+                            LOGGER.warn("Continuation stopped: could not re-converge after a reactive limit switch at lambda={}", c.lambda);
+                            status = ContinuationResult.Status.NOSE_POINT_REACHED;
+                            break;
+                        }
+                        reactiveLimitBreakpoints.addAll(newBreakpoints);
+                        consecutiveSuccesses = 0; // the structure changed: be cautious with the step size
+                    }
+                }
+                boolean nowTurned = c.lambda < previousLambda - 1e-9;
+                if (nowTurned) {
+                    turned = true;
+                }
+                boolean stable = !turned;
+                ContinuationPoint point = c.buildPoint(stable, points.get(points.size() - 1));
+                points.add(point);
+
+                if (stable && c.lambda >= maxLambda) {
+                    maxLambda = c.lambda;
+                    nosePoint = point;
+                    noseState = c.stateVector.get().clone();
+                    noseLambda = c.lambda;
+                    noseParamVariable = stepParamVariable;
+                }
+
+                LOGGER.debug("Continuation point: lambda={}, minV={} pu at '{}', {}",
+                        point.loadFactor(), point.minVoltage(), point.minVoltageBusId(), stable ? "stable" : "unstable");
+
+                previousLambda = c.lambda;
+                previousTangent = tangent;
+                paramVariable = stepParamVariable;
+
+                if (++consecutiveSuccesses >= parameters.getStepIncreaseThreshold()) {
+                    step = Math.min(step * parameters.getStepIncreaseFactor(), parameters.getMaxStepSize());
+                    consecutiveSuccesses = 0;
+                }
+
+                if (turned && (!parameters.isTraceLowerBranch() || c.lambda < parameters.getMinLoadFactor())) {
+                    status = ContinuationResult.Status.NOSE_POINT_REACHED;
+                    break;
+                }
+            } else {
+                // reject the step and refine
+                c.stateVector.set(savedState);
+                c.lambda = savedLambda;
+                c.applyIncrease(c.lambda);
+                step *= parameters.getStepDecreaseFactor();
+                consecutiveSuccesses = 0;
+                if (step < parameters.getMinStepSize()) {
+                    status = ContinuationResult.Status.NOSE_POINT_REACHED;
+                    break;
+                }
+            }
+        }
+
+        // tangent-based voltage participation factors at the nose
+        c.stateVector.set(noseState);
+        c.lambda = noseLambda;
+        c.applyIncrease(noseLambda);
+        double[] noseTangent = c.computeTangent(noseParamVariable, null);
+        Map<String, Double> participation = c.tangentVoltageParticipation(noseTangent);
+        String criticalBusId = participation.entrySet().stream()
+                .max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey)
+                .orElse(nosePoint.minVoltageBusId());
+
+        LOGGER.info("Continuation finished ({}): nose at lambda={}, critical bus='{}', {} points, {} reactive-limit breakpoints",
+                status, maxLambda, criticalBusId, points.size(), reactiveLimitBreakpoints.size());
+
+        return new ContinuationResult(status, points, maxLambda, nosePoint, criticalBusId, participation,
+                reactiveLimitBreakpoints);
+    }
+
+    /**
+     * Convenience entry point building the {@link LfNetwork} and AC load flow context from an IIDM network before
+     * running the continuation on its main (first valid) connected component. The IIDM network state is not
+     * updated.
+     */
+    public ContinuationResult run(Network network, LoadFlowParameters lfParameters, OpenLoadFlowParameters lfParametersExt,
+                                  MatrixFactory matrixFactory, LoadIncreaseDirection direction) {
+        return run(network, lfParameters, lfParametersExt, matrixFactory, direction, GenerationParticipation.none());
+    }
+
+    public ContinuationResult run(Network network, LoadFlowParameters lfParameters, OpenLoadFlowParameters lfParametersExt,
+                                  MatrixFactory matrixFactory, LoadIncreaseDirection direction,
+                                  GenerationParticipation generationParticipation) {
+        Objects.requireNonNull(network);
+        AcLoadFlowParameters acParameters = OpenLoadFlowParameters.createAcParameters(network, lfParameters, lfParametersExt,
+                matrixFactory, new EvenShiloachGraphDecrementalConnectivityFactory<>());
+
+        List<LfNetwork> lfNetworks = Networks.load(network, acParameters.getNetworkParameters(), ReportNode.NO_OP);
+        LfNetwork lfNetwork = lfNetworks.stream()
+                .filter(nw -> nw.getValidity() == LfNetwork.Validity.VALID)
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("No valid LfNetwork to run continuation on"));
+
+        try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters)) {
+            return run(context, direction, generationParticipation);
+        }
+    }
+
+    private static double infinityNorm(double[] v) {
+        double norm = 0.0;
+        for (double x : v) {
+            norm = Math.max(norm, Math.abs(x));
+        }
+        return norm;
+    }
+
+    private static double euclideanNorm(double[] v) {
+        double sum = 0.0;
+        for (double x : v) {
+            sum += x * x;
+        }
+        return Math.sqrt(sum);
+    }
+
+    private static void negate(double[] v) {
+        for (int i = 0; i < v.length; i++) {
+            v[i] = -v[i];
+        }
+    }
+
+    private static double dot(double[] a, double[] b) {
+        double sum = 0.0;
+        for (int i = 0; i < a.length; i++) {
+            sum += a[i] * b[i];
+        }
+        return sum;
+    }
+
+    private static int argMaxAbs(double[] v) {
+        int argMax = 0;
+        double max = -1.0;
+        for (int i = 0; i < v.length; i++) {
+            double abs = Math.abs(v[i]);
+            if (abs > max) {
+                max = abs;
+                argMax = i;
+            }
+        }
+        return argMax;
+    }
+}
