@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+
+    Copyright (c) 2025, RTE (http://www.rte-france.com)
+    This Source Code Form is subject to the terms of the Mozilla Public
+    License, v. 2.0. If a copy of the MPL was not distributed with this
+    file, You can obtain one at http://mozilla.org/MPL/2.0/.
+    SPDX-License-Identifier: MPL-2.0
+
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.powsybl.bench</groupId>
+    <artifactId>olf-perf-bench</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <!--
+      Standalone, branch-independent performance harness for powsybl-open-loadflow.
+      It depends only on the public powsybl API, so the SAME harness benchmarks any OLF build:
+        build branch A's OLF (mvn install) -> run harness -> build branch B's OLF -> run harness -> diff.
+      All feature branches share version 2.4.0-SNAPSHOT, so installing a branch simply replaces the artifact
+      the harness resolves; nothing here changes between branches.
+    -->
+    <properties>
+        <maven.compiler.release>21</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <powsybl-core.version>7.3.0</powsybl-core.version>
+        <powsybl-openloadflow.version>2.4.0-SNAPSHOT</powsybl-openloadflow.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>com.powsybl</groupId>
+                <artifactId>powsybl-core</artifactId>
+                <version>${powsybl-core.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.powsybl</groupId>
+            <artifactId>powsybl-open-loadflow</artifactId>
+            <version>${powsybl-openloadflow.version}</version>
+        </dependency>
+        <!-- computations -->
+        <dependency>
+            <groupId>com.powsybl</groupId>
+            <artifactId>powsybl-security-analysis-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.powsybl</groupId>
+            <artifactId>powsybl-sensitivity-analysis-api</artifactId>
+        </dependency>
+        <!-- platform config so the providers can be discovered without a config file -->
+        <dependency>
+            <groupId>com.powsybl</groupId>
+            <artifactId>powsybl-config-classic</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <!-- default in-memory IIDM network implementation (NetworkFactory service) -->
+        <dependency>
+            <groupId>com.powsybl</groupId>
+            <artifactId>powsybl-iidm-impl</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <!-- importers: point the network option at a .xiidm / .mat / UCTE pegase file -->
+        <dependency>
+            <groupId>com.powsybl</groupId>
+            <artifactId>powsybl-iidm-serde</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.powsybl</groupId>
+            <artifactId>powsybl-matpower-converter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.powsybl</groupId>
+            <artifactId>powsybl-ucte-converter</artifactId>
+        </dependency>
+        <!-- built-in IEEE cases for validating the harness without an external file -->
+        <dependency>
+            <groupId>com.powsybl</groupId>
+            <artifactId>powsybl-ieee-cdf-converter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.16</version>
+            <scope>runtime</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>olf-perf-bench</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.5.0</version>
+                <configuration>
+                    <mainClass>com.powsybl.bench.Benchmark</mainClass>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
