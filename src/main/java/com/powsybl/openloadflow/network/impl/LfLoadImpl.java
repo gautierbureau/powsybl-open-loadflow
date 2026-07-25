@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.network.impl;
 
+import com.powsybl.commons.PowsyblException;
 import com.powsybl.iidm.network.BoundaryLine;
 import com.powsybl.iidm.network.LccConverterStation;
 import com.powsybl.iidm.network.Load;
@@ -39,6 +40,12 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
     private boolean ensurePowerFactorConstantByLoad = false;
 
     private final HashMap<String, Double> loadsAbsVariableTargetP = new HashMap<>();
+
+    // active and reactive power set points of each original load, in per unit: what the load consumes before slack
+    // distribution moves the aggregate around. Everything below derived from p0 or q0 is rebuilt from these.
+    private final HashMap<String, Double> loadsP0 = new HashMap<>();
+
+    private final HashMap<String, Double> loadsQ0 = new HashMap<>();
 
     private double absVariableTargetP = 0;
 
@@ -95,20 +102,39 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
         targetP += p0 / PerUnit.SB;
         initialTargetP += p0 / PerUnit.SB;
         targetQ += q0 / PerUnit.SB;
-        boolean hasVariableActivePower = false;
-        if (parameters.isDistributedOnConformLoad()) {
-            LoadDetail loadDetail = load.getExtension(LoadDetail.class);
-            if (loadDetail != null) {
-                hasVariableActivePower = loadDetail.getFixedActivePower() != load.getP0();
-            }
-        }
-        boolean reactiveOnlyLoad = p0 == 0 && q0 != 0;
-        if (p0 < 0 || hasVariableActivePower || reactiveOnlyLoad) {
+        loadsP0.put(load.getId(), p0 / PerUnit.SB);
+        loadsQ0.put(load.getId(), q0 / PerUnit.SB);
+        if (needsPowerFactorConstantByLoad(load, p0, q0, distributedOnConformLoad)) {
             ensurePowerFactorConstantByLoad = true;
         }
         double absTargetP = getAbsVariableTargetPPerUnit(load, distributedOnConformLoad);
         loadsAbsVariableTargetP.put(load.getId(), absTargetP);
         absVariableTargetP += absTargetP;
+    }
+
+    /**
+     * A load whose reactive power cannot be rescaled from the aggregated power factor, and needs its own.
+     */
+    private static boolean needsPowerFactorConstantByLoad(Load load, double p0, double q0, boolean distributedOnConformLoad) {
+        boolean hasVariableActivePower = false;
+        if (distributedOnConformLoad) {
+            LoadDetail loadDetail = load.getExtension(LoadDetail.class);
+            if (loadDetail != null) {
+                hasVariableActivePower = loadDetail.getFixedActivePower() != p0;
+            }
+        }
+        boolean reactiveOnlyLoad = p0 == 0 && q0 != 0;
+        return p0 < 0 || hasVariableActivePower || reactiveOnlyLoad;
+    }
+
+    /**
+     * Recomputed from scratch: the flag is an OR over the original loads, so a single load leaving the cases above
+     * cannot be undone incrementally.
+     */
+    private void updateEnsurePowerFactorConstantByLoad() {
+        ensurePowerFactorConstantByLoad = loadsRefs.entrySet().stream()
+                .anyMatch(e -> needsPowerFactorConstantByLoad(e.getValue().get(), loadsP0.get(e.getKey()) * PerUnit.SB,
+                        loadsQ0.get(e.getKey()) * PerUnit.SB, distributedOnConformLoad));
     }
 
     void add(LccConverterStation lccCs, LfNetworkParameters parameters) {
@@ -135,6 +161,77 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
                 listener.onLoadActivePowerTargetChange(this, oldTargetP, targetP);
             }
         }
+    }
+
+    @Override
+    public double getOriginalLoadP0(String originalId) {
+        return getLoadP0(originalId);
+    }
+
+    @Override
+    public Map<String, Double> getOriginalLoadsP0() {
+        return Collections.unmodifiableMap(loadsP0);
+    }
+
+    @Override
+    public void setOriginalLoadP0(String originalId, double p0) {
+        double oldP0 = getLoadP0(originalId);
+        if (p0 == oldP0) {
+            return;
+        }
+        loadsP0.put(originalId, p0);
+        // The aggregate follows the set point by the same amount, keeping whatever slack distribution had already
+        // moved it by. On a network that has just been restored the two are equal, so both end up on the new p0.
+        double diffP0 = p0 - oldP0;
+        initialTargetP += diffP0;
+        setTargetP(targetP + diffP0);
+
+        // Slack participation follows p0 only when the slack is distributed proportionally to it: on conform load it
+        // is driven by the LoadDetail variable active power instead, which a new p0 does not change, and which is why
+        // this has to go back through the same accessor the network was built with rather than take abs(p0) directly.
+        double absTargetP = getAbsVariableTargetPPerUnit(loadsRefs.get(originalId).get(), distributedOnConformLoad, p0 * PerUnit.SB);
+        absVariableTargetP += absTargetP - loadsAbsVariableTargetP.put(originalId, absTargetP);
+
+        updateEnsurePowerFactorConstantByLoad();
+    }
+
+    @Override
+    public double getOriginalLoadQ0(String originalId) {
+        return getLoadQ0(originalId);
+    }
+
+    @Override
+    public Map<String, Double> getOriginalLoadsQ0() {
+        return Collections.unmodifiableMap(loadsQ0);
+    }
+
+    @Override
+    public void setOriginalLoadQ0(String originalId, double q0) {
+        double oldQ0 = getLoadQ0(originalId);
+        if (q0 == oldQ0) {
+            return;
+        }
+        loadsQ0.put(originalId, q0);
+        // No initial counterpart to keep in step, unlike p0: reactive power has no equivalent of the initial target the
+        // active power distribution measures its own movement against.
+        setTargetQ(targetQ + q0 - oldQ0);
+        updateEnsurePowerFactorConstantByLoad();
+    }
+
+    private double getLoadP0(String originalId) {
+        return get(loadsP0, originalId);
+    }
+
+    private double getLoadQ0(String originalId) {
+        return get(loadsQ0, originalId);
+    }
+
+    private double get(Map<String, Double> setPoints, String originalId) {
+        Double value = setPoints.get(originalId);
+        if (value == null) {
+            throw new PowsyblException("Load '" + originalId + "' is not an original load of '" + getId() + "'");
+        }
+        return value;
     }
 
     @Override
@@ -170,6 +267,10 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
     }
 
     public static double getAbsVariableTargetPPerUnit(Load load, boolean distributedOnConformLoad) {
+        return getAbsVariableTargetPPerUnit(load, distributedOnConformLoad, load.getP0());
+    }
+
+    private static double getAbsVariableTargetPPerUnit(Load load, boolean distributedOnConformLoad, double p0) {
         if (isLoadNotParticipating(load)) {
             return 0.0;
         }
@@ -177,7 +278,7 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
         if (distributedOnConformLoad) {
             varP = load.getExtension(LoadDetail.class) == null ? 0 : load.getExtension(LoadDetail.class).getVariableActivePower();
         } else {
-            varP = load.getP0();
+            varP = p0;
         }
         return Math.abs(varP) / PerUnit.SB;
     }
@@ -239,7 +340,7 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
         double newLoadTargetQ = 0;
         for (Ref<Load> refLoad : loadsRefs.values()) {
             Load load = refLoad.get();
-            double updatedQ0 = load.getQ0() / PerUnit.SB + getPowerFactor(load) * diffTargetP * getParticipationFactor(load.getId());
+            double updatedQ0 = getLoadQ0(load.getId()) + getPowerFactor(load) * diffTargetP * getParticipationFactor(load.getId());
             newLoadTargetQ += updatedQ0;
         }
         return newLoadTargetQ;
@@ -265,8 +366,14 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
         this.loadsDisablingStatus = Objects.requireNonNull(originalLoadsDisablingStatus);
     }
 
-    private static double getPowerFactor(Load load) {
-        return load.getP0() != 0 ? load.getQ0() / load.getP0() : 1;
+    /**
+     * Taken from the set points this load carries rather than from the IIDM ones, so that it stays the power factor of
+     * the load as simulated once the two have been made to differ by {@link #setOriginalLoadP0} or
+     * {@link #setOriginalLoadQ0}. They are equal for a load that has only ever been built and solved.
+     */
+    private double getPowerFactor(Load load) {
+        double p0 = getLoadP0(load.getId());
+        return p0 != 0 ? getLoadQ0(load.getId()) / p0 : 1;
     }
 
     /**
