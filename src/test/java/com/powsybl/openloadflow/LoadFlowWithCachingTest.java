@@ -340,6 +340,14 @@ class LoadFlowWithCachingTest {
         assertActivePowerEquals(50, network.getLoad("ld2").getTerminal());
         assertActivePowerEquals(isDc ? -90 : -92.578, network.getGenerator("g1").getTerminal());
 
+        // a second update in a row: the cache has to answer from the set point the line now carries, not from the one
+        // it was built with. Values match a fresh, cache-off build at this set point.
+        hvdcLine.setActivePowerSetpoint(35);
+        result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        assertActivePowerEquals(35.0, rectifier.getTerminal());
+        assertActivePowerEquals(-34.545, inverter.getTerminal());
+
         // test unsupported update
         hvdcLine.setConvertersMode(fromCs3toCs2 ? HvdcLine.ConvertersMode.SIDE_1_RECTIFIER_SIDE_2_INVERTER : HvdcLine.ConvertersMode.SIDE_1_INVERTER_SIDE_2_RECTIFIER);
         assertNull(findEntryFunction.apply(network, isDc).getValues());

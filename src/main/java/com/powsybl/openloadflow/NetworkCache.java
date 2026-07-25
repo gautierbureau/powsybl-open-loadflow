@@ -11,6 +11,7 @@ import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.extensions.Extension;
 import com.powsybl.iidm.network.*;
 import com.powsybl.iidm.network.extensions.*;
+import com.powsybl.iidm.network.util.HvdcUtils;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcLoadFlowResult;
@@ -405,6 +406,20 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             return CacheUpdateResult.elementUpdated(value);
         }
 
+        /**
+         * Sets what a generator carries, rather than shifting it by a delta from its initial target P. Needed where the
+         * new value is known outright and the initial target P cannot be relied on to track it -- a VSC converter
+         * station does not move its own, so a shift measures from the set point it was built with.
+         */
+        private static <V extends Value> CacheUpdateResult<V> setLfGeneratorTargetP(String id, double newTargetPInMw, V value, LfBus lfBus) {
+            LfGenerator lfGenerator = lfBus.getNetwork().getGeneratorById(id);
+            double newTargetP = newTargetPInMw / PerUnit.SB;
+            lfGenerator.setTargetP(newTargetP);
+            lfGenerator.setInitialTargetP(newTargetP);
+            lfGenerator.reApplyActivePowerControlChecks(value.getNetworkParameters(), null);
+            return CacheUpdateResult.elementUpdated(value);
+        }
+
         private static <V extends Value> CacheUpdateResult<V> updateLfLoadTargetP(String id, double oldValue, double newValue, V value, LfBus lfBus) {
             // Load active power distribution is not handled
             double valueShift = newValue - oldValue;
@@ -612,35 +627,29 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             return CacheUpdateResult.multipleElementsUpdated(Set.of(result1.values.iterator().next(), result2.values.iterator().next()));
         }
 
-        private CacheUpdateResult<V> onHvdcLineWithVscActiveSetpointUpdate(HvdcLine hvdcLine, String attribute, Object oldValue, Object newValue) {
+        private CacheUpdateResult<V> onHvdcLineWithVscActiveSetpointUpdate(HvdcLine hvdcLine, String attribute, Object newValue) {
             HvdcAngleDroopActivePowerControl droopControl = hvdcLine.getExtension(HvdcAngleDroopActivePowerControl.class);
             if (droopControl != null && droopControl.isEnabled() && input.getLoadFlowParameters().isHvdcAcEmulation()) {
                 LOGGER.info("HVDC {} is in AC emulation mode: not supported", hvdcLine.getId());
                 return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(hvdcLine, attribute));
             }
-            VscConverterStation rectifier = (VscConverterStation) (hvdcLine.getConvertersMode().equals(HvdcLine.ConvertersMode.SIDE_1_RECTIFIER_SIDE_2_INVERTER) ?
-                    hvdcLine.getConverterStation1() : hvdcLine.getConverterStation2());
-            VscConverterStation inverter = (VscConverterStation) (hvdcLine.getConvertersMode().equals(HvdcLine.ConvertersMode.SIDE_1_RECTIFIER_SIDE_2_INVERTER) ?
-                    hvdcLine.getConverterStation2() : hvdcLine.getConverterStation1());
+            VscConverterStation station1 = (VscConverterStation) hvdcLine.getConverterStation1();
+            VscConverterStation station2 = (VscConverterStation) hvdcLine.getConverterStation2();
 
-            // First updating rectifier station
-            double oldRectifierTargetP = -(double) oldValue;
-            double newRectifierTargetP = -(double) newValue;
-            CacheUpdateResult<V> result1 = onInjectionUpdate(rectifier, (value, lfBus) -> {
-                updateLfGeneratorTargetP(rectifier.getId(), oldRectifierTargetP, newRectifierTargetP, value, lfBus);
-                return CacheUpdateResult.elementUpdated(value);
-            });
+            // The IIDM set point is already committed when this fires, so ask the loader's own function what each
+            // station now carries -- exactly as a freshly built network would -- and set it, rather than shift the
+            // stations onto it by a delta. A VSC station cannot move its initial target P, which a shift measures from,
+            // so shifting lands right once and then keeps measuring from the set point the line was built with. Going
+            // through getConverterStationTargetP also folds in the converters mode, both loss factors, r and nominalV
+            // the same way the build path does, instead of re-deriving them here.
+            CacheUpdateResult<V> result1 = onInjectionUpdate(station1, (value, lfBus) ->
+                    setLfGeneratorTargetP(station1.getId(), HvdcUtils.getConverterStationTargetP(station1), value, lfBus));
             if (!result1.status.equals(CacheUpdateStatus.ELEMENT_UPDATED)) {
                 return result1;
             }
 
-            // Then updating inverter station
-            double oldInverterTargetP = -HvdcConverterStations.getAbsoluteValueInverterPAc(oldRectifierTargetP, rectifier.getLossFactor(), inverter.getLossFactor(), hvdcLine);
-            double newInverterTargetP = -HvdcConverterStations.getAbsoluteValueInverterPAc(newRectifierTargetP, rectifier.getLossFactor(), inverter.getLossFactor(), hvdcLine);
-            CacheUpdateResult<V> result2 = onInjectionUpdate(inverter, (value, lfBus) -> {
-                updateLfGeneratorTargetP(inverter.getId(), oldInverterTargetP, newInverterTargetP, value, lfBus);
-                return CacheUpdateResult.elementUpdated(value);
-            });
+            CacheUpdateResult<V> result2 = onInjectionUpdate(station2, (value, lfBus) ->
+                    setLfGeneratorTargetP(station2.getId(), HvdcUtils.getConverterStationTargetP(station2), value, lfBus));
             if (!result2.status.equals(CacheUpdateStatus.ELEMENT_UPDATED)) {
                 return result2;
             }
@@ -654,7 +663,7 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
                 if (hvdcLine.getConverterStation1().getHvdcType().equals(HvdcConverterStation.HvdcType.LCC)) {
                     return onHvdcLineWithLccActiveSetpointUpdate(hvdcLine, oldValue, newValue);
                 } else if (hvdcLine.getConverterStation1().getHvdcType().equals(HvdcConverterStation.HvdcType.VSC)) {
-                    return onHvdcLineWithVscActiveSetpointUpdate(hvdcLine, attribute, oldValue, newValue);
+                    return onHvdcLineWithVscActiveSetpointUpdate(hvdcLine, attribute, newValue);
                 }
             }
             return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(hvdcLine, attribute));
