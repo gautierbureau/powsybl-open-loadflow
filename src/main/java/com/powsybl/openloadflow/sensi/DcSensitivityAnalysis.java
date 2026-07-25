@@ -28,6 +28,8 @@ import com.powsybl.openloadflow.dc.fastdc.ComputedContingencyElement;
 import com.powsybl.openloadflow.dc.fastdc.ComputedElement;
 import com.powsybl.openloadflow.dc.fastdc.ConnectivityBreakAnalysis;
 import com.powsybl.openloadflow.dc.fastdc.WoodburyEngine;
+import com.powsybl.openloadflow.equations.EquationTerm;
+import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.*;
 import com.powsybl.openloadflow.network.action.*;
@@ -65,8 +67,44 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
 
     private static final double FUNCTION_REFERENCE_ZER0_THRESHOLD = 1e-13;
 
+    // package-private toggle used by tests to compare against the non row-restricted Woodbury correction (TODO: to remove)
+    static boolean restrictStateRowsToMonitoredElements = true;
+
     public DcSensitivityAnalysis(MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory, SensitivityAnalysisParameters parameters) {
         super(matrixFactory, connectivityFactory, parameters);
+    }
+
+    /**
+     * Compute the rows of the state vector that the sensitivity factors read, i.e. the variable rows of every monitored
+     * branch flow function. As factors read the post-contingency states only at those rows, the Woodbury correction can
+     * be restricted to them instead of the whole state vector (one row per bus). Returns null (meaning "correct every
+     * row") if any function term does not expose its variables, so correctness never depends on the restriction.
+     */
+    private static int[] computeSensitivityStateRows(List<LfSensitivityFactor<DcVariableType, DcEquationType>> factors) {
+        TreeSet<Integer> rows = new TreeSet<>();
+        for (LfSensitivityFactor<DcVariableType, DcEquationType> factor : factors) {
+            // include VALID_ONLY_FOR_FUNCTION factors: their function reference is also read from the states,
+            // so their monitored branch rows must be corrected too (skip only the factors that read nothing)
+            if (factor.getStatus() == LfSensitivityFactor.Status.SKIP
+                    || factor.getStatus() == LfSensitivityFactor.Status.ZERO) {
+                continue;
+            }
+            if (!(factor.getFunctionEquationTerm() instanceof EquationTerm<?, ?> functionTerm)) {
+                return null; // cannot determine the read rows: fall back to correcting every row
+            }
+            for (Variable<?> variable : functionTerm.getVariables()) {
+                int row = variable.getRow();
+                if (row >= 0) {
+                    rows.add(row);
+                }
+            }
+        }
+        int[] result = new int[rows.size()];
+        int i = 0;
+        for (int row : rows) {
+            result[i++] = row;
+        }
+        return result;
     }
 
     private static DcLoadFlowParameters createDcLoadFlowParameters(LfNetworkParameters networkParameters, MatrixFactory matrixFactory,
@@ -224,7 +262,8 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
                                                                              Set<LfBus> disabledBuses, List<ParticipatingElement> participatingElements,
                                                                              Set<String> elementsToReconnect,
                                                                              SensitivityResultWriter resultWriter, ReportNode reportNode,
-                                                                             Set<LfBranch> partialDisabledBranches, boolean rhsChangedAfterConnectivityBreak) {
+                                                                             Set<LfBranch> partialDisabledBranches, boolean rhsChangedAfterConnectivityBreak,
+                                                                             int[] sensitivityStateRows) {
         List<LfSensitivityFactor<DcVariableType, DcEquationType>> factors = contingency != null
                 ? validFactorHolder.getFactorsForContingency(contingency.getContingency().getId())
                 : validFactorHolder.getFactorsForBaseNetwork();
@@ -276,8 +315,8 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
                 newFlowStates = calculateFlowStates(loadFlowContext, participatingElements, disabledNetwork, actions, reportNode);
             }
 
-            engine.toPostContingencyAndOperatorStrategyStates(newFlowStates);
-            engine.toPostContingencyAndOperatorStrategyStates(newFactorStates);
+            engine.toPostContingencyAndOperatorStrategyStates(newFlowStates, sensitivityStateRows);
+            engine.toPostContingencyAndOperatorStrategyStates(newFactorStates, sensitivityStateRows);
             calculateSensitivityValues(factors, newFactorStates, newFlowStates, contingency, operatorStrategy, resultWriter, disabledNetwork);
             // write contingency status
             if (contingency.hasNoImpact()) {
@@ -331,8 +370,8 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
 
             DenseMatrix newFlowStates = calculateFlowStates(loadFlowContext, newParticipatingElements, disabledNetwork, actions, reportNode);
 
-            engine.toPostContingencyAndOperatorStrategyStates(newFlowStates);
-            engine.toPostContingencyAndOperatorStrategyStates(newFactorStates);
+            engine.toPostContingencyAndOperatorStrategyStates(newFlowStates, sensitivityStateRows);
+            engine.toPostContingencyAndOperatorStrategyStates(newFactorStates, sensitivityStateRows);
             calculateSensitivityValues(factors, newFactorStates, newFlowStates, contingency, operatorStrategy, resultWriter, disabledNetwork);
 
             networkState.restore();
@@ -377,13 +416,13 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
                                                        Map<String, ComputedContingencyElement> contingencyElementByBranch, Map<LfAction, List<ComputedElement>> actionElementByLfAction,
                                                        DenseMatrix flowStates, DenseMatrix factorsStates, DenseMatrix contingenciesStates, DenseMatrix actionsStates,
                                                        SensitivityResultWriter resultWriter,
-                                                       ReportNode reportNode) {
+                                                       ReportNode reportNode, int[] sensitivityStateRows) {
         if (connectivityAnalysisResult.getDisabledBuses().isEmpty()) {
             // there is no connectivity break
             calculateSensitivityValuesForContingencyAndOperatorStrategy(loadFlowContext, lfParametersExt, validFactorHolder, factorGroups,
                     factorsStates, contingenciesStates, actionsStates, flowStates, connectivityAnalysisResult.getPropagatedContingency(),
                     connectivityAnalysisResult.getOperatorStrategy(), contingencyElementByBranch, actionElementByLfAction, Collections.emptySet(),
-                    participatingElements, Collections.emptySet(), resultWriter, reportNode, Collections.emptySet(), false);
+                    participatingElements, Collections.emptySet(), resultWriter, reportNode, Collections.emptySet(), false, sensitivityStateRows);
         } else {
             // there is a connectivity break
             PropagatedContingency contingency = connectivityAnalysisResult.getPropagatedContingency();
@@ -421,7 +460,7 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
                     validFactorHolder, factorGroups, factorsStates, contingenciesStates, actionsStates, flowStates,
                     contingency, connectivityAnalysisResult.getOperatorStrategy(), contingencyElementByBranch, actionElementByLfAction, disabledBuses,
                     participatingElementsForThisConnectivity, connectivityAnalysisResult.getElementsToReconnect(), resultWriter,
-                reportNode, partialDisabledBranches, rhsChanged);
+                reportNode, partialDisabledBranches, rhsChanged, sensitivityStateRows);
         }
     }
 
@@ -588,6 +627,11 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
                     .filter(factor -> factor.getStatus() == LfSensitivityFactor.Status.VALID)
                     .collect(Collectors.toList()));
 
+                // the sensitivity factors only read the post-contingency states at the rows of the monitored branches,
+                // so the Woodbury correction can be restricted to those rows instead of the whole state vector.
+                // Threaded as a method argument (not a field) so the calculation stays thread-confined.
+                int[] sensitivityStateRows = restrictStateRowsToMonitoredElements ? computeSensitivityStateRows(validLfFactors) : null;
+
                 // compute the participation for each injection factor (+1 on the injection and then -participation factor on all
                 // buses that contain elements participating to slack distribution)
                 List<ParticipatingElement> participatingElements = lfParameters.isDistributedSlack()
@@ -638,7 +682,7 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
                     operatorStrategiesSensitivityCalculation(connectivityBreakAnalysisResults.nonBreakingConnectivityAnalysisResults(), workingFlowStates,
                         workingFactorStates, baseFlowStates, baseFactorStates, loadFlowContext, lfParameters, lfParametersExt,
                         validFactorHolder, factorGroups, participatingElements, connectivityBreakAnalysisResults,
-                        actionElementsIndexByLfAction, actionsStates, resultWriter, sensiReportNode, stopwatch);
+                        actionElementsIndexByLfAction, actionsStates, resultWriter, sensiReportNode, stopwatch, sensitivityStateRows);
 
                     LOGGER.info("Processing contingencies with connectivity break");
 
@@ -646,7 +690,7 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
                     operatorStrategiesSensitivityCalculation(connectivityBreakAnalysisResults.connectivityBreakingAnalysisResults(), workingFlowStates,
                         workingFactorStates, baseFlowStates, baseFactorStates, loadFlowContext, lfParameters, lfParametersExt,
                         validFactorHolder, factorGroups, participatingElements, connectivityBreakAnalysisResults,
-                        actionElementsIndexByLfAction, actionsStates, resultWriter, sensiReportNode, stopwatch);
+                        actionElementsIndexByLfAction, actionsStates, resultWriter, sensiReportNode, stopwatch, sensitivityStateRows);
                 }
 
                 // process operator strategies
@@ -678,7 +722,7 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
 
                             processContingencyAndOperatorStrategy(postActionsConnectivityAnalysisResult, loadFlowContext, lfParameters, lfParametersExt,
                                     validFactorHolder, factorGroups, participatingElements, connectivityBreakAnalysisResults.contingencyElementByBranch(), actionElementsIndexByLfAction,
-                                    workingFlowStates, workingFactorStates, connectivityBreakAnalysisResults.contingenciesStates(), actionsStates, resultWriter, sensiReportNode);
+                                    workingFlowStates, workingFactorStates, connectivityBreakAnalysisResults.contingenciesStates(), actionsStates, resultWriter, sensiReportNode, sensitivityStateRows);
                         }
                     }
 
@@ -695,7 +739,7 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
                     operatorStrategiesSensitivityCalculation(postActionsConnectivityAnalysisResults, workingFlowStates,
                         workingFactorStates, baseFlowStates, baseFactorStates, loadFlowContext, lfParameters, lfParametersExt,
                         validFactorHolder, factorGroups, participatingElements, connectivityBreakAnalysisResults,
-                        actionElementsIndexByLfAction, actionsStates, resultWriter, sensiReportNode, stopwatch);
+                        actionElementsIndexByLfAction, actionsStates, resultWriter, sensiReportNode, stopwatch, sensitivityStateRows);
                     LOGGER.info("Operator strategies sensitivity calculation done in {} ms", operatorStrategyStopwatch.elapsed(TimeUnit.MILLISECONDS));
                 }
             }
@@ -748,7 +792,7 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
                                                           ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivityBreakAnalysisResults,
                                                           Map<LfAction, List<ComputedElement>> actionElementsIndexByLfAction,
                                                           DenseMatrix actionsStates, SensitivityResultWriter resultWriter, ReportNode sensiReportNode,
-                                                          Stopwatch stopwatch) {
+                                                          Stopwatch stopwatch, int[] sensitivityStateRows) {
         for (ConnectivityBreakAnalysis.ConnectivityAnalysisResult postActionsConnectivityAnalysisResult : connectivityAnalysisResultList) {
             if (Thread.currentThread().isInterrupted()) {
                 stopwatch.stop();
@@ -760,7 +804,7 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
 
             processContingencyAndOperatorStrategy(postActionsConnectivityAnalysisResult, loadFlowContext, lfParameters, lfParametersExt,
                 validFactorHolder, factorGroups, participatingElements, connectivityBreakAnalysisResults.contingencyElementByBranch(), actionElementsIndexByLfAction,
-                workingFlowStates, workingFactorStates, connectivityBreakAnalysisResults.contingenciesStates(), actionsStates, resultWriter, sensiReportNode);
+                workingFlowStates, workingFactorStates, connectivityBreakAnalysisResults.contingenciesStates(), actionsStates, resultWriter, sensiReportNode, sensitivityStateRows);
         }
     }
 

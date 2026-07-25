@@ -331,15 +331,36 @@ public class WoodburyEngine {
      * Calculate post-contingency and post-actions states values by modifying pre-contingency states values, using some flow transfer factors (alphas).
      */
     public void toPostContingencyAndOperatorStrategyStates(DenseMatrix preContingencyStates) {
+        toPostContingencyAndOperatorStrategyStates(preContingencyStates, null);
+    }
+
+    /**
+     * Apply the Woodbury correction to the given states matrix. When {@code rows} is not null, only those rows are
+     * corrected: a sensitivity analysis reads the post-contingency states only at the rows of the monitored branches,
+     * so correcting the whole state vector (one row per bus) is unnecessary. The alpha coefficients are still computed
+     * from the full pre-contingency states (see {@link #setAlphas}), which is why the states matrix must remain a
+     * complete copy of the pre-contingency states even when only a subset of rows is corrected.
+     */
+    public void toPostContingencyAndOperatorStrategyStates(DenseMatrix preContingencyStates, int[] rows) {
         Objects.requireNonNull(preContingencyStates);
         for (int columnIndex = 0; columnIndex < preContingencyStates.getColumnCount(); columnIndex++) {
             setAlphas(preContingencyStates, columnIndex);
-            for (int rowIndex = 0; rowIndex < preContingencyStates.getRowCount(); rowIndex++) {
-                double postContingencyAndOperatorStrategyValue = preContingencyStates.get(rowIndex, columnIndex);
-                postContingencyAndOperatorStrategyValue = addToPostContingencyAndOperatorStrategyValue(postContingencyAndOperatorStrategyValue, rowIndex);
-                preContingencyStates.set(rowIndex, columnIndex, postContingencyAndOperatorStrategyValue);
+            if (rows == null) {
+                for (int rowIndex = 0; rowIndex < preContingencyStates.getRowCount(); rowIndex++) {
+                    correctPostContingencyAndOperatorStrategyValue(preContingencyStates, rowIndex, columnIndex);
+                }
+            } else {
+                for (int rowIndex : rows) {
+                    correctPostContingencyAndOperatorStrategyValue(preContingencyStates, rowIndex, columnIndex);
+                }
             }
         }
+    }
+
+    private void correctPostContingencyAndOperatorStrategyValue(DenseMatrix preContingencyStates, int rowIndex, int columnIndex) {
+        double value = preContingencyStates.get(rowIndex, columnIndex);
+        value = addToPostContingencyAndOperatorStrategyValue(value, rowIndex);
+        preContingencyStates.set(rowIndex, columnIndex, value);
     }
 
     public void toPostContingencyAndOperatorStrategyStates(double[] preContingencyStates) {
