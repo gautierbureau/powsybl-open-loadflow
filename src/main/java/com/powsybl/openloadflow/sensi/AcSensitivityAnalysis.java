@@ -314,7 +314,16 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
 
         LoadFlowParameters lfParameters = parameters.getLoadFlowParameters();
         OpenLoadFlowParameters lfParametersExt = OpenLoadFlowParameters.get(lfParameters);
-        VariablesTargetVoltageInfo variablesTargetVoltageInfo = getVariableTargetVoltageInfo(factorReader, network);
+
+        // Buffer the factor reader once: the AC path needs to walk it at least twice
+        // (getVariableTargetVoltageInfo + readAndCheckFactors inside analyzeContingencySet),
+        // and once per worker on the multi-thread path. Rebuilding factors on every pass is
+        // wasted work for streaming readers whose per-factor cost is non-trivial (e.g. matrix
+        // expansion + network.getIdentifiable lookups). The memory cost of holding
+        // SensitivityFactor objects is bounded by the buffering already used by the
+        // multi-thread branch, generalized here to the single-thread branch as well.
+        BufferedFactorReader bufferedFactorReader = new BufferedFactorReader(factorReader);
+        VariablesTargetVoltageInfo variablesTargetVoltageInfo = getVariableTargetVoltageInfo(bufferedFactorReader, network);
 
         // create LF network (we only manage main connected component)
         if (variablesTargetVoltageInfo.hasTransformerTargetVoltage()) {
@@ -334,12 +343,11 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             AcLoadFlowParameters acParameters = makeAcLoadFlowParameters(network, slackBusSelector, lfParameters, lfParametersExt, topoConfig.isBreaker());
             try (LfNetworkList lfNetworks = Networks.loadWithReconnectableElements(network, topoConfig, acParameters.getNetworkParameters(), sensiReportNode)) {
 
-                analyzeContingencySet(network, lfNetworks, propagatedContingencies, acParameters, lfParameters, lfParametersExt, variableSets, factorReader,
+                analyzeContingencySet(network, lfNetworks, propagatedContingencies, acParameters, lfParameters, lfParametersExt, variableSets, bufferedFactorReader,
                         topoConfig.isBreaker(), resultWriter, variablesTargetVoltageInfo, sensitivityAnalysisParametersExt);
             }
         } else {
             try (SequentialSensitivityResultWriter sequentialSensitivityResultWriter = new SequentialSensitivityResultWriter(resultWriter)) {
-                BufferedFactorReader bufferedFactorReader = new BufferedFactorReader(factorReader);
                 var contingenciesPartitions = Lists2.partition(contingencies, sensitivityAnalysisParametersExt.getThreadCount());
                 ContingencyMultiThreadHelper.ParameterProvider<AcLoadFlowParameters> parameterProvider = topoConfig -> makeAcLoadFlowParameters(network,
                     slackBusSelector, lfParameters, lfParametersExt, topoConfig.isBreaker());
