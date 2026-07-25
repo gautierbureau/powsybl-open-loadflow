@@ -35,6 +35,14 @@ public class DcEquationSystemCreator {
         this.creationParameters = Objects.requireNonNull(creationParameters);
     }
 
+    protected LfNetwork getNetwork() {
+        return network;
+    }
+
+    protected DcEquationSystemCreationParameters getCreationParameters() {
+        return creationParameters;
+    }
+
     private void createBuses(EquationSystem<DcVariableType, DcEquationType> equationSystem) {
         for (LfBus bus : network.getBuses()) {
             var p = equationSystem.createEquation(bus, DcEquationType.BUS_TARGET_P);
@@ -87,15 +95,24 @@ public class DcEquationSystemCreator {
         }
     }
 
-    private static void createImpedantBranch(EquationSystem<DcVariableType, DcEquationType> equationSystem,
-                                             DcEquationSystemCreationParameters creationParameters, LfBranch branch,
-                                             LfBus bus1, LfBus bus2) {
+    protected EquationTerm<DcVariableType, DcEquationType> createClosedBranchSide1DcFlowEquationTerm(LfBranch branch, LfBus bus1, LfBus bus2,
+                                                                                                    boolean deriveA1, EquationSystem<DcVariableType, DcEquationType> equationSystem) {
+        return ClosedBranchSide1DcFlowEquationTerm.create(branch, bus1, bus2,
+                equationSystem.getVariableSet(), deriveA1, creationParameters.isUseTransformerRatio(), creationParameters.getDcApproximationType());
+    }
+
+    protected EquationTerm<DcVariableType, DcEquationType> createClosedBranchSide2DcFlowEquationTerm(LfBranch branch, LfBus bus1, LfBus bus2,
+                                                                                                    boolean deriveA1, EquationSystem<DcVariableType, DcEquationType> equationSystem) {
+        return ClosedBranchSide2DcFlowEquationTerm.create(branch, bus1, bus2,
+                equationSystem.getVariableSet(), deriveA1, creationParameters.isUseTransformerRatio(), creationParameters.getDcApproximationType());
+    }
+
+    protected void createImpedantBranch(EquationSystem<DcVariableType, DcEquationType> equationSystem, LfBranch branch,
+                                        LfBus bus1, LfBus bus2) {
         if (bus1 != null && bus2 != null) {
             boolean deriveA1 = isDeriveA1(branch, creationParameters);
-            ClosedBranchSide1DcFlowEquationTerm p1 = ClosedBranchSide1DcFlowEquationTerm.create(branch, bus1, bus2,
-                equationSystem.getVariableSet(), deriveA1, creationParameters.isUseTransformerRatio(), creationParameters.getDcApproximationType());
-            ClosedBranchSide2DcFlowEquationTerm p2 = ClosedBranchSide2DcFlowEquationTerm.create(branch, bus1, bus2,
-                equationSystem.getVariableSet(), deriveA1, creationParameters.isUseTransformerRatio(), creationParameters.getDcApproximationType());
+            EquationTerm<DcVariableType, DcEquationType> p1 = createClosedBranchSide1DcFlowEquationTerm(branch, bus1, bus2, deriveA1, equationSystem);
+            EquationTerm<DcVariableType, DcEquationType> p2 = createClosedBranchSide2DcFlowEquationTerm(branch, bus1, bus2, deriveA1, equationSystem);
             equationSystem.getEquation(bus1.getNum(), DcEquationType.BUS_TARGET_P)
                     .orElseThrow()
                     .addTerm(p1);
@@ -126,7 +143,7 @@ public class DcEquationSystemCreator {
         }
     }
 
-    protected static boolean isDeriveA1(LfBranch branch, DcEquationSystemCreationParameters creationParameters) {
+    public static boolean isDeriveA1(LfBranch branch, DcEquationSystemCreationParameters creationParameters) {
         return branch.isPhaseController()
                 || creationParameters.isForcePhaseControlOffAndAddAngle1Var() && branch.hasPhaseControllerCapability() && branch.isConnectedAtBothSides();
     }
@@ -138,7 +155,7 @@ public class DcEquationSystemCreator {
             if (branch.isZeroImpedance(LoadFlowModel.DC)) {
                 createNonImpedantBranch(equationSystem, branch, bus1, bus2, branch.isSpanningTreeEdge(LoadFlowModel.DC));
             } else {
-                createImpedantBranch(equationSystem, creationParameters, branch, bus1, bus2);
+                createImpedantBranch(equationSystem, branch, bus1, bus2);
             }
         }
     }
@@ -169,9 +186,7 @@ public class DcEquationSystemCreator {
         }
     }
 
-    public EquationSystem<DcVariableType, DcEquationType> create(boolean withListener) {
-        EquationSystem<DcVariableType, DcEquationType> equationSystem = new EquationSystem<>(DcEquationType.class, network);
-
+    protected void create(EquationSystem<DcVariableType, DcEquationType> equationSystem, boolean withListener) {
         createBuses(equationSystem);
         createBranches(equationSystem);
         createHvdcs(equationSystem);
@@ -181,7 +196,11 @@ public class DcEquationSystemCreator {
         if (withListener) {
             network.addListener(LfNetworkListenerTracer.trace(new DcEquationSystemUpdater(equationSystem)));
         }
+    }
 
+    public EquationSystem<DcVariableType, DcEquationType> create(boolean withListener) {
+        EquationSystem<DcVariableType, DcEquationType> equationSystem = new EquationSystem<>(DcEquationType.class, network);
+        create(equationSystem, withListener);
         return equationSystem;
     }
 }

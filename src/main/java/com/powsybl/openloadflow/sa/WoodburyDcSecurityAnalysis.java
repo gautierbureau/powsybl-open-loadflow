@@ -59,7 +59,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
     private record WoodburyContext(DcLoadFlowContext dcLoadFlowContext, Map<String, List<Indexed<OperatorStrategy>>> operatorStrategiesByContingencyId, Map<String, LfAction> lfActionById,
                                    boolean createResultExtension, SecurityAnalysisParameters.IncreasedViolationsParameters violationsParameters,
-                                   List<LimitReduction> limitReductions, SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modifiedMonitoredElementsParameters) {
+                                   List<LimitReduction> limitReductions, SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modifiedMonitoredElementsParameters,
+                                   List<LimitViolationManager.BranchLimitsToCheck> branchLimitsToCheck) {
     }
 
     private record ToFastDcResults(Function<ConnectivityAnalysisResult, double[]> toPostContingencyStates,
@@ -208,8 +209,11 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         postContingencyNetworkResult.update(isBranchDisabledDueToContingency);
 
         // detect violations
+        // in DC the bus voltages are left undefined (set to NaN), so bus voltage violations cannot occur and the
+        // network-wide bus scan is skipped
+        boolean detectBusVoltageViolations = !loadFlowContext.getParameters().isSetVToNan();
         var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, woodburyContext.limitReductions, woodburyContext.violationsParameters);
-        postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency);
+        postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency, woodburyContext.branchLimitsToCheck(), detectBusVoltageViolations);
 
         // connectivity result due to the contingency
         var connectivityResult = new ConnectivityResult(
@@ -245,13 +249,14 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         DcLoadFlowContext loadFlowContext = woodburyContext.dcLoadFlowContext;
         LfNetwork lfNetwork = loadFlowContext.getNetwork();
 
+        // apply modifications first, so that branch flows (which, in the vectorized equation system, are
+        // computed on state vector update) are evaluated on the final network topology and tap positions
+        lfContingency.apply(loadFlowContext.getParameters().getBalanceType());
+        LfActionUtils.applyListOfActions(operatorStrategyLfActions, lfNetwork, lfContingency, loadFlowContext.getParameters().getNetworkParameters());
+
         // update network state with post contingency and post operator strategy states
         loadFlowContext.getEquationSystem().getStateVector().set(postContingencyAndOperatorStrategyStates);
         updateNetwork(lfNetwork, loadFlowContext.getEquationSystem(), postContingencyAndOperatorStrategyStates);
-
-        // apply modifications to compute results
-        lfContingency.apply(loadFlowContext.getParameters().getBalanceType());
-        LfActionUtils.applyListOfActions(operatorStrategyLfActions, lfNetwork, lfContingency, loadFlowContext.getParameters().getNetworkParameters());
 
         // update network result
         var postActionsNetworkResult = new PostContingencyNetworkResult(lfNetwork, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex),
@@ -261,9 +266,12 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         postActionsNetworkResult.update(isBranchDisabledDueToContingency);
 
         // detect violations
+        // in DC the bus voltages are left undefined (set to NaN), so bus voltage violations cannot occur and the
+        // network-wide bus scan is skipped
+        boolean detectBusVoltageViolations = !loadFlowContext.getParameters().isSetVToNan();
         var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager,
                 woodburyContext.limitReductions, woodburyContext.violationsParameters);
-        postActionsViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency);
+        postActionsViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency, woodburyContext.branchLimitsToCheck(), detectBusVoltageViolations);
 
         return new OperatorStrategyResult(operatorStrategy,
             List.of(
@@ -294,6 +302,20 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 toFastDcResults, restorePreContingencyStates, securityAnalysisSimulationResults, lfContingency));
     }
 
+    /**
+     * Restore the pre contingency state of the network elements collected by the given collector (i.e. the elements
+     * modified by the contingency and its operator strategy actions), then clear the collector for the next
+     * contingency. The collector is disabled during the restoration so that the setter calls it performs do not
+     * collect back the elements being restored.
+     */
+    private static void restoreModifiedNetworkElements(NetworkState networkState, ModifiedElementsCollector modifiedElementsCollector) {
+        modifiedElementsCollector.setEnabled(false);
+        networkState.restore(modifiedElementsCollector.getModifiedBuses(), modifiedElementsCollector.getModifiedBranches(),
+            modifiedElementsCollector.getModifiedHvdcs());
+        modifiedElementsCollector.reset();
+        modifiedElementsCollector.setEnabled(true);
+    }
+
     private void processContingency(WoodburyContext woodburyContext, ConnectivityAnalysisResult connectivityAnalysisResult,
                                     ToFastDcResults toFastDcResults, Runnable restorePreContingencyStates,
                                     SecurityAnalysisSimulationResults securityAnalysisSimulationResults,
@@ -308,7 +330,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
         // predicate to determine if a branch is disabled or not due to the contingency
         // note that branches with one side opened due to the contingency are considered as disabled
-        Predicate<LfBranch> isBranchDisabled = branch -> lfContingency.getDisabledNetwork().getBranchesStatus().containsKey(branch);
+        Map<LfBranch, DisabledBranchStatus> disabledBranchesStatus = lfContingency.getDisabledNetwork().getBranchesStatus();
+        Predicate<LfBranch> isBranchDisabled = disabledBranchesStatus::containsKey;
 
         // process post contingency result with supplier giving post contingency states
         logPostContingencyStart(lfNetwork, lfContingency);
@@ -432,15 +455,21 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
             // detect violations
             var preContingencyLimitViolationManager = new LimitViolationManager(limitReductions);
             preContingencyLimitViolationManager.detectViolations(lfNetwork);
+            // branch limits do not change between contingencies: resolve once the limit groups of the branches carrying
+            // limits so that the post contingency violation detection reuses them instead of looking up the limits of
+            // every branch of the network on each contingency
+            List<LimitViolationManager.BranchLimitsToCheck> branchLimitsToCheck =
+                    LimitViolationManager.getBranchLimitsToCheck(lfNetwork, preContingencyLimitViolationManager.getLimitReductionManager());
             WoodburyContext woodburyContext = new WoodburyContext(context, operatorStrategiesByContingencyId, lfActionById, createResultExtension,
                     securityAnalysisParameters.getIncreasedViolationsParameters(), limitReductions,
-                    securityAnalysisParameters.getModifiedMonitoredElementsParameters());
+                    securityAnalysisParameters.getModifiedMonitoredElementsParameters(), branchLimitsToCheck);
 
             // compute states with +1 -1 to model the contingencies and run connectivity analysis
             ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivityBreakAnalysisResults = ConnectivityBreakAnalysis.run(context, propagatedContingencies);
 
             // the map is indexed by lf actions as different kind of actions can be given on the same branch
-            Map<LfAction, List<ComputedElement>> actionElementsIndexByLfAction = ComputedElement.createActionElementsIndexByLfAction(lfActionById, context.getEquationSystem());
+            Map<LfAction, List<ComputedElement>> actionElementsIndexByLfAction = ComputedElement.createActionElementsIndexByLfAction(lfActionById, context.getEquationSystem(),
+                    context.getParameters().getEquationSystemCreationParameters());
 
             // compute states with +1 -1 to model the actions in Woodbury engine
             // note that the number of columns in the matrix depends on the number of distinct branches affected by the action elements
@@ -448,6 +477,11 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
             // save base state for later restoration after each contingency/action
             NetworkState networkState = NetworkState.save(lfNetwork);
+
+            // collect the elements modified by each contingency (and its operator strategy actions) so that only
+            // those are restored afterwards, instead of the whole network
+            ModifiedElementsCollector modifiedElementsCollector = new ModifiedElementsCollector();
+            lfNetwork.addListener(modifiedElementsCollector);
 
             List<PostContingencyResult> postContingencyResults = new ArrayList<>();
             List<OperatorStrategyResult> operatorStrategyResults = new ArrayList<>();
@@ -482,8 +516,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 Runnable restorePreContingencyStates = () -> {
                     // update workingContingencyStates as it may have been updated by post contingency states calculation
                     System.arraycopy(preContingencyStates, 0, workingContingencyStates, 0, preContingencyStates.length);
-                    // restore pre contingency state
-                    networkState.restore();
+                    // restore pre contingency state of the elements modified by the contingency
+                    restoreModifiedNetworkElements(networkState, modifiedElementsCollector);
                 };
                 addPostContingencyAndOperatorStrategyResults(woodburyContext, connectivityAnalysisResult, toFastDcResults, restorePreContingencyStates, securityAnalysisSimulationResults);
             });
@@ -492,9 +526,11 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
             connectivityBreakAnalysisResults.connectivityBreakingAnalysisResults().forEach(connectivityAnalysisResult -> {
                 // runnable to restore pre contingency states, after modifications applied to the lfNetwork
                 // no need to update workingContingencyStates as an override of flow states will be computed
-                Runnable restorePreContingencyStates = networkState::restore;
+                Runnable restorePreContingencyStates = () -> restoreModifiedNetworkElements(networkState, modifiedElementsCollector);
                 addPostContingencyAndOperatorStrategyResults(woodburyContext, connectivityAnalysisResult, toFastDcResults, restorePreContingencyStates, securityAnalysisSimulationResults);
             });
+
+            lfNetwork.removeListener(modifiedElementsCollector);
 
             return new SecurityAnalysisResult(
                     new PreContingencyResult(LoadFlowResult.ComponentResult.Status.CONVERGED,

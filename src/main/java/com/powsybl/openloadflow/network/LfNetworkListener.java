@@ -57,4 +57,8 @@ public interface LfNetworkListener {
     void onReferenceBusChange(LfBus bus, boolean reference);
 
     void onHvdcAcEmulationStatusChange(LfHvdc hvdc, LfHvdc.AcEmulationControl.AcEmulationStatus acEmulationStatus);
+
+    void onGenerationDisablingStatusChange(LfGenerator generator, boolean disabled);
+
+    void onLoadDisablingStatusChange(LfLoad load);
 }

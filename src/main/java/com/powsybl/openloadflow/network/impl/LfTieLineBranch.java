@@ -113,6 +113,10 @@ public class LfTieLineBranch extends AbstractImpedantLfBranch {
 
     @Override
     public List<LfLimitsGroup> getLimits1(final LimitType type, LimitReductionManager limitReductionManager) {
+        List<LfLimitsGroup> cached = getCachedLimits1(type);
+        if (cached != null) {
+            return cached;
+        }
         switch (type) {
             case ACTIVE_POWER:
                 return getLimits1(type, toMapIndexedByOperationalLimitsGroupId(OperationalLimitsGroup::getActivePowerLimits, TwoSides.ONE), limitReductionManager);
@@ -128,6 +132,10 @@ public class LfTieLineBranch extends AbstractImpedantLfBranch {
 
     @Override
     public List<LfLimitsGroup> getLimits2(final LimitType type, LimitReductionManager limitReductionManager) {
+        List<LfLimitsGroup> cached = getCachedLimits2(type);
+        if (cached != null) {
+            return cached;
+        }
         switch (type) {
             case ACTIVE_POWER:
                 return getLimits2(type, toMapIndexedByOperationalLimitsGroupId(OperationalLimitsGroup::getActivePowerLimits, TwoSides.TWO), limitReductionManager);
