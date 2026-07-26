@@ -695,8 +695,16 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 // Reset parameters between contingencies
                 Consumer<P> contingencyParametersResetter = createParametersResetter(p);
 
+                // when the alternative equations partial value update is on, simulate structure-preserving
+                // contingencies first and fallback ones last so the base structure construction is paid once
+                List<PropagatedContingency> orderedContingencies = context.getJacobianMatrix().isPartialValueUpdateEnabled()
+                        ? orderContingenciesForStructureReuse(lfNetwork, context, propagatedContingencies)
+                        : propagatedContingencies;
+                boolean contingenciesReordered = orderedContingencies != propagatedContingencies;
+
                 // start a simulation for each of the contingency
-                Iterator<PropagatedContingency> contingencyIt = propagatedContingencies.iterator();
+                int[] fallbackContingencyCount = {0};
+                Iterator<PropagatedContingency> contingencyIt = orderedContingencies.iterator();
                 while (contingencyIt.hasNext() && !Thread.currentThread().isInterrupted()) {
                     PropagatedContingency propagatedContingency = contingencyIt.next();
                     propagatedContingency.toLfContingency(lfNetwork)
@@ -708,7 +716,28 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                                 createResultExtension, preContingencyLimitViolationManager,
                                 preContingencyNetworkResult, postContingencyResults,
                                 contingencyParametersResetter, operatorStrategiesByContingencyId,
-                                operatorStrategyResults, contingencyIt));
+                                operatorStrategyResults, contingencyIt, fallbackContingencyCount));
+                }
+
+                if (context.getJacobianMatrix().isPartialValueUpdateEnabled()) {
+                    // with the alternative equations partial value update, the base matrix structure is built (a
+                    // symbolic factorization) once and reused for every structure-preserving contingency, while each
+                    // fallback contingency forces one extra full structure build. Reordering keeps that invariant:
+                    // total full structure builds == number of fallback contingencies + 1 (the shared base build).
+                    LOGGER.info("Network {}: alternative equations security analysis performed {} full Jacobian structure build(s) for {} fallback contingenc(y/ies)",
+                            lfNetwork, context.getJacobianMatrix().getStructureBuildCount(), fallbackContingencyCount[0]);
+                }
+
+                if (contingenciesReordered) {
+                    // restore the input contingency order in the results, independent of the execution order above
+                    Map<String, Integer> inputOrder = new HashMap<>();
+                    for (int i = 0; i < propagatedContingencies.size(); i++) {
+                        inputOrder.put(propagatedContingencies.get(i).getContingency().getId(), i);
+                    }
+                    postContingencyResults.sort(Comparator.comparingInt(
+                            result -> inputOrder.getOrDefault(result.getContingency().getId(), Integer.MAX_VALUE)));
+                    operatorStrategyResults.sort(Comparator.comparingInt(
+                            result -> inputOrder.getOrDefault(result.getOperatorStrategy().getContingencyContext().getContingencyId(), Integer.MAX_VALUE)));
                 }
 
                 // Restore parameters in case they are used for another component
@@ -884,6 +913,42 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 operatorStrategy.getContingencyContext().getContingencyId(), network, stopwatch.elapsed(TimeUnit.MILLISECONDS));
     }
 
+    /**
+     * Whether the given contingency preserves the equation system matrix structure, i.e. can be simulated without a
+     * full symbolic refactorization (a "construction"). Only meaningful when the alternative equations partial value
+     * update is enabled; defaults to {@code false} so subclasses without that support keep the input contingency order.
+     */
+    protected boolean contingencyPreservesMatrixStructure(C context, LfContingency lfContingency) {
+        return false;
+    }
+
+    /**
+     * Order contingencies so that those preserving the alternative equations matrix structure are simulated first,
+     * sharing a single symbolic factorization, and those forcing a full structure rebuild are simulated last, so that
+     * the base structure construction is paid once (see {@link com.powsybl.openloadflow.equations.JacobianMatrix}
+     * partial value update). This is purely an execution-order optimization: each contingency is simulated from the
+     * same restored base state, so results are identical and are reordered back to the input order by the caller.
+     */
+    private List<PropagatedContingency> orderContingenciesForStructureReuse(LfNetwork lfNetwork, C context,
+                                                                            List<PropagatedContingency> propagatedContingencies) {
+        List<PropagatedContingency> structurePreserving = new ArrayList<>();
+        List<PropagatedContingency> structureRebuilding = new ArrayList<>();
+        for (PropagatedContingency propagatedContingency : propagatedContingencies) {
+            Optional<LfContingency> lfContingency = propagatedContingency.toLfContingency(lfNetwork);
+            if (lfContingency.isPresent() && contingencyPreservesMatrixStructure(context, lfContingency.get())) {
+                structurePreserving.add(propagatedContingency);
+            } else {
+                structureRebuilding.add(propagatedContingency);
+            }
+        }
+        if (structurePreserving.isEmpty() || structureRebuilding.isEmpty()) {
+            // all contingencies fall in the same group: keep the input order untouched
+            return propagatedContingencies;
+        }
+        structurePreserving.addAll(structureRebuilding);
+        return structurePreserving;
+    }
+
     private void processContingency(LfNetwork lfNetwork, SecurityAnalysisParameters securityAnalysisParameters,
                                     List<LimitReduction> limitReductions, ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution,
                                     ReportNode networkReportNode, LfContingency lfContingency, P p, NetworkState networkState,
@@ -892,7 +957,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                                     boolean createResultExtension, LimitViolationManager preContingencyLimitViolationManager,
                                     PreContingencyNetworkResult preContingencyNetworkResult, List<PostContingencyResult> postContingencyResults,
                                     Consumer<P> contingencyParametersResetter, Map<String, List<Indexed<OperatorStrategy>>> operatorStrategiesByContingencyId,
-                                    List<OperatorStrategyResult> operatorStrategyResults, Iterator<PropagatedContingency> contingencyIt) {
+                                    List<OperatorStrategyResult> operatorStrategyResults, Iterator<PropagatedContingency> contingencyIt,
+                                    int[] fallbackContingencyCount) {
         ReportNode postContSimReportNode = Reports.createPostContingencySimulation(networkReportNode, lfContingency.getId());
         lfNetwork.setReportNode(postContSimReportNode);
 
@@ -920,6 +986,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
         if (jacobianMatrix.isPartialValueUpdateEnabled()
                 && jacobianMatrix.getStructureBuildCount() > structureBuildsBeforeContingency) {
+            fallbackContingencyCount[0]++;
             LOGGER.info("Contingency '{}' does not preserve the alternative equations matrix structure and fell back to a full Jacobian structure rebuild",
                     lfContingency.getId());
         }

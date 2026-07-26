@@ -133,6 +133,21 @@ public class AcSecurityAnalysis extends AbstractSecurityAnalysis<AcVariableType,
     }
 
     @Override
+    protected boolean contingencyPreservesMatrixStructure(AcLoadFlowContext context, LfContingency lfContingency) {
+        // a contingency preserves the alternative equations matrix structure when every bus it disables carries a
+        // trivial disabled alternative on its active power balance equation (i.e. is on the alternative modeling):
+        // such a bus is islanded without adding or removing any equation or variable, so no symbolic refactorization
+        // is needed. A bus kept on the legacy modeling (converter, fictitious, shunt or transformer voltage
+        // controlled, or connected to a zero impedance branch) is instead structurally removed and forces a rebuild.
+        // Note: contingencies that reconfigure controller sets (e.g. tripping one of several generators controlling a
+        // bus) may still fall back; the runtime detection in the base class logs those cases.
+        return context.getEquationSystem().getEquationArray(AcEquationType.BUS_TARGET_P)
+                .map(pArray -> lfContingency.getDisabledNetwork().getBuses().stream()
+                        .allMatch(bus -> pArray.hasElementDisabledAlternative(bus.getNum())))
+                .orElse(false);
+    }
+
+    @Override
     protected void afterPreContingencySimulation(AcLoadFlowParameters parameters) {
         // in some post-contingency computation, it does not remain elements to participate to slack distribution.
         // in that case, no exception should be thrown. If parameters were configured to throw, reconfigure to FAIL.
