@@ -14,12 +14,12 @@ import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.network.NodeBreakerNetworkFactory;
 import com.powsybl.openloadflow.network.impl.RefThreadGuardTestUtil;
-import org.junit.jupiter.api.Test;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityAnalysisResult;
 import com.powsybl.sensitivity.SensitivityAnalysisRunParameters;
 import com.powsybl.sensitivity.SensitivityFactor;
 import com.powsybl.sensitivity.SensitivityVariableType;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
