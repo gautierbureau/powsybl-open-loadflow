@@ -35,9 +35,18 @@ public class LfSwitch extends AbstractLfBranch {
 
     private final Ref<Switch> switchRef;
 
+    private final String id;
+
     public LfSwitch(LfNetwork network, LfBus bus1, LfBus bus2, Switch aSwitch, LfNetworkParameters parameters) {
         super(network, Objects.requireNonNull(bus1), Objects.requireNonNull(bus2), new SimplePiModel(), parameters);
         this.switchRef = Ref.create(aSwitch, parameters.isCacheEnabled());
+        this.id = aSwitch.getId();
+    }
+
+    protected LfSwitch(LfSwitch other, LfNetwork network, LfBus bus1, LfBus bus2) {
+        super(other, network, Objects.requireNonNull(bus1), Objects.requireNonNull(bus2));
+        this.switchRef = other.switchRef;
+        this.id = other.id;
     }
 
     private Switch getSwitch() {
@@ -46,7 +55,7 @@ public class LfSwitch extends AbstractLfBranch {
 
     @Override
     public String getId() {
-        return getSwitch().getId();
+        return id;
     }
 
     @Override

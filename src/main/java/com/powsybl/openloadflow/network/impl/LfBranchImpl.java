@@ -31,9 +31,37 @@ public class LfBranchImpl extends AbstractImpedantLfBranch {
 
     private final Ref<Branch<?>> branchRef;
 
+    private final String id;
+
+    private final BranchType branchType;
+
+    private final boolean phaseControllerCapability;
+
+    // terminal nominal voltages, cached at build time so the branch results never go back to the
+    // iidm network (see the iidm free run phase of the multi thread copy mode)
+    private final double nominalV1;
+
+    private final double nominalV2;
+
     protected LfBranchImpl(LfNetwork network, LfBus bus1, LfBus bus2, PiModel piModel, Branch<?> branch, LfNetworkParameters parameters) {
         super(network, bus1, bus2, piModel, parameters);
         this.branchRef = Ref.create(branch, parameters.isCacheEnabled());
+        this.id = branch.getId();
+        this.branchType = branch instanceof Line ? BranchType.LINE : BranchType.TRANSFO_2;
+        this.phaseControllerCapability = branch.getType() == IdentifiableType.TWO_WINDINGS_TRANSFORMER
+                && ((TwoWindingsTransformer) branch).getPhaseTapChanger() != null;
+        this.nominalV1 = branch.getTerminal1().getVoltageLevel().getNominalV();
+        this.nominalV2 = branch.getTerminal2().getVoltageLevel().getNominalV();
+    }
+
+    protected LfBranchImpl(LfBranchImpl other, LfNetwork network, LfBus bus1, LfBus bus2) {
+        super(other, network, bus1, bus2);
+        this.branchRef = other.branchRef;
+        this.id = other.id;
+        this.branchType = other.branchType;
+        this.phaseControllerCapability = other.phaseControllerCapability;
+        this.nominalV1 = other.nominalV1;
+        this.nominalV2 = other.nominalV2;
     }
 
     private static void createLineAsym(Line line, double zb, PiModel piModel, LfBranchImpl lfBranch) {
@@ -197,34 +225,31 @@ public class LfBranchImpl extends AbstractImpedantLfBranch {
 
     @Override
     public String getId() {
-        return getBranch().getId();
+        return id;
     }
 
     @Override
     public BranchType getBranchType() {
-        return getBranch() instanceof Line ? BranchType.LINE : BranchType.TRANSFO_2;
+        return branchType;
     }
 
     @Override
     public boolean hasPhaseControllerCapability() {
-        var branch = getBranch();
-        return branch.getType() == IdentifiableType.TWO_WINDINGS_TRANSFORMER
-                && ((TwoWindingsTransformer) branch).getPhaseTapChanger() != null;
+        return phaseControllerCapability;
     }
 
     @Override
     public List<BranchResult> createBranchResult(double preContingencyBranchP1, double preContingencyBranchOfContingencyP1,
                                                  boolean createExtension, Map<String, LfBranch.LfBranchResults> zeroImpedanceFlows,
                                                  LoadFlowModel loadFlowModel) {
-        var branch = getBranch();
-        double currentScale1 = PerUnit.ib(branch.getTerminal1().getVoltageLevel().getNominalV());
-        double currentScale2 = PerUnit.ib(branch.getTerminal2().getVoltageLevel().getNominalV());
+        double currentScale1 = PerUnit.ib(nominalV1);
+        double currentScale2 = PerUnit.ib(nominalV2);
 
         var branchResult = buildBranchResult(loadFlowModel, zeroImpedanceFlows, currentScale1, currentScale2, preContingencyBranchP1, preContingencyBranchOfContingencyP1);
         if (createExtension) {
             branchResult.addExtension(OlfBranchResult.class, new OlfBranchResult(piModel.getR1(), piModel.getContinuousR1(),
-                    getV1() * branch.getTerminal1().getVoltageLevel().getNominalV(),
-                    getV2() * branch.getTerminal2().getVoltageLevel().getNominalV(),
+                    getV1() * nominalV1,
+                    getV2() * nominalV2,
                     Math.toDegrees(getAngle1()),
                     Math.toDegrees(getAngle2())));
         }
@@ -292,7 +317,7 @@ public class LfBranchImpl extends AbstractImpedantLfBranch {
         // Initialize the array of the reductions with 1s
         double[] limitReductions = new double[limits.getTemporaryLimits().size() + 1];
         Arrays.fill(limitReductions, 1.);
-        double nominalV = branchRef.get().getTerminal(side).getVoltageLevel().getNominalV();
+        double nominalV = side == TwoSides.ONE ? nominalV1 : nominalV2;
         for (LimitReductionManager.TerminalLimitReduction terminalLimitReduction : limitReductionManager.getTerminalLimitReductions()) {
             if (terminalLimitReduction.nominalV().contains(nominalV)) {
                 if (terminalLimitReduction.isPermanent()) {

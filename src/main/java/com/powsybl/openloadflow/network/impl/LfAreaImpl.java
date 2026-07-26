@@ -21,6 +21,8 @@ public class LfAreaImpl extends AbstractElement implements LfArea {
 
     private final Ref<Area> areaRef;
 
+    private final String id;
+
     private double interchangeTarget;
 
     private final Set<LfBus> buses;
@@ -30,9 +32,20 @@ public class LfAreaImpl extends AbstractElement implements LfArea {
     protected LfAreaImpl(Area area, Set<LfBus> buses, Set<Boundary> boundaries, LfNetwork lfNetwork, LfNetworkParameters parameters) {
         super(lfNetwork);
         this.areaRef = Ref.create(area, parameters.isCacheEnabled());
+        this.id = area.getId();
         this.interchangeTarget = area.getInterchangeTarget().orElse(0.0) / PerUnit.SB;
         this.buses = buses;
         this.boundaries = boundaries;
+    }
+
+    protected LfAreaImpl(LfAreaImpl other, Set<LfBus> buses, Set<Boundary> boundaries, LfNetwork network) {
+        super(network);
+        this.areaRef = other.areaRef;
+        this.id = other.id;
+        this.interchangeTarget = other.interchangeTarget;
+        this.buses = buses;
+        this.boundaries = boundaries;
+        this.disabled = other.disabled;
     }
 
     public static LfAreaImpl create(Area area, Set<LfBus> buses, Set<Boundary> boundaries, LfNetwork network, LfNetworkParameters parameters) {
@@ -41,13 +54,9 @@ public class LfAreaImpl extends AbstractElement implements LfArea {
         return lfArea;
     }
 
-    private Area getArea() {
-        return areaRef.get();
-    }
-
     @Override
     public String getId() {
-        return getArea().getId();
+        return id;
     }
 
     @Override
@@ -95,29 +104,45 @@ public class LfAreaImpl extends AbstractElement implements LfArea {
         }
 
         @Override
+        public TwoSides getSide() {
+            return side;
+        }
+
+        @Override
         public double getP() {
             if (branch.isDisabled()) {
                 return 0.0;
             }
             if (branch instanceof LfTieLineBranch lfTieLineBranch) {
+                // uses the electrical characteristics cached at build time by the tie line branch,
+                // so this outer loop evaluation never goes back to the iidm network
                 if (side == TwoSides.ONE) {
-                    BoundaryLine boundaryLine1 = lfTieLineBranch.getHalf1();
-                    double nominalV1 = boundaryLine1.getTerminal().getVoltageLevel().getNominalV();
-                    return new SV(lfTieLineBranch.getP1().eval() * PerUnit.SB, lfTieLineBranch.getQ1().eval() * PerUnit.SB,
-                        lfTieLineBranch.getV1() * nominalV1, Math.toDegrees(lfTieLineBranch.getAngle1()), side)
-                            .otherSideP(boundaryLine1, false) / PerUnit.SB;
+                    LfTieLineBranch.HalfParams half1 = lfTieLineBranch.getHalf1Params();
+                    return otherSideP(lfTieLineBranch.getP1().eval() * PerUnit.SB, lfTieLineBranch.getQ1().eval() * PerUnit.SB,
+                            lfTieLineBranch.getV1() * half1.nominalV(), Math.toDegrees(lfTieLineBranch.getAngle1()), side, half1) / PerUnit.SB;
                 } else if (side == TwoSides.TWO) {
-                    BoundaryLine boundaryLine = lfTieLineBranch.getHalf2();
-                    double nominalV2 = boundaryLine.getTerminal().getVoltageLevel().getNominalV();
-                    return new SV(lfTieLineBranch.getP2().eval() * PerUnit.SB, lfTieLineBranch.getQ2().eval() * PerUnit.SB,
-                        lfTieLineBranch.getV2() * nominalV2, Math.toDegrees(lfTieLineBranch.getAngle2()), side)
-                            .otherSideP(boundaryLine, false) / PerUnit.SB;
+                    LfTieLineBranch.HalfParams half2 = lfTieLineBranch.getHalf2Params();
+                    return otherSideP(lfTieLineBranch.getP2().eval() * PerUnit.SB, lfTieLineBranch.getQ2().eval() * PerUnit.SB,
+                            lfTieLineBranch.getV2() * half2.nominalV(), Math.toDegrees(lfTieLineBranch.getAngle2()), side, half2) / PerUnit.SB;
                 }
             }
             return switch (side) {
                 case ONE -> branch.getP1().eval();
                 case TWO -> branch.getP2().eval();
             };
+        }
+
+        /**
+         * Active power at the boundary side of the half line, from the state at the network side.
+         * Same behavior as {@code SV.otherSideP(boundaryLine, false)}: full AC computation when the
+         * whole state is known, lossless DC approximation (other side P is just -P) otherwise
+         * (typically a DC load flow where Q is not computed).
+         */
+        private static double otherSideP(double p, double q, double u, double a, TwoSides side, LfTieLineBranch.HalfParams half) {
+            if (Double.isNaN(q) || Double.isNaN(u) || Double.isNaN(a)) {
+                return -p;
+            }
+            return new SV(p, q, u, a, side).otherSideP(half.r(), half.x(), half.g(), half.b(), 0, 0, 1, 0);
         }
     }
 }

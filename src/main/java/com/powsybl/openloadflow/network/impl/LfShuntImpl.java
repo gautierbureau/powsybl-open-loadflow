@@ -53,6 +53,8 @@ public class LfShuntImpl extends AbstractLfShunt {
 
     private final List<Ref<ShuntCompensator>> shuntCompensatorsRefs;
 
+    private final List<String> originalIds;
+
     private final LfBus bus;
 
     private ShuntVoltageControl voltageControl;
@@ -78,6 +80,7 @@ public class LfShuntImpl extends AbstractLfShunt {
         shuntCompensatorsRefs = Objects.requireNonNull(shuntCompensators).stream()
                 .map(sc -> Ref.create(sc, parameters.isCacheEnabled()))
                 .toList();
+        originalIds = shuntCompensators.stream().map(ShuntCompensator::getId).toList();
         if (shuntCompensators.isEmpty()) {
             throw new IllegalArgumentException("Empty shunt compensator list");
         }
@@ -102,6 +105,25 @@ public class LfShuntImpl extends AbstractLfShunt {
             // Controllers are always enabled, a contingency with shunt compensator with voltage control on is not supported yet.
             controllers.sort(Comparator.comparingDouble(Controller::getBMagnitude).reversed());
         }
+    }
+
+    protected LfShuntImpl(LfShuntImpl other, LfNetwork network, LfBus bus) {
+        super(network);
+        this.shuntCompensatorsRefs = new ArrayList<>(other.shuntCompensatorsRefs);
+        this.originalIds = other.originalIds;
+        this.bus = Objects.requireNonNull(bus);
+        this.voltageControlCapability = other.voltageControlCapability;
+        this.voltageControlEnabled = other.voltageControlEnabled;
+        this.zb = other.zb;
+        this.b = other.b;
+        this.g = other.g;
+        for (Controller controller : other.controllers) {
+            ControllerImpl otherController = (ControllerImpl) controller;
+            controllers.add(new ControllerImpl(otherController.getShuntCompensatorRef(),
+                    otherController.getSectionsB(), otherController.getSectionsG(), otherController.getPosition(), otherController.getMinPosition()));
+        }
+        this.disabled = other.disabled;
+        // voltageControl object is wired at network level, p and q stay solver injected defaults
     }
 
     private void initShuntCompensator(LfNetworkParameters parameters, Ref<ShuntCompensator> shuntCompensatorRef) {
@@ -156,7 +178,7 @@ public class LfShuntImpl extends AbstractLfShunt {
 
     @Override
     public List<String> getOriginalIds() {
-        return shuntCompensatorsRefs.stream().map(scRef -> scRef.get().getId()).toList();
+        return originalIds;
     }
 
     @Override

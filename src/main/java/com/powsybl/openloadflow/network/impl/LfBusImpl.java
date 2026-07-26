@@ -31,6 +31,8 @@ public class LfBusImpl extends AbstractLfBus {
 
     private final Ref<Bus> busRef;
 
+    private final String id;
+
     private final double nominalV;
 
     private final double lowVoltageLimit;
@@ -52,10 +54,22 @@ public class LfBusImpl extends AbstractLfBus {
     // Lazy initialiation
     private ViolationLocation violationLocation = null;
 
+    private boolean violationLocationComputed = false;
+
+    // voltage level id, cached at build time so the results and violations never go back to the
+    // iidm network (see the iidm free run phase of the multi thread copy mode)
+    private final String voltageLevelId;
+
+    // bus breaker bus ids of this (bus view) bus, lazily computed from the iidm network and
+    // materialized before the copies are taken in the multi thread copy mode
+    private List<String> mergedBusIds;
+
     protected LfBusImpl(Bus bus, LfNetwork network, double v, double angle, LfNetworkParameters parameters,
                         boolean participating) {
         super(network, v, angle, bus.getSynchronousComponent().getNum(), parameters);
         this.busRef = Ref.create(bus, parameters.isCacheEnabled());
+        this.id = bus.getId();
+        voltageLevelId = bus.getVoltageLevel().getId();
         nominalV = bus.getVoltageLevel().getNominalV();
         lowVoltageLimit = bus.getVoltageLevel().getLowVoltageLimit();
         highVoltageLimit = bus.getVoltageLevel().getHighVoltageLimit();
@@ -74,6 +88,27 @@ public class LfBusImpl extends AbstractLfBus {
             bbsIds = Collections.emptyList();
         }
 
+    }
+
+    protected LfBusImpl(LfBusImpl other, LfNetwork network) {
+        super(other, network);
+        this.busRef = other.busRef;
+        this.id = other.id;
+        this.voltageLevelId = other.voltageLevelId;
+        this.nominalV = other.nominalV;
+        this.lowVoltageLimit = other.lowVoltageLimit;
+        this.highVoltageLimit = other.highVoltageLimit;
+        this.participating = other.participating;
+        this.breakers = other.breakers;
+        this.country = other.country;
+        this.bbsIds = other.bbsIds;
+        this.fictitiousInjectionTargetP = other.fictitiousInjectionTargetP;
+        this.fictitiousInjectionTargetQ = other.fictitiousInjectionTargetQ;
+        // lazy caches of iidm derived data: shared, they are immutable once computed (and
+        // materialized before the copies are taken in the multi thread copy mode)
+        this.violationLocation = other.violationLocation;
+        this.violationLocationComputed = other.violationLocationComputed;
+        this.mergedBusIds = other.mergedBusIds;
     }
 
     private static void createAsym(Bus bus, LfBusImpl lfBus) {
@@ -113,12 +148,12 @@ public class LfBusImpl extends AbstractLfBus {
 
     @Override
     public String getId() {
-        return getBus().getId();
+        return id;
     }
 
     @Override
     public String getVoltageLevelId() {
-        return getBus().getVoltageLevel().getId();
+        return voltageLevelId;
     }
 
     @Override
@@ -167,19 +202,30 @@ public class LfBusImpl extends AbstractLfBus {
 
     @Override
     public List<BusResult> createBusResults() {
-        var bus = getBus();
         if (breakers) {
             if (bbsIds.isEmpty()) {
-                return List.of(new BusResult(getVoltageLevelId(), bus.getId(), v, Math.toDegrees(angle)));
+                return List.of(new BusResult(getVoltageLevelId(), id, v, Math.toDegrees(angle)));
             } else {
                 return bbsIds.stream()
                         .map(bbsId -> new BusResult(getVoltageLevelId(), bbsId, v, Math.toDegrees(angle)))
                         .collect(Collectors.toList());
             }
         } else {
-            return bus.getVoltageLevel().getBusBreakerView().getBusesFromBusViewBusId(bus.getId())
-                    .stream().map(b -> new BusResult(getVoltageLevelId(), b.getId(), v, Math.toDegrees(angle))).collect(Collectors.toList());
+            if (mergedBusIds == null) {
+                // only reached at build time (materializeIidmDerivedData), copies share the computed list
+                var bus = getBus();
+                mergedBusIds = bus.getVoltageLevel().getBusBreakerView().getBusesFromBusViewBusId(bus.getId())
+                        .stream().map(Identifiable::getId).toList();
+            }
+            return mergedBusIds.stream()
+                    .map(busId -> new BusResult(getVoltageLevelId(), busId, v, Math.toDegrees(angle))).collect(Collectors.toList());
         }
+    }
+
+    @Override
+    public void materializeIidmDerivedData() {
+        createBusResults();
+        getViolationLocation();
     }
 
     @Override
@@ -220,8 +266,8 @@ public class LfBusImpl extends AbstractLfBus {
     }
 
     public ViolationLocation getViolationLocation() {
-        TopologyKind topologyKind = getBus().getVoltageLevel().getTopologyKind();
-        if (violationLocation == null) {
+        if (!violationLocationComputed) {
+            TopologyKind topologyKind = getBus().getVoltageLevel().getTopologyKind();
             violationLocation = switch (topologyKind) {
                 case NODE_BREAKER -> {
                     List<Integer> nodes = getBus().getConnectedTerminalStream().map(t -> t.getNodeBreakerView().getNode()).toList();
@@ -242,6 +288,7 @@ public class LfBusImpl extends AbstractLfBus {
                     }
                 }
             };
+            violationLocationComputed = true;
         }
         return violationLocation;
     }

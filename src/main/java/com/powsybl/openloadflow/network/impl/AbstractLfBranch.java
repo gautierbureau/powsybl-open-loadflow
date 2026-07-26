@@ -86,6 +86,39 @@ public abstract class AbstractLfBranch extends AbstractElement implements LfBran
         }
     }
 
+    /**
+     * Deep copy constructor (see {@link LfNetworkCopier}). Buses must be the copied buses.
+     * Controls are wired at network level; solver injected evaluables are left to be recomputed;
+     * spanning tree flags are recomputed with the zero impedance networks.
+     * The asymmetrical line data (per sequence pi models and the admittance matrix derived from
+     * them at construction) is immutable after the load, shared. The limits caches are shared
+     * too (immutable once created): when they were materialized before the copy, the copy never
+     * reads the source network for limits, which keeps the simulation phase free of any access
+     * to the underlying IIDM network.
+     */
+    protected AbstractLfBranch(AbstractLfBranch other, LfNetwork network, LfBus bus1, LfBus bus2) {
+        super(network);
+        this.bus1 = bus1;
+        this.bus2 = bus2;
+        this.asymLine = other.asymLine;
+        this.piModel = other.piModel.copy();
+        this.piModel.setBranch(this);
+        for (LoadFlowModel loadFlowModel : LoadFlowModel.values()) {
+            ZeroImpedanceContext context = new ZeroImpedanceContext();
+            context.zeroImpedance = other.zeroImpedanceContextByModel.get(loadFlowModel).zeroImpedance;
+            zeroImpedanceContextByModel.put(loadFlowModel, context);
+        }
+        this.disabled = other.disabled;
+        this.phaseControlEnabled = other.phaseControlEnabled;
+        this.voltageControlEnabled = other.voltageControlEnabled;
+        this.currentLimits1 = other.currentLimits1;
+        this.activePowerLimits1 = other.activePowerLimits1;
+        this.apparentPowerLimits1 = other.apparentPowerLimits1;
+        this.currentLimits2 = other.currentLimits2;
+        this.activePowerLimits2 = other.activePowerLimits2;
+        this.apparentPowerLimits2 = other.apparentPowerLimits2;
+    }
+
     @Override
     public Optional<ThreeSides> getOriginalSide() {
         return Optional.empty();

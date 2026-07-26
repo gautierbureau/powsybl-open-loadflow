@@ -25,10 +25,25 @@ public final class LfBoundaryLineGenerator extends AbstractLfGenerator {
 
     private final Ref<BoundaryLine> boundaryLineRef;
 
+    private final String originalId;
+
+    private final double minP;
+
+    private final double maxP;
+
+    private final double initialTargetQ;
+
+    private final ReactiveLimits reactiveLimits;
+
     private LfBoundaryLineGenerator(BoundaryLine boundaryLine, LfNetwork network, String controlledLfBusId, LfNetworkParameters parameters,
                                     LfNetworkLoadingReport report) {
         super(network, boundaryLine.getGeneration().getTargetP() / PerUnit.SB, parameters);
         this.boundaryLineRef = Ref.create(boundaryLine, parameters.isCacheEnabled());
+        this.originalId = boundaryLine.getId();
+        this.minP = boundaryLine.getGeneration().getMinP();
+        this.maxP = boundaryLine.getGeneration().getMaxP();
+        this.initialTargetQ = boundaryLine.getGeneration().getTargetQ();
+        this.reactiveLimits = boundaryLine.getGeneration().getReactiveLimits();
 
         // local control only
         if (boundaryLine.getGeneration().isVoltageRegulationOn() && checkVoltageControlConsistency(parameters, report)) {
@@ -42,6 +57,16 @@ public final class LfBoundaryLineGenerator extends AbstractLfGenerator {
         }
     }
 
+    protected LfBoundaryLineGenerator(LfBoundaryLineGenerator other, LfNetwork network) {
+        super(other, network);
+        this.boundaryLineRef = other.boundaryLineRef;
+        this.originalId = other.originalId;
+        this.minP = other.minP;
+        this.maxP = other.maxP;
+        this.initialTargetQ = other.initialTargetQ;
+        this.reactiveLimits = other.reactiveLimits;
+    }
+
     public static LfBoundaryLineGenerator create(BoundaryLine boundaryLine, LfNetwork network, String controlledLfBusId, LfNetworkParameters parameters,
                                                  LfNetworkLoadingReport report) {
         Objects.requireNonNull(boundaryLine);
@@ -51,18 +76,14 @@ public final class LfBoundaryLineGenerator extends AbstractLfGenerator {
         return new LfBoundaryLineGenerator(boundaryLine, network, controlledLfBusId, parameters, report);
     }
 
-    private BoundaryLine getBoundaryLine() {
-        return boundaryLineRef.get();
-    }
-
     @Override
     public String getId() {
-        return getBoundaryLine().getId() + "_GEN";
+        return originalId + "_GEN";
     }
 
     @Override
     public String getOriginalId() {
-        return getBoundaryLine().getId();
+        return originalId;
     }
 
     @Override
@@ -72,22 +93,22 @@ public final class LfBoundaryLineGenerator extends AbstractLfGenerator {
 
     @Override
     public double getTargetQ() {
-        return Networks.zeroIfNan(getBoundaryLine().getGeneration().getTargetQ()) / PerUnit.SB;
+        return Networks.zeroIfNan(initialTargetQ) / PerUnit.SB;
     }
 
     @Override
     public double getMinP() {
-        return getBoundaryLine().getGeneration().getMinP() / PerUnit.SB;
+        return minP / PerUnit.SB;
     }
 
     @Override
     public double getMaxP() {
-        return getBoundaryLine().getGeneration().getMaxP() / PerUnit.SB;
+        return maxP / PerUnit.SB;
     }
 
     @Override
     protected Optional<ReactiveLimits> getReactiveLimits() {
-        return Optional.ofNullable(getBoundaryLine().getGeneration().getReactiveLimits());
+        return Optional.ofNullable(reactiveLimits);
     }
 
     @Override

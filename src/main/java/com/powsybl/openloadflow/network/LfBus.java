@@ -242,6 +242,16 @@ public interface LfBus extends LfElement {
     }
 
     /**
+     * Force the computation of the lazy iidm derived data used when building the results and the
+     * violations (bus breaker bus ids, violation location). Called on the thread that built the
+     * network, before the copies are taken, so the run phase never goes back to the iidm network
+     * (see the iidm free run phase of the multi thread copy mode).
+     */
+    default void materializeIidmDerivedData() {
+        // nothing to materialize by default
+    }
+
+    /**
      * Find bus + parallel branches neighbors.
      */
     Map<LfBus, List<LfBranch>> findNeighbors();

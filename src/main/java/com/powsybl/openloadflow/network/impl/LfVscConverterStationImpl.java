@@ -24,6 +24,14 @@ public class LfVscConverterStationImpl extends AbstractLfGenerator implements Lf
 
     private final Ref<VscConverterStation> stationRef;
 
+    private final String id;
+
+    private final double initialReactivePowerSetpoint;
+
+    private final Double hvdcLineMaxP;
+
+    private final ReactiveLimits reactiveLimits;
+
     private final double lossFactor;
 
     private LfHvdc hvdc;
@@ -34,12 +42,29 @@ public class LfVscConverterStationImpl extends AbstractLfGenerator implements Lf
         super(network, HvdcUtils.getConverterStationTargetP(station) / PerUnit.SB, parameters);
         this.hvdcDanglingInIidm = HvdcConverterStations.isHvdcDanglingInIidm(station);
         this.stationRef = Ref.create(station, parameters.isCacheEnabled());
+        this.id = station.getId();
+        this.initialReactivePowerSetpoint = station.getReactivePowerSetpoint();
+        HvdcLine hvdcLine = station.getHvdcLine();
+        this.hvdcLineMaxP = hvdcLine != null ? hvdcLine.getMaxP() : null;
+        this.reactiveLimits = station.getReactiveLimits();
         this.lossFactor = station.getLossFactor();
 
         // local control only
         if (station.isVoltageRegulatorOn()) {
             setVoltageControl(station.getVoltageSetpoint(), station.getTerminal(), station.getRegulatingTerminal(), parameters, report);
         }
+    }
+
+    protected LfVscConverterStationImpl(LfVscConverterStationImpl other, LfNetwork network) {
+        super(other, network);
+        this.stationRef = other.stationRef;
+        this.id = other.id;
+        this.initialReactivePowerSetpoint = other.initialReactivePowerSetpoint;
+        this.hvdcLineMaxP = other.hvdcLineMaxP;
+        this.reactiveLimits = other.reactiveLimits;
+        this.lossFactor = other.lossFactor;
+        this.hvdcDanglingInIidm = other.hvdcDanglingInIidm;
+        // hvdc back reference is wired when the copied LfHvdc is created
     }
 
     public static LfVscConverterStationImpl create(VscConverterStation station, LfNetwork network, LfNetworkParameters parameters, LfNetworkLoadingReport report) {
@@ -96,29 +121,27 @@ public class LfVscConverterStationImpl extends AbstractLfGenerator implements Lf
 
     @Override
     public String getId() {
-        return getStation().getId();
+        return id;
     }
 
     @Override
     public double getTargetQ() {
-        return Networks.zeroIfNan(getStation().getReactivePowerSetpoint()) / PerUnit.SB;
+        return Networks.zeroIfNan(initialReactivePowerSetpoint) / PerUnit.SB;
     }
 
     @Override
     public double getMinP() {
-        HvdcLine hvdcLine = getStation().getHvdcLine();
-        return hvdcLine != null ? -hvdcLine.getMaxP() / PerUnit.SB : -Double.MAX_VALUE;
+        return hvdcLineMaxP != null ? -hvdcLineMaxP / PerUnit.SB : -Double.MAX_VALUE;
     }
 
     @Override
     public double getMaxP() {
-        HvdcLine hvdcLine = getStation().getHvdcLine();
-        return hvdcLine != null ? hvdcLine.getMaxP() / PerUnit.SB : Double.MAX_VALUE;
+        return hvdcLineMaxP != null ? hvdcLineMaxP / PerUnit.SB : Double.MAX_VALUE;
     }
 
     @Override
     protected Optional<ReactiveLimits> getReactiveLimits() {
-        return Optional.of(getStation().getReactiveLimits());
+        return Optional.of(reactiveLimits);
     }
 
     @Override

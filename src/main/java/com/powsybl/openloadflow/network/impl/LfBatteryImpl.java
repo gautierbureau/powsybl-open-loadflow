@@ -25,6 +25,16 @@ public final class LfBatteryImpl extends AbstractLfGenerator {
 
     private final Ref<Battery> batteryRef;
 
+    private final String id;
+
+    private final double minP;
+
+    private final double maxP;
+
+    private final double initialTargetQ;
+
+    private final ReactiveLimits reactiveLimits;
+
     private boolean initialParticipating;
 
     private boolean participating;
@@ -40,6 +50,11 @@ public final class LfBatteryImpl extends AbstractLfGenerator {
     private LfBatteryImpl(Battery battery, LfNetwork network, LfNetworkParameters parameters, LfNetworkLoadingReport report) {
         super(network, battery.getTargetP() / PerUnit.SB, parameters);
         this.batteryRef = Ref.create(battery, parameters.isCacheEnabled());
+        this.id = battery.getId();
+        this.minP = battery.getMinP();
+        this.maxP = battery.getMaxP();
+        this.initialTargetQ = battery.getTargetQ();
+        this.reactiveLimits = battery.getReactiveLimits();
         var apcHelper = ActivePowerControlHelper.create(battery, battery.getMinP(), battery.getMaxP());
         initialParticipating = apcHelper.participating();
         participating = initialParticipating;
@@ -60,6 +75,22 @@ public final class LfBatteryImpl extends AbstractLfGenerator {
         }
     }
 
+    protected LfBatteryImpl(LfBatteryImpl other, LfNetwork network) {
+        super(other, network);
+        this.batteryRef = other.batteryRef;
+        this.id = other.id;
+        this.minP = other.minP;
+        this.maxP = other.maxP;
+        this.initialTargetQ = other.initialTargetQ;
+        this.reactiveLimits = other.reactiveLimits;
+        this.initialParticipating = other.initialParticipating;
+        this.participating = other.participating;
+        this.droop = other.droop;
+        this.participationFactor = other.participationFactor;
+        this.maxTargetP = other.maxTargetP;
+        this.minTargetP = other.minTargetP;
+    }
+
     public static LfBatteryImpl create(Battery battery, LfNetwork network, LfNetworkParameters parameters, LfNetworkLoadingReport report) {
         Objects.requireNonNull(battery);
         Objects.requireNonNull(network);
@@ -74,22 +105,22 @@ public final class LfBatteryImpl extends AbstractLfGenerator {
 
     @Override
     public String getId() {
-        return getBattery().getId();
+        return id;
     }
 
     @Override
     public double getTargetQ() {
-        return getBattery().getTargetQ() / PerUnit.SB;
+        return initialTargetQ / PerUnit.SB;
     }
 
     @Override
     public double getMinP() {
-        return getBattery().getMinP() / PerUnit.SB;
+        return minP / PerUnit.SB;
     }
 
     @Override
     public double getMaxP() {
-        return getBattery().getMaxP() / PerUnit.SB;
+        return maxP / PerUnit.SB;
     }
 
     @Override
@@ -104,7 +135,7 @@ public final class LfBatteryImpl extends AbstractLfGenerator {
 
     @Override
     protected Optional<ReactiveLimits> getReactiveLimits() {
-        return Optional.of(getBattery().getReactiveLimits());
+        return Optional.of(reactiveLimits);
     }
 
     @Override
@@ -138,8 +169,7 @@ public final class LfBatteryImpl extends AbstractLfGenerator {
     @Override
     public void reApplyActivePowerControlChecks(LfNetworkParameters parameters, LfNetworkLoadingReport report) {
         participating = initialParticipating;
-        var battery = getBattery();
-        if (!checkActivePowerControl(battery.getId(), targetP * PerUnit.SB, battery.getMaxP(), minTargetP, maxTargetP,
+        if (!checkActivePowerControl(id, targetP * PerUnit.SB, maxP, minTargetP, maxTargetP,
                 parameters, report)) {
             participating = false;
         }
