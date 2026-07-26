@@ -81,16 +81,21 @@ class AlternativeEquationsBenchmark extends AbstractOpenSecurityAnalysisTest {
 
     @BeforeEach
     void setUpBenchmark() {
-        // the default test setup uses a dense matrix factory, way too slow for Pegase size networks, and debug
-        // logging that would distort timings
+        // the default test setup uses a dense matrix factory, way too slow for Pegase size networks
         matrixFactory = new SparseMatrixFactory();
         GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory = new EvenShiloachGraphDecrementalConnectivityFactory<>();
         securityAnalysisProvider = new OpenSecurityAnalysisProvider(matrixFactory, connectivityFactory);
         loadFlowProvider = new OpenLoadFlowProvider(matrixFactory, connectivityFactory);
-        ((Logger) LoggerFactory.getLogger("com.powsybl")).setLevel(Level.INFO);
-        // keep the matrix lifecycle visible to count structural rebuilds (symbolic factorizations) per mode
-        ((Logger) LoggerFactory.getLogger("com.powsybl.openloadflow.equations.JacobianMatrix")).setLevel(Level.DEBUG);
-        ((Logger) LoggerFactory.getLogger("com.powsybl.openloadflow.ac.AcloadFlowEngine")).setLevel(Level.DEBUG);
+        // Silence the per-load-flow and per-listener-event logs: at INFO the LfNetworkListenerTracer alone emits
+        // millions of lines on a Pegase security analysis, which floods the output and adds a large, uneven logging
+        // overhead (measured ~85 ms per contingency on case9241pegase) that distorts the timings. Opt back into the
+        // matrix lifecycle trace (to count the structural rebuilds / symbolic factorizations per mode) with
+        // -Dbench.trace=true when diagnosing, knowing it makes the measured times meaningless.
+        ((Logger) LoggerFactory.getLogger("com.powsybl")).setLevel(Level.WARN);
+        if (Boolean.getBoolean("bench.trace")) {
+            ((Logger) LoggerFactory.getLogger("com.powsybl.openloadflow.equations.JacobianMatrix")).setLevel(Level.DEBUG);
+            ((Logger) LoggerFactory.getLogger("com.powsybl.openloadflow.ac.AcloadFlowEngine")).setLevel(Level.DEBUG);
+        }
     }
 
     private static Network loadPegaseNetwork(String caseName) {
