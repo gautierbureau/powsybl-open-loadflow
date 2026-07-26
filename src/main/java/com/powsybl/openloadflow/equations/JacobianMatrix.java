@@ -82,6 +82,8 @@ public class JacobianMatrix<V extends Enum<V> & Quantity, E extends Enum<E> & Qu
 
     private int partialValueUpdateCount = 0;
 
+    private int structureBuildCount = 0;
+
     public JacobianMatrix<V, E> setPartialValueUpdateEnabled(boolean partialValueUpdateEnabled) {
         this.partialValueUpdateEnabled = partialValueUpdateEnabled;
         return this;
@@ -284,8 +286,22 @@ public class JacobianMatrix<V extends Enum<V> & Quantity, E extends Enum<E> & Qu
     }
 
     private void initMatrix() {
+        structureBuildCount++;
         initDer();
         clearLu();
+    }
+
+    /**
+     * Number of full matrix structure rebuilds (symbolic factorization constructions) done so far. With alternative
+     * equations most contingencies preserve the structure and only trigger a value update, so a rebuild during a
+     * post-contingency solve signals a contingency that fell back to the legacy structural path.
+     */
+    public int getStructureBuildCount() {
+        return structureBuildCount;
+    }
+
+    public boolean isPartialValueUpdateEnabled() {
+        return partialValueUpdateEnabled;
     }
 
     protected void updateDer() {

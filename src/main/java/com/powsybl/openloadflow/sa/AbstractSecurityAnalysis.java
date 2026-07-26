@@ -906,11 +906,23 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         double preDistributedActivePower = contingencyActivePowerLossDistribution.run(lfNetwork, lfContingency,
             propagatedContingency.getContingency(), securityAnalysisParameters, contingencyLoadFlowParameters, postContSimReportNode);
 
+        // detect a contingency that does not preserve the alternative equations matrix structure: it forces a full
+        // Jacobian structure rebuild (symbolic factorization), defeating the structure preservation for that
+        // contingency (see JacobianMatrix partial value update)
+        var jacobianMatrix = context.getJacobianMatrix();
+        int structureBuildsBeforeContingency = jacobianMatrix.getStructureBuildCount();
+
         var postContingencyResult = runPostContingencySimulation(lfNetwork, context, propagatedContingency.getContingency(),
             lfContingency, preContingencyLimitViolationManager,
             securityAnalysisParameters,
             preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
         postContingencyResults.add(postContingencyResult);
+
+        if (jacobianMatrix.isPartialValueUpdateEnabled()
+                && jacobianMatrix.getStructureBuildCount() > structureBuildsBeforeContingency) {
+            LOGGER.info("Contingency '{}' does not preserve the alternative equations matrix structure and fell back to a full Jacobian structure rebuild",
+                    lfContingency.getId());
+        }
 
         if (contingencyLoadFlowParameters != null &&
             Objects.equals(ContingencyLoadFlowParameters.Scope.CONTINGENCY_ONLY, contingencyLoadFlowParameters.getScope())) {
