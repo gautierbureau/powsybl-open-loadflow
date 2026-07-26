@@ -113,6 +113,17 @@ public class BusState extends BusDcState {
         element.setQLimitType(qLimitType);
     }
 
+    /**
+     * Restore only the bus voltage (magnitude and angle), leaving the rest of the bus state untouched. A security
+     * analysis that warm-starts each contingency from the network state needs the base voltage back on every bus for
+     * reproducible results, while the rest of the per-bus state only needs restoring on the buses a contingency
+     * actually modified (see {@link NetworkState#restore(java.util.Collection, java.util.Collection, java.util.Collection)}).
+     */
+    public void restoreVoltage() {
+        element.setAngle(angle);
+        element.setV(voltage);
+    }
+
     public static BusState save(LfBus bus) {
         return new BusState(bus);
     }

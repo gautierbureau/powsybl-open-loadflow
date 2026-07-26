@@ -741,6 +741,11 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 // save base state for later restoration after each contingency
                 NetworkState networkState = NetworkState.save(lfNetwork);
 
+                // collect the elements modified by each contingency (and its operator strategy actions) so that only
+                // those are restored afterwards, instead of the whole network
+                ModifiedElementsCollector modifiedElementsCollector = new ModifiedElementsCollector();
+                lfNetwork.addListener(modifiedElementsCollector);
+
                 // Reset parameters for next component
                 Consumer<P> componentParametersResetter = createParametersResetter(p);
 
@@ -771,7 +776,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                                 createResultExtension, preContingencyLimitViolationManager,
                                 preContingencyNetworkResult, postContingencyResults,
                                 contingencyParametersResetter, operatorStrategiesByContingencyId,
-                                operatorStrategyResults, contingencyIt, fallbackContingencyCount));
+                                operatorStrategyResults, contingencyIt, fallbackContingencyCount,
+                                modifiedElementsCollector));
                 }
 
                 if (context.getJacobianMatrix().isPartialValueUpdateEnabled()) {
@@ -794,6 +800,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                     operatorStrategyResults.sort(Comparator.comparingInt(
                             result -> inputOrder.getOrDefault(result.getOperatorStrategy().getContingencyContext().getContingencyId(), Integer.MAX_VALUE)));
                 }
+
+                lfNetwork.removeListener(modifiedElementsCollector);
 
                 // Restore parameters in case they are used for another component
                 componentParametersResetter.accept(p);
@@ -1004,6 +1012,23 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         return structurePreserving;
     }
 
+    /**
+     * Restore the pre-contingency state of the network elements collected by the given collector (i.e. the elements
+     * modified by the contingency and its operator strategy actions), then clear the collector for the next
+     * contingency. The collector is disabled during the restoration so that the setter calls it performs do not
+     * collect back the elements being restored.
+     */
+    private static void restoreModifiedNetworkElements(NetworkState networkState, ModifiedElementsCollector modifiedElementsCollector) {
+        modifiedElementsCollector.setEnabled(false);
+        // reset every bus voltage so the next contingency warm-starts from the base state (reproducible results),
+        // then fully restore only the elements the contingency and its operator strategies actually modified
+        networkState.restoreVoltages();
+        networkState.restore(modifiedElementsCollector.getModifiedBuses(), modifiedElementsCollector.getModifiedBranches(),
+                modifiedElementsCollector.getModifiedHvdcs());
+        modifiedElementsCollector.reset();
+        modifiedElementsCollector.setEnabled(true);
+    }
+
     private void processContingency(LfNetwork lfNetwork, SecurityAnalysisParameters securityAnalysisParameters,
                                     List<LimitReduction> limitReductions, ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution,
                                     ReportNode networkReportNode, LfContingency lfContingency, P p, NetworkState networkState,
@@ -1013,7 +1038,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                                     PreContingencyNetworkResult preContingencyNetworkResult, List<PostContingencyResult> postContingencyResults,
                                     Consumer<P> contingencyParametersResetter, Map<String, List<Indexed<OperatorStrategy>>> operatorStrategiesByContingencyId,
                                     List<OperatorStrategyResult> operatorStrategyResults, Iterator<PropagatedContingency> contingencyIt,
-                                    int[] fallbackContingencyCount) {
+                                    int[] fallbackContingencyCount, ModifiedElementsCollector modifiedElementsCollector) {
         ReportNode postContSimReportNode = Reports.createPostContingencySimulation(networkReportNode, lfContingency.getId());
         lfNetwork.setReportNode(postContSimReportNode);
 
@@ -1089,8 +1114,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             }
         }
         if (contingencyIt.hasNext()) {
-            // restore base state
-            networkState.restore();
+            // restore base state of the elements modified by the contingency (and its operator strategies) only
+            restoreModifiedNetworkElements(networkState, modifiedElementsCollector);
             if (contingencyLoadFlowParameters != null &&
                 Objects.equals(ContingencyLoadFlowParameters.Scope.CONTINGENCY_AND_OPERATOR_STRATEGY, contingencyLoadFlowParameters.getScope())) {
                 // reset parameters

@@ -107,6 +107,19 @@ public class NetworkState {
      * elements avoids the network-wide cost of {@link #restore()} after each contingency. Areas and excluded slack
      * buses are always restored as their number is negligible.
      */
+    /**
+     * Restore the voltage (magnitude and angle) of every bus. Used together with
+     * {@link #restore(Collection, Collection, Collection)} by security analyses that warm-start each contingency from
+     * the network state (AC): the voltage of every bus changes while solving a contingency, but resetting it is far
+     * cheaper than the full per-bus state restore, which is then only needed on the elements a contingency actually
+     * modified. This keeps the per-contingency results reproducible while avoiding the network-wide full restore.
+     */
+    public void restoreVoltages() {
+        for (BusState busState : busStates) {
+            busState.restoreVoltage();
+        }
+    }
+
     public void restore(Collection<LfBus> buses, Collection<LfBranch> branches, Collection<LfHvdc> hvdcs) {
         LOGGER.trace("Restoring network state of {} buses, {} branches and {} hvdcs", buses.size(), branches.size(), hvdcs.size());
         for (LfBus bus : buses) {
