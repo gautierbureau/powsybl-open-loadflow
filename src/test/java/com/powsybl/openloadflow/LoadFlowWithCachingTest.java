@@ -602,6 +602,41 @@ class LoadFlowWithCachingTest {
         assertEquals(network2.getGenerator("g2").getTerminal().getQ(), cachedQ, DELTA_POWER);
     }
 
+    /**
+     * A cached network carries the state the previous run left behind (bus switched from PV to PQ,
+     * frozen generation target Q, generator voltage control switched off when the target voltage is
+     * not plausible anymore...). Checks that the reactive results of a re-run still match a cache
+     * free run.
+     * <p>Both convergence bands have to be tightened for the comparison to mean anything: the solver
+     * one, and the slack distribution outer loop one, which is looser by default (1 MW) and is the
+     * one that dominates the difference between a warm started run and a run from scratch.
+     */
+    @ParameterizedTest
+    @ValueSource(doubles = {23.5, 5.0}) // 5 kV is not plausible: the generator voltage control is switched off
+    void testReactiveResultsMatchCacheFreeRunAfterTargetVUpdate(double newTargetV) {
+        parametersExt.setNewtonRaphsonConvEpsPerEq(1e-10).setSlackBusPMaxMismatch(1e-6);
+        var network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+
+        loadFlowRunner.run(network, parameters);
+        network.getGenerator("GEN").setTargetV(newTargetV);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+        loadFlowRunner.run(network, parameters);
+        double cachedQ = network.getGenerator("GEN").getTerminal().getQ();
+
+        // same scenario without the cache, as a reference
+        var network2 = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+        LoadFlowParameters cacheFreeParameters = new LoadFlowParameters();
+        OpenLoadFlowParameters.create(cacheFreeParameters)
+                .setNetworkCacheEnabled(false)
+                .setNewtonRaphsonConvEpsPerEq(1e-10)
+                .setSlackBusPMaxMismatch(1e-6);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+        network2.getGenerator("GEN").setTargetV(newTargetV);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+
+        assertEquals(network2.getGenerator("GEN").getTerminal().getQ(), cachedQ, DELTA_POWER);
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void testUnsupportedAttributeChange(boolean isDc) {
