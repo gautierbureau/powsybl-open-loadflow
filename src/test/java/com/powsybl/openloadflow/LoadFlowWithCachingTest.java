@@ -275,7 +275,14 @@ class LoadFlowWithCachingTest {
     @MethodSource("allModelAndHvdcSides")
     void testLccActivePowerSetpoint(boolean isDc, boolean fromCs3toCs2) {
         parameters.setDc(isDc);
-        parametersExt.setMaxActivePowerMismatch(0.001) // finer tolerance because network cache can lead to slightly different active power distribution
+        // Finer tolerance because the network cache can lead to a slightly different active power
+        // distribution: when the cache is reused the solver restarts from the previously converged
+        // state (PreviousValueVoltageInitializer, set by NetworkCache.AcLfEntry#restart) instead of
+        // from a fresh voltage initializer. Both runs solve the same equations and stop as soon as
+        // the mismatch is below the stopping criterion, but they reach it from a different starting
+        // point, hence stop at slightly different points inside the convergence band. Tightening the
+        // criterion shrinks that band, and with it the difference with a cache free run.
+        parametersExt.setMaxActivePowerMismatch(0.001)
                 .setNewtonRaphsonStoppingCriteriaType(NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA);
         Network network = HvdcNetworkFactory.createLcc();
         if (fromCs3toCs2) { // Inverting to cover both modes SIDE_1_RECTIFIER_SIDE_2_INVERTER and SIDE_1_INVERTER_SIDE_2_RECTIFIER
@@ -313,7 +320,14 @@ class LoadFlowWithCachingTest {
     @MethodSource("allModelAndHvdcSides")
     void testVscActivePowerSetpoint(boolean isDc, boolean fromCs3toCs2) {
         parameters.setDc(isDc);
-        parametersExt.setMaxActivePowerMismatch(0.001) // finer tolerance because network cache can lead to slightly different active power distribution
+        // Finer tolerance because the network cache can lead to a slightly different active power
+        // distribution: when the cache is reused the solver restarts from the previously converged
+        // state (PreviousValueVoltageInitializer, set by NetworkCache.AcLfEntry#restart) instead of
+        // from a fresh voltage initializer. Both runs solve the same equations and stop as soon as
+        // the mismatch is below the stopping criterion, but they reach it from a different starting
+        // point, hence stop at slightly different points inside the convergence band. Tightening the
+        // criterion shrinks that band, and with it the difference with a cache free run.
+        parametersExt.setMaxActivePowerMismatch(0.001)
                 .setNewtonRaphsonStoppingCriteriaType(NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA);
         Network network = HvdcNetworkFactory.createVsc(true);
         if (fromCs3toCs2) { // Inverting to cover both modes SIDE_1_RECTIFIER_SIDE_2_INVERTER and SIDE_1_INVERTER_SIDE_2_RECTIFIER
@@ -480,6 +494,12 @@ class LoadFlowWithCachingTest {
      */
     @Test
     void testReactivePowerTargetUpdatesReuseCache() {
+        // Same finer tolerance as the other cache tests: the cached run restarts the solver from the
+        // previously converged state, so it stops at a slightly different point of the convergence
+        // band than the cache free reference below. Tightening the criterion makes the two match.
+        parametersExt.setMaxActivePowerMismatch(0.001)
+                .setMaxReactivePowerMismatch(0.001)
+                .setNewtonRaphsonStoppingCriteriaType(NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA);
         // g2 does not regulate voltage, so its reactive power target is used
         var network = DistributedSlackNetworkFactory.create();
         var g2 = network.getGenerator("g2");
@@ -502,15 +522,18 @@ class LoadFlowWithCachingTest {
         // same scenario without the cache, as a reference
         var network2 = DistributedSlackNetworkFactory.create();
         LoadFlowParameters parameters2 = new LoadFlowParameters();
-        OpenLoadFlowParameters.create(parameters2).setNetworkCacheEnabled(false);
+        OpenLoadFlowParameters.create(parameters2)
+                .setNetworkCacheEnabled(false)
+                .setMaxActivePowerMismatch(0.001)
+                .setMaxReactivePowerMismatch(0.001)
+                .setNewtonRaphsonStoppingCriteriaType(NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA);
         loadFlowRunner.run(network2, parameters2);
         network2.getGenerator("g2").setTargetQ(100);
         network2.getLoadStream().findFirst().orElseThrow().setQ0(50);
         loadFlowRunner.run(network2, parameters2);
 
-        // loose tolerance: restarting from the previous state converges slightly differently
-        assertEquals(network2.getGenerator("g2").getTerminal().getQ(), cachedG2Q, 1e-2);
-        assertEquals(network2.getLoadStream().findFirst().orElseThrow().getTerminal().getQ(), cachedLoadQ, 1e-2);
+        assertEquals(network2.getGenerator("g2").getTerminal().getQ(), cachedG2Q, DELTA_POWER);
+        assertEquals(network2.getLoadStream().findFirst().orElseThrow().getTerminal().getQ(), cachedLoadQ, DELTA_POWER);
     }
 
     @ParameterizedTest
