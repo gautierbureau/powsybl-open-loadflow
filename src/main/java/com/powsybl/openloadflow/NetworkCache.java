@@ -415,6 +415,18 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             return CacheUpdateResult.elementUpdated(value);
         }
 
+        /**
+         * Reactive power target of a generator, a battery, a VSC converter station or a boundary line
+         * generation. {@link LfGenerator#getTargetQ()} reads it from the IIDM network, so only the bus
+         * aggregated generation target Q has to be recomputed. It is done eagerly so that the equation
+         * system target vector is notified right away.
+         */
+        private static <V extends Value> CacheUpdateResult<V> updateLfGeneratorTargetQ(V value, LfBus lfBus) {
+            lfBus.invalidateGenerationTargetQ();
+            lfBus.getGenerationTargetQ();
+            return CacheUpdateResult.elementUpdated(value);
+        }
+
         private static <V extends Value> CacheUpdateResult<V> updateLfLoadTargetQ(String id, double oldValue, double newValue, V value, LfBus lfBus) {
             double valueShift = newValue - oldValue;
             LfLoad lfLoad = lfBus.getNetwork().getLoadById(id);
@@ -455,6 +467,8 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
                 return CacheUpdateResult.elementUpdated(value);
             } else if ("targetP".equals(attribute)) {
                 return updateLfGeneratorTargetP(generator.getId(), (double) oldValue, (double) newValue, value, lfBus);
+            } else if ("targetQ".equals(attribute)) {
+                return updateLfGeneratorTargetQ(value, lfBus);
             }
             return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(generator, attribute));
         }
@@ -463,32 +477,56 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             return onInjectionUpdate(battery, (value, lfBus) -> {
                 if ("targetP".equals(attribute)) {
                     return updateLfGeneratorTargetP(battery.getId(), (double) oldValue, (double) newValue, value, lfBus);
+                } else if ("targetQ".equals(attribute)) {
+                    return updateLfGeneratorTargetQ(value, lfBus);
                 }
                 return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(battery, attribute));
             });
         }
 
-        private CacheUpdateResult<V> onLoadUpdate(Load load, String attribute, Object oldValue, Object newValue) {
-            return onInjectionUpdate(load, (value, lfBus) -> {
-                if ("p0".equals(attribute)) {
-                    LoadDetail loadDetail = load.getExtension(LoadDetail.class);
-                    if (loadDetail != null) {
-                        LOGGER.info("Load {} has a LoadDetail extension: not supported", load.getId());
-                        return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(load, attribute));
-                    }
-                    if ((input.getLoadFlowParameters().getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD
-                            || input.getLoadFlowParameters().getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD)
-                            && input.getLoadFlowParameters().isDistributedSlack()) {
-                        LOGGER.info("Load active power distribution is enabled: not supported");
-                        return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(load, attribute));
-                    }
-                    return updateLfLoadTargetP(load.getId(), (double) oldValue, (double) newValue, value, lfBus);
-                }
+        private CacheUpdateResult<V> onLoadP0Update(Load load, String attribute, Object oldValue, Object newValue,
+                                                    V value, LfBus lfBus) {
+            if ((input.getLoadFlowParameters().getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD
+                    || input.getLoadFlowParameters().getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD)
+                    && input.getLoadFlowParameters().isDistributedSlack()) {
+                LOGGER.info("Load active power distribution is enabled: not supported");
                 return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(load, attribute));
+            }
+            return updateLfLoadTargetP(load.getId(), (double) oldValue, (double) newValue, value, lfBus);
+        }
+
+        private CacheUpdateResult<V> onLoadUpdate(Load load, String attribute, Object oldValue, Object newValue) {
+            boolean p0 = "p0".equals(attribute);
+            if (!p0 && !"q0".equals(attribute)) {
+                return onInjectionUpdate(load, (value, lfBus) ->
+                        CacheUpdateResult.unsupportedUpdate(createInvalidationReason(load, attribute)));
+            }
+            return onInjectionUpdate(load, (value, lfBus) -> {
+                if (load.getExtension(LoadDetail.class) != null) {
+                    LOGGER.info("Load {} has a LoadDetail extension: not supported", load.getId());
+                    return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(load, attribute));
+                }
+                return p0 ? onLoadP0Update(load, attribute, oldValue, newValue, value, lfBus)
+                          : updateLfLoadTargetQ(load.getId(), (double) oldValue, (double) newValue, value, lfBus);
             });
         }
 
+        private CacheUpdateResult<V> onBoundaryLineBusUpdate(BoundaryLine boundaryLine, BiFunction<V, LfBus, CacheUpdateResult<V>> handler) {
+            for (V value : values) {
+                LfBus lfBus = value.getNetwork().getBusById(LfBoundaryLineBus.getId(boundaryLine));
+                if (lfBus != null) {
+                    return handler.apply(value, lfBus);
+                }
+            }
+            return CacheUpdateResult.elementNotFound();
+        }
+
         private CacheUpdateResult<V> onBoundaryLineUpdate(BoundaryLine boundaryLine, String attribute, Object oldValue, Object newValue) {
+            if ("targetQ".equals(attribute) && !boundaryLine.isPaired() && boundaryLine.getGeneration() != null) {
+                // reactive power target of the generation part of the boundary line, held by the
+                // boundary line bus like its load part
+                return onBoundaryLineBusUpdate(boundaryLine, AbstractEntry::updateLfGeneratorTargetQ);
+            }
             if ("p0".equals(attribute)) {
                 if (!boundaryLine.isPaired()) {
                     for (V value : values) {
@@ -505,6 +543,15 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
                 }
             }
             return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(boundaryLine, attribute));
+        }
+
+        private CacheUpdateResult<V> onVscConverterStationUpdate(VscConverterStation station, String attribute) {
+            return onInjectionUpdate(station, (value, lfBus) -> {
+                if ("reactivePowerSetpoint".equals(attribute)) {
+                    return updateLfGeneratorTargetQ(value, lfBus);
+                }
+                return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(station, attribute));
+            });
         }
 
         private CacheUpdateResult<V> onShuntUpdate(ShuntCompensator shunt, String attribute) {
@@ -721,6 +768,10 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
                         // supports attribute: "sectionCount"
                         ShuntCompensator shunt = (ShuntCompensator) identifiable;
                         result = onShuntUpdate(shunt, attribute);
+                    } else if (identifiable.getType() == IdentifiableType.HVDC_CONVERTER_STATION
+                            && identifiable instanceof VscConverterStation vscConverterStation) {
+                        // supports attribute: "reactivePowerSetpoint"
+                        result = onVscConverterStationUpdate(vscConverterStation, attribute);
                     } else if (identifiable.getType() == IdentifiableType.HVDC_LINE) {
                         // supports attribute: "activePowerSetpoint"
                         HvdcLine hvdcLine = (HvdcLine) identifiable;
