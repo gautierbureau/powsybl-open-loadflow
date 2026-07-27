@@ -25,28 +25,24 @@ public final class LfBatteryImpl extends AbstractLfGenerator {
 
     private final Ref<Battery> batteryRef;
 
+    // active power control data, recomputed from the iidm network by
+    // reApplyActivePowerControlChecks when an active power limit is updated
     private boolean initialParticipating;
 
     private boolean participating;
 
-    private final double droop;
+    private double droop;
 
-    private final double participationFactor;
+    private double participationFactor;
 
-    private final double maxTargetP;
+    private double maxTargetP;
 
-    private final double minTargetP;
+    private double minTargetP;
 
     private LfBatteryImpl(Battery battery, LfNetwork network, LfNetworkParameters parameters, LfNetworkLoadingReport report) {
         super(network, battery.getTargetP() / PerUnit.SB, parameters);
         this.batteryRef = Ref.create(battery, parameters.isCacheEnabled());
-        var apcHelper = ActivePowerControlHelper.create(battery, battery.getMinP(), battery.getMaxP());
-        initialParticipating = apcHelper.participating();
-        participating = initialParticipating;
-        participationFactor = apcHelper.participationFactor();
-        droop = apcHelper.droop();
-        minTargetP = apcHelper.minTargetP();
-        maxTargetP = apcHelper.maxTargetP();
+        readActivePowerControl(battery);
 
         if (!checkActivePowerControl(getId(), battery.getTargetP(), battery.getMaxP(), minTargetP, maxTargetP,
                 parameters, report)) {
@@ -135,10 +131,22 @@ public final class LfBatteryImpl extends AbstractLfGenerator {
                 .setQ(Double.isNaN(calculatedQ) ? -getTargetQ() * PerUnit.SB : -calculatedQ * PerUnit.SB);
     }
 
+    private void readActivePowerControl(Battery battery) {
+        var apcHelper = ActivePowerControlHelper.create(battery, battery.getMinP(), battery.getMaxP());
+        initialParticipating = apcHelper.participating();
+        participating = initialParticipating;
+        participationFactor = apcHelper.participationFactor();
+        droop = apcHelper.droop();
+        minTargetP = apcHelper.minTargetP();
+        maxTargetP = apcHelper.maxTargetP();
+    }
+
     @Override
     public void reApplyActivePowerControlChecks(LfNetworkParameters parameters, LfNetworkLoadingReport report) {
-        participating = initialParticipating;
         var battery = getBattery();
+        // the active power limits are read again from the iidm network: they may have been updated
+        // since the network was built, and the network cache reuses this LfNetwork across runs
+        readActivePowerControl(battery);
         if (!checkActivePowerControl(battery.getId(), targetP * PerUnit.SB, battery.getMaxP(), minTargetP, maxTargetP,
                 parameters, report)) {
             participating = false;

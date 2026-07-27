@@ -31,13 +31,15 @@ public final class LfGeneratorImpl extends AbstractLfGenerator {
 
     private final Ref<Generator> generatorRef;
 
-    private final boolean initialParticipating;
+    // active power control data, recomputed from the iidm network by
+    // reApplyActivePowerControlChecks when an active power limit is updated
+    private boolean initialParticipating;
 
     private boolean participating;
 
-    private final double droop;
+    private double droop;
 
-    private final double participationFactor;
+    private double participationFactor;
 
     private Double qPercent;
 
@@ -45,9 +47,9 @@ public final class LfGeneratorImpl extends AbstractLfGenerator {
 
     private final boolean forceVoltageControl;
 
-    private final double maxTargetP;
+    private double maxTargetP;
 
-    private final double minTargetP;
+    private double minTargetP;
 
     private final boolean forceTargetQInReactiveLimits;
 
@@ -57,13 +59,7 @@ public final class LfGeneratorImpl extends AbstractLfGenerator {
         // we force voltage control of generators tagged as condensers or tagged as fictitious if the dedicated mode is activated.
         forceVoltageControl = generator.isCondenser()
             || generator.isFictitious() && parameters.getFictitiousGeneratorVoltageControlCheckMode() == OpenLoadFlowParameters.FictitiousGeneratorVoltageControlCheckMode.FORCED;
-        var apcHelper = ActivePowerControlHelper.create(generator, generator.getMinP(), generator.getMaxP());
-        initialParticipating = apcHelper.participating();
-        participating = initialParticipating;
-        participationFactor = apcHelper.participationFactor();
-        droop = apcHelper.droop();
-        minTargetP = apcHelper.minTargetP();
-        maxTargetP = apcHelper.maxTargetP();
+        readActivePowerControl(generator);
 
         forceTargetQInReactiveLimits = parameters.isForceTargetQInReactiveLimits() && parameters.isReactiveLimits();
 
@@ -95,10 +91,22 @@ public final class LfGeneratorImpl extends AbstractLfGenerator {
         }
     }
 
+    private void readActivePowerControl(Generator generator) {
+        var apcHelper = ActivePowerControlHelper.create(generator, generator.getMinP(), generator.getMaxP());
+        initialParticipating = apcHelper.participating();
+        participating = initialParticipating;
+        participationFactor = apcHelper.participationFactor();
+        droop = apcHelper.droop();
+        minTargetP = apcHelper.minTargetP();
+        maxTargetP = apcHelper.maxTargetP();
+    }
+
     @Override
     public void reApplyActivePowerControlChecks(LfNetworkParameters parameters, LfNetworkLoadingReport report) {
-        participating = initialParticipating;
         var generator = getGenerator();
+        // the active power limits are read again from the iidm network: they may have been updated
+        // since the network was built, and the network cache reuses this LfNetwork across runs
+        readActivePowerControl(generator);
         if (!checkActivePowerControl(generator.getId(), targetP * PerUnit.SB, generator.getMaxP(), minTargetP, maxTargetP,
                 parameters, report)) {
             participating = false;

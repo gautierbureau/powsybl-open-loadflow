@@ -415,6 +415,31 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             return CacheUpdateResult.elementUpdated(value);
         }
 
+        private static boolean isActivePowerLimit(String attribute) {
+            return "minP".equals(attribute) || "maxP".equals(attribute);
+        }
+
+        /**
+         * Active power limits of a generator or a battery. They feed the active power control data
+         * (participation, min/max target P) computed when the network was built, so it is read again
+         * from the IIDM network. Note that the slack distribution limits come from that data, not from
+         * {@link LfGenerator#getMaxP()} which reads the IIDM network directly.
+         */
+        private static <V extends Value> CacheUpdateResult<V> updateLfGeneratorActivePowerLimits(String id, V value, LfBus lfBus) {
+            LfGenerator lfGenerator = lfBus.getNetwork().getGeneratorById(id);
+            if (lfGenerator == null) {
+                return CacheUpdateResult.elementNotFound();
+            }
+            // Undo the slack distribution of the previous run for this generator, before re-running the
+            // checks: its target P still holds the distributed increment, which may now violate the
+            // updated limits and would wrongly stop the generator from participating. It also brings
+            // back the mismatch the distribution outer loop needs to redistribute under the new limits
+            // (it resets all the participating generators to their initial target P when it runs).
+            lfGenerator.setTargetP(lfGenerator.getInitialTargetP());
+            lfGenerator.reApplyActivePowerControlChecks(value.getNetworkParameters(), null);
+            return CacheUpdateResult.elementUpdated(value);
+        }
+
         private static <V extends Value> CacheUpdateResult<V> updateLfLoadTargetQ(String id, double oldValue, double newValue, V value, LfBus lfBus) {
             double valueShift = newValue - oldValue;
             LfLoad lfLoad = lfBus.getNetwork().getLoadById(id);
@@ -455,6 +480,8 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
                 return CacheUpdateResult.elementUpdated(value);
             } else if ("targetP".equals(attribute)) {
                 return updateLfGeneratorTargetP(generator.getId(), (double) oldValue, (double) newValue, value, lfBus);
+            } else if (isActivePowerLimit(attribute)) {
+                return updateLfGeneratorActivePowerLimits(generator.getId(), value, lfBus);
             }
             return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(generator, attribute));
         }
@@ -463,6 +490,8 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             return onInjectionUpdate(battery, (value, lfBus) -> {
                 if ("targetP".equals(attribute)) {
                     return updateLfGeneratorTargetP(battery.getId(), (double) oldValue, (double) newValue, value, lfBus);
+                } else if (isActivePowerLimit(attribute)) {
+                    return updateLfGeneratorActivePowerLimits(battery.getId(), value, lfBus);
                 }
                 return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(battery, attribute));
             });
@@ -680,7 +709,11 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
         }
 
         private boolean skipUpdate(String variantId) {
-            return values == null || pause || !variantId.equals(workingVariantId);
+            // a null variant id means the updated attribute does not depend on the variant (minP,
+            // maxP, r, x...): it applies to all of them, so it must not be skipped. Note that
+            // dereferencing it instead used to throw, and the exception was swallowed by the iidm
+            // network listener list, leaving the cache neither updated nor invalidated.
+            return values == null || pause || variantId != null && !variantId.equals(workingVariantId);
         }
 
         @Override

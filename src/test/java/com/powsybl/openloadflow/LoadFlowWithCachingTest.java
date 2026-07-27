@@ -474,6 +474,51 @@ class LoadFlowWithCachingTest {
         assertEquals(2, network.getVariantManager().getVariantIds().size());
     }
 
+    /**
+     * Active power limits feed the active power control data computed when the network was built,
+     * so they are reapplied on the cached LfNetwork instead of leaving it out of sync.
+     */
+    @Test
+    void testGeneratorActivePowerLimitUpdateReusesCache() {
+        // Same finer tolerance as the other cache tests: the cached run restarts the solver from the
+        // previously converged state, so it stops at a slightly different point of the convergence band.
+        parametersExt.setMaxActivePowerMismatch(0.001)
+                .setMaxReactivePowerMismatch(0.001)
+                .setNewtonRaphsonStoppingCriteriaType(NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA);
+        var network = DistributedSlackNetworkFactory.create();
+        var g1 = network.getGenerator("g1");
+
+        loadFlowRunner.run(network, parameters);
+        assertActivePowerEquals(-115.0, g1.getTerminal()); // 100 -> 115
+
+        g1.setMaxP(105);
+        // the active power limits are reapplied on the cached network
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        assertEquals(1, NetworkCache.AC_LF_INSTANCE.getEntryCount());
+        // g1 is now capped by its new max P, the rest of the mismatch goes to the other generators
+        assertActivePowerEquals(-105.0, g1.getTerminal());
+        assertActivePowerEquals(-249.286, network.getGenerator("g2").getTerminal());
+        assertActivePowerEquals(-106.429, network.getGenerator("g3").getTerminal());
+        assertActivePowerEquals(-139.286, network.getGenerator("g4").getTerminal());
+    }
+
+    /**
+     * A branch impedance update cannot be reapplied, but it must at least invalidate the cache: it
+     * used to be silently ignored, leaving the cached LfNetwork out of sync with the iidm network.
+     */
+    @Test
+    void testBranchImpedanceUpdateInvalidatesCache() {
+        var network = DistributedSlackNetworkFactory.create();
+        loadFlowRunner.run(network, parameters);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        network.getLine("l14").setR(1.5);
+        assertNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void testUnsupportedAttributeChange(boolean isDc) {
