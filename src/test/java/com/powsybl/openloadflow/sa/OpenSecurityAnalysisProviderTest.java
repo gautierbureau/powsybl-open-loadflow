@@ -94,9 +94,9 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         assertEquals("Default", parametersExt.getContingencyActivePowerLossDistribution());
         testCount++;
 
-        assertEquals(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.SLICE, parametersExt.getContingencyPartitioningMode());
-        parametersExt.setContingencyPartitioningMode(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.ROUND_ROBIN);
         assertEquals(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.ROUND_ROBIN, parametersExt.getContingencyPartitioningMode());
+        parametersExt.setContingencyPartitioningMode(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.SLICE);
+        assertEquals(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.SLICE, parametersExt.getContingencyPartitioningMode());
         testCount++;
 
         assertEquals(OpenSecurityAnalysisParameters.SPECIFIC_PARAMETERS_NAMES.size(), testCount);

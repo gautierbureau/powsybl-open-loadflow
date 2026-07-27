@@ -61,7 +61,7 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
     public static final String CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME = "contingencyActivePowerLossDistribution";
     public static final String CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE = "Default";
     public static final String CONTINGENCY_PARTITIONING_MODE_PARAM_NAME = "contingencyPartitioningMode";
-    public static final ContingencyPartitioningMode CONTINGENCY_PARTITIONING_MODE_DEFAULT_VALUE = ContingencyPartitioningMode.SLICE;
+    public static final ContingencyPartitioningMode CONTINGENCY_PARTITIONING_MODE_DEFAULT_VALUE = ContingencyPartitioningMode.ROUND_ROBIN;
     public static final List<String> SPECIFIC_PARAMETERS_NAMES = List.of(CREATE_RESULT_EXTENSION_PARAM_NAME,
             CONTINGENCY_PROPAGATION_PARAM_NAME,
             THREAD_COUNT_PARAM_NAME,
