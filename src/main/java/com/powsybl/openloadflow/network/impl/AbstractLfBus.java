@@ -419,7 +419,8 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
         }
     }
 
-    private void invalidateGenerationTargetQ() {
+    @Override
+    public void invalidateGenerationTargetQ() {
         // If generationTargetQ was frozen, it is now freed. generationTargetQ is computed according to its definition in getGenerationTargetQ()
         invalidatedGenerationTargetQ = true;
         isGenerationTargetQFrozen = false;

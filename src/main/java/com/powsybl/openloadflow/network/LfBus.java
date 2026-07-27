@@ -137,6 +137,8 @@ public interface LfBus extends LfElement {
 
     double getMaxP();
 
+    void invalidateGenerationTargetQ();
+
     double getGenerationTargetQ();
 
     void freezeGenerationTargetQAndDisableGeneratorVoltageControl(double generationTargetQ);

@@ -147,10 +147,10 @@ class LoadFlowWithCachingTest {
         assertActivePowerEquals(-60.0, g3.getTerminal()); // 90 -> 60
         assertActivePowerEquals(-60.0, g4.getTerminal()); // 90 -> 60
 
-        // test unsupported update
+        // reactive power target update is supported: the cache is updated, not invalidated
         assertNotNull(findEntryFunction.apply(network, isDc).getValues());
         g1.setTargetQ(1);
-        assertNull(findEntryFunction.apply(network, isDc).getValues()); // cache is invalidated because unsupported update
+        assertNotNull(findEntryFunction.apply(network, isDc).getValues());
     }
 
     @ParameterizedTest
@@ -176,10 +176,10 @@ class LoadFlowWithCachingTest {
         assertActivePowerEquals(-4.0, b1.getTerminal());
         assertActivePowerEquals(3.016, b2.getTerminal());
 
-        // test unsupported update
+        // reactive power target update is supported: the cache is updated, not invalidated
         assertNotNull(findEntryFunction.apply(network, isDc).getValues());
         b1.setTargetQ(1);
-        assertNull(findEntryFunction.apply(network, isDc).getValues()); // cache is invalidated because unsupported update
+        assertNotNull(findEntryFunction.apply(network, isDc).getValues());
     }
 
     @ParameterizedTest
@@ -203,10 +203,10 @@ class LoadFlowWithCachingTest {
         assertActivePowerEquals(620, load.getTerminal());
         assertActivePowerEquals(isDc ? -620 : -625.895, gen.getTerminal());
 
-        // test unsupported update
+        // reactive power update is supported: the cache is updated, not invalidated
         assertNotNull(findEntryFunction.apply(network, isDc).getValues());
         load.setQ0(20);
-        assertNull(findEntryFunction.apply(network, isDc).getValues()); // cache is invalidated because unsupported update
+        assertNotNull(findEntryFunction.apply(network, isDc).getValues());
     }
 
     @ParameterizedTest
@@ -474,6 +474,45 @@ class LoadFlowWithCachingTest {
         assertEquals(2, network.getVariantManager().getVariantIds().size());
     }
 
+    /**
+     * Reactive power targets are reapplied on the cached LfNetwork instead of triggering a full
+     * rebuild. Checks both that the cache survives and that the result matches a run from scratch.
+     */
+    @Test
+    void testReactivePowerTargetUpdatesReuseCache() {
+        // g2 does not regulate voltage, so its reactive power target is used
+        var network = DistributedSlackNetworkFactory.create();
+        var g2 = network.getGenerator("g2");
+        var load = network.getLoadStream().findFirst().orElseThrow();
+
+        loadFlowRunner.run(network, parameters);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        g2.setTargetQ(100);
+        load.setQ0(50);
+        // both updates are reapplied on the cached network
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        assertEquals(1, NetworkCache.AC_LF_INSTANCE.getEntryCount());
+        double cachedG2Q = g2.getTerminal().getQ();
+        double cachedLoadQ = load.getTerminal().getQ();
+
+        // same scenario without the cache, as a reference
+        var network2 = DistributedSlackNetworkFactory.create();
+        LoadFlowParameters parameters2 = new LoadFlowParameters();
+        OpenLoadFlowParameters.create(parameters2).setNetworkCacheEnabled(false);
+        loadFlowRunner.run(network2, parameters2);
+        network2.getGenerator("g2").setTargetQ(100);
+        network2.getLoadStream().findFirst().orElseThrow().setQ0(50);
+        loadFlowRunner.run(network2, parameters2);
+
+        // loose tolerance: restarting from the previous state converges slightly differently
+        assertEquals(network2.getGenerator("g2").getTerminal().getQ(), cachedG2Q, 1e-2);
+        assertEquals(network2.getLoadStream().findFirst().orElseThrow().getTerminal().getQ(), cachedLoadQ, 1e-2);
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void testUnsupportedAttributeChange(boolean isDc) {
@@ -483,7 +522,7 @@ class LoadFlowWithCachingTest {
 
         loadFlowRunner.run(network, parameters);
         assertNotNull(findEntryFunction.apply(network, isDc).getValues());
-        gen.setTargetQ(10);
+        gen.setVoltageRegulatorOn(false); // still an unsupported update
         assertNull(findEntryFunction.apply(network, isDc).getValues());
     }
 
