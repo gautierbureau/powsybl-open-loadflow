@@ -19,7 +19,6 @@ import com.powsybl.openloadflow.util.Evaluable;
 import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.security.*;
 import com.powsybl.security.limitreduction.LimitReduction;
-import org.apache.commons.lang3.function.TriFunction;
 import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.*;
@@ -42,6 +41,11 @@ public class LimitViolationManager {
     private SecurityAnalysisParameters.IncreasedViolationsParameters parameters;
 
     private final Map<Pair<Object, String>, LimitViolation> violations = new LinkedHashMap<>(); // All limit violations indexed by network element and OperationalLimitsGroup (if it exists)
+
+    // branch limit checks laid out as parallel arrays, built once per network and cached on the pre-contingency manager
+    private BranchLimitScreen branchLimitScreen;
+
+    private LfNetwork screenedNetwork;
 
     public LimitViolationManager(LimitViolationManager reference, List<LimitReduction> limitReductions,
                                  SecurityAnalysisParameters.IncreasedViolationsParameters parameters) {
@@ -75,10 +79,116 @@ public class LimitViolationManager {
      */
     public void detectViolations(LfNetwork network, Predicate<LfBranch> isBranchDisabled) {
         Objects.requireNonNull(network);
+        detectViolations(network, isBranchDisabled, getOrBuildScreen(network));
+    }
 
-        // Detect violation limits on branches
-        network.getBranches().stream().filter(b -> !isBranchDisabled.test(b)).forEach(this::detectBranchViolations);
+    /**
+     * The branch limit checks of the given network, laid out as parallel arrays. Branch limits and their reductions do
+     * not change between contingencies, so the screen is built once and cached on the pre-contingency manager, which
+     * every post-contingency and post-action manager of the analysis references: a security analysis then builds it
+     * once and reuses it for all its contingencies.
+     */
+    private BranchLimitScreen getOrBuildScreen(LfNetwork network) {
+        // the reference manager is the pre-contingency one, shared by all the managers of the analysis
+        LimitViolationManager owner = reference != null ? reference : this;
+        if (owner.branchLimitScreen == null || owner.screenedNetwork != network) {
+            owner.branchLimitScreen = BranchLimitScreen.build(network, limitReductionManager);
+            owner.screenedNetwork = network;
+        }
+        return owner.branchLimitScreen;
+    }
 
+    public LimitReductionManager getLimitReductionManager() {
+        return limitReductionManager;
+    }
+
+    /**
+     * Detect violations on branches and on buses, screening the branch limit checks with a {@link BranchLimitScreen}
+     * built once for the whole security analysis. Each check is ruled out by a single comparison against the lowest
+     * limit of its side and type, and only the checks that exceed it visit their limits groups, which reproduces
+     * {@link #detectViolations(LfNetwork, Predicate)} exactly.
+     * @param network network on which the violation limits are checked
+     * @param isBranchDisabled predicate to evaluate if a branch of the network is disabled or not
+     * @param screen the branch limit checks of the network, laid out as parallel arrays
+     */
+    public void detectViolations(LfNetwork network, Predicate<LfBranch> isBranchDisabled, BranchLimitScreen screen) {
+        Objects.requireNonNull(network);
+        Objects.requireNonNull(screen);
+
+        LfBranch[] branches = screen.getBranches();
+        LfBus[] buses = screen.getBuses();
+        double[] thresholds = screen.getThresholds();
+        byte[] kinds = screen.getKinds();
+        List<LfBranch.LfLimitsGroup>[] groups = screen.getGroups();
+        for (int k = 0; k < branches.length; k++) {
+            LfBranch branch = branches[k];
+            // the disabling status is tested first: the flow of a disabled branch cannot be evaluated, as its
+            // variables are not in the state vector
+            if (isBranchDisabled.test(branch)) {
+                continue;
+            }
+            // a flow that does not exceed the lowest limit of the check cannot violate any of its groups; an
+            // undefined (NaN) flow fails the comparison, as it failed the scan of the limits
+            switch (kinds[k]) {
+                case BranchLimitScreen.SIDE_1_CURRENT -> {
+                    if (branch.getI1().eval() > thresholds[k]) {
+                        detectBranchCurrentViolations(branch, buses[k], LfBranch::getI1, groups[k], TwoSides.ONE);
+                    }
+                }
+                case BranchLimitScreen.SIDE_1_ACTIVE_POWER -> {
+                    if (Math.abs(branch.getP1().eval()) > thresholds[k]) {
+                        detectBranchActivePowerViolations(branch, LfBranch::getP1, groups[k], TwoSides.ONE);
+                    }
+                }
+                case BranchLimitScreen.SIDE_1_APPARENT_POWER -> {
+                    if (branch.computeApparentPower1() > thresholds[k]) {
+                        detectBranchApparentPowerViolations(branch, LfBranch::computeApparentPower1, groups[k], TwoSides.ONE);
+                    }
+                }
+                case BranchLimitScreen.SIDE_2_CURRENT -> {
+                    if (branch.getI2().eval() > thresholds[k]) {
+                        detectBranchCurrentViolations(branch, buses[k], LfBranch::getI2, groups[k], TwoSides.TWO);
+                    }
+                }
+                case BranchLimitScreen.SIDE_2_ACTIVE_POWER -> {
+                    if (Math.abs(branch.getP2().eval()) > thresholds[k]) {
+                        detectBranchActivePowerViolations(branch, LfBranch::getP2, groups[k], TwoSides.TWO);
+                    }
+                }
+                case BranchLimitScreen.SIDE_2_APPARENT_POWER -> {
+                    if (branch.computeApparentPower2() > thresholds[k]) {
+                        detectBranchApparentPowerViolations(branch, LfBranch::computeApparentPower2, groups[k], TwoSides.TWO);
+                    }
+                }
+                default -> throw new IllegalStateException("Unsupported branch limit check: " + kinds[k]);
+            }
+        }
+
+        detectBusAndVoltageAngleViolations(network);
+    }
+
+    private void detectBranchCurrentViolations(LfBranch branch, LfBus bus, Function<LfBranch, Evaluable> iGetter,
+                                               List<LfBranch.LfLimitsGroup> limitsGroups, TwoSides side) {
+        for (LfBranch.LfLimitsGroup limitsGroup : limitsGroups) {
+            detectBranchCurrentViolations(branch, bus, iGetter, limitsGroup, side);
+        }
+    }
+
+    private void detectBranchActivePowerViolations(LfBranch branch, Function<LfBranch, Evaluable> pGetter,
+                                                   List<LfBranch.LfLimitsGroup> limitsGroups, TwoSides side) {
+        for (LfBranch.LfLimitsGroup limitsGroup : limitsGroups) {
+            detectBranchActivePowerViolations(branch, pGetter, limitsGroup, side);
+        }
+    }
+
+    private void detectBranchApparentPowerViolations(LfBranch branch, ToDoubleFunction<LfBranch> sGetter,
+                                                     List<LfBranch.LfLimitsGroup> limitsGroups, TwoSides side) {
+        for (LfBranch.LfLimitsGroup limitsGroup : limitsGroups) {
+            detectBranchApparentPowerViolations(branch, sGetter, limitsGroup, side);
+        }
+    }
+
+    private void detectBusAndVoltageAngleViolations(LfNetwork network) {
         // Detect violation limits on buses
         network.getBuses().stream().filter(b -> !b.isDisabled()).forEach(this::detectBusViolations);
 
@@ -163,44 +273,6 @@ public class LimitViolationManager {
                     break;
                 }
             }
-        }
-    }
-
-    private void detectBranchSideViolations(LfBranch branch, LfBus bus,
-                                            TriFunction<LfBranch, LimitType, LimitReductionManager, List<LfBranch.LfLimitsGroup>> limitsGetter,
-                                            Function<LfBranch, Evaluable> iGetter,
-                                            Function<LfBranch, Evaluable> pGetter,
-                                            ToDoubleFunction<LfBranch> sGetter,
-                                            TwoSides side) {
-        List<LfBranch.LfLimitsGroup> limitsGroups = limitsGetter.apply(branch, LimitType.CURRENT, limitReductionManager);
-        for (LfBranch.LfLimitsGroup limitsGroup : limitsGroups) {
-            detectBranchCurrentViolations(branch, bus, iGetter, limitsGroup, side);
-        }
-
-        limitsGroups = limitsGetter.apply(branch, LimitType.ACTIVE_POWER, limitReductionManager);
-        for (LfBranch.LfLimitsGroup limitsGroup : limitsGroups) {
-            detectBranchActivePowerViolations(branch, pGetter, limitsGroup, side);
-        }
-
-        limitsGroups = limitsGetter.apply(branch, LimitType.APPARENT_POWER, limitReductionManager);
-        for (LfBranch.LfLimitsGroup limitsGroup : limitsGroups) {
-            detectBranchApparentPowerViolations(branch, sGetter, limitsGroup, side);
-        }
-    }
-
-    /**
-     * Detect violation limits on one branch and add them to the given list
-     * @param branch branch of interest
-     */
-    private void detectBranchViolations(LfBranch branch) {
-        // detect violation limits on a branch
-        // Only detect the most serious one (findFirst) : limit violations are ordered by severity
-        if (branch.getBus1() != null) {
-            detectBranchSideViolations(branch, branch.getBus1(), LfBranch::getLimits1, LfBranch::getI1, LfBranch::getP1, LfBranch::computeApparentPower1, TwoSides.ONE);
-        }
-
-        if (branch.getBus2() != null) {
-            detectBranchSideViolations(branch, branch.getBus2(), LfBranch::getLimits2, LfBranch::getI2, LfBranch::getP2, LfBranch::computeApparentPower2, TwoSides.TWO);
         }
     }
 
