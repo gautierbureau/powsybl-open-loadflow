@@ -114,8 +114,7 @@
     "open-sensitivity-parameters" : {
       "debugDir" : "/work",
       "startWithFrozenACEmulation" : true,
-      "threadCount" : 1,
-      "networkPerThreadMode" : "COPY"
+      "threadCount" : 1
     }
   }
 }

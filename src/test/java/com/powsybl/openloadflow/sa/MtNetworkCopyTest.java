@@ -48,14 +48,12 @@ class MtNetworkCopyTest extends AbstractOpenSecurityAnalysisTest {
         super(commonTestConfig);
     }
 
-    private SecurityAnalysisResult run(Network network, List<Contingency> contingencies, int threadCount, boolean dc, boolean dcFastMode,
-                                       OpenSecurityAnalysisParameters.NetworkPerThreadMode mode) {
+    private SecurityAnalysisResult run(Network network, List<Contingency> contingencies, int threadCount, boolean dc, boolean dcFastMode) {
         SecurityAnalysisParameters saParameters = new SecurityAnalysisParameters();
         saParameters.setLoadFlowParameters(new LoadFlowParameters().setDc(dc));
         OpenSecurityAnalysisParameters saExt = new OpenSecurityAnalysisParameters()
                 .setThreadCount(threadCount)
-                .setDcFastMode(dcFastMode)
-                .setNetworkPerThreadMode(mode);
+                .setDcFastMode(dcFastMode);
         saParameters.addExtension(OpenSecurityAnalysisParameters.class, saExt);
         return runSecurityAnalysis(network, contingencies, createNetworkMonitors(network), saParameters);
     }
@@ -96,8 +94,8 @@ class MtNetworkCopyTest extends AbstractOpenSecurityAnalysisTest {
                 new Contingency("L2", new BranchContingency("L2")),
                 new Contingency("LD", new LoadContingency("LD")));
 
-        SecurityAnalysisResult singleThread = run(network, contingencies, 1, dc, dcFastMode, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY);
-        SecurityAnalysisResult multiThread = run(network, contingencies, threadCount, dc, dcFastMode, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY);
+        SecurityAnalysisResult singleThread = run(network, contingencies, 1, dc, dcFastMode);
+        SecurityAnalysisResult multiThread = run(network, contingencies, threadCount, dc, dcFastMode);
         assertSameResults(singleThread, multiThread);
     }
 
@@ -205,26 +203,4 @@ class MtNetworkCopyTest extends AbstractOpenSecurityAnalysisTest {
                 .build();
     }
 
-    @ParameterizedTest(name = "dc={1}")
-    @CsvSource({"2, false", "2, true"})
-    void testRebuildFallbackModeStillWorks(int threadCount, boolean dc) {
-        Network network = createNodeBreakerNetwork();
-        List<Contingency> contingencies = List.of(
-                new Contingency("L1", new BranchContingency("L1")),
-                new Contingency("L2", new BranchContingency("L2")));
-
-        SecurityAnalysisResult copyMode = run(network, contingencies, threadCount, dc, false, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY);
-        SecurityAnalysisResult rebuildMode = run(network, contingencies, threadCount, dc, false, OpenSecurityAnalysisParameters.NetworkPerThreadMode.REBUILD);
-        assertEquals(copyMode.getPostContingencyResults().size(), rebuildMode.getPostContingencyResults().size());
-        // flows agree between the two modes (rebuild on this fixture has no numeric divergence)
-        for (PostContingencyResult expectedPcr : copyMode.getPostContingencyResults()) {
-            PostContingencyResult actualPcr = rebuildMode.getPostContingencyResults().stream()
-                    .filter(r -> r.getContingency().getId().equals(expectedPcr.getContingency().getId()))
-                    .findFirst().orElseThrow();
-            for (BranchResult branchResult : expectedPcr.getNetworkResult().getBranchResults()) {
-                BranchResult actualBranchResult = actualPcr.getNetworkResult().getBranchResult(branchResult.getBranchId());
-                assertEquals(branchResult.getP1(), actualBranchResult.getP1(), 1e-6);
-            }
-        }
-    }
 }

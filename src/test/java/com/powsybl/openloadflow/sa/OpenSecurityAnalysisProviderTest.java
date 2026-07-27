@@ -53,7 +53,7 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
     void specificParametersNamesTest() {
         assertEquals(List.of("createResultExtension", "contingencyPropagation", "threadCount", "dcFastMode",
                 "contingencyActivePowerLossDistribution", "startWithFrozenACEmulation",
-                "networkPerThreadMode", "contingencyPartitioningMode"),
+                "contingencyPartitioningMode"),
             provider.getSpecificParametersNames());
     }
 
@@ -94,14 +94,9 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         assertEquals("Default", parametersExt.getContingencyActivePowerLossDistribution());
         testCount++;
 
-        assertEquals(OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY, parametersExt.getNetworkPerThreadMode());
-        parametersExt.setNetworkPerThreadMode(OpenSecurityAnalysisParameters.NetworkPerThreadMode.REBUILD);
-        assertEquals(OpenSecurityAnalysisParameters.NetworkPerThreadMode.REBUILD, parametersExt.getNetworkPerThreadMode());
-        testCount++;
-
-        assertEquals(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.SLICE, parametersExt.getContingencyPartitioningMode());
-        parametersExt.setContingencyPartitioningMode(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.ROUND_ROBIN);
         assertEquals(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.ROUND_ROBIN, parametersExt.getContingencyPartitioningMode());
+        parametersExt.setContingencyPartitioningMode(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.SLICE);
+        assertEquals(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.SLICE, parametersExt.getContingencyPartitioningMode());
         testCount++;
 
         assertEquals(OpenSecurityAnalysisParameters.SPECIFIC_PARAMETERS_NAMES.size(), testCount);
@@ -117,7 +112,6 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         moduleConfig.setStringProperty("startWithFrozenACEmulation", "false");
         moduleConfig.setStringProperty("threadCount", "3");
         moduleConfig.setStringProperty("contingencyActivePowerLossDistribution", "Default");
-        moduleConfig.setStringProperty("networkPerThreadMode", "REBUILD");
         moduleConfig.setStringProperty("contingencyPartitioningMode", "ROUND_ROBIN");
 
         OpenSecurityAnalysisParameters parametersExt = (OpenSecurityAnalysisParameters) provider.loadSpecificParameters(platformConfig).orElseThrow();
@@ -126,7 +120,6 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         assertTrue(parametersExt.isDcFastMode());
         assertFalse(parametersExt.isStartWithFrozenACEmulation());
         assertEquals(3, parametersExt.getThreadCount());
-        assertEquals(OpenSecurityAnalysisParameters.NetworkPerThreadMode.REBUILD, parametersExt.getNetworkPerThreadMode());
         assertEquals(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.ROUND_ROBIN, parametersExt.getContingencyPartitioningMode());
         // check test completeness
 
@@ -150,7 +143,6 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
                 "threadCount", "3",
                 "startWithFrozenACEmulation", "false",
                 "contingencyActivePowerLossDistribution", "Default",
-                "networkPerThreadMode", "REBUILD",
                 "contingencyPartitioningMode", "ROUND_ROBIN");
         OpenSecurityAnalysisParameters parametersExt = (OpenSecurityAnalysisParameters) provider.loadSpecificParameters(properties).orElseThrow();
         assertTrue(parametersExt.isCreateResultExtension());
@@ -159,7 +151,6 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         assertEquals(3, parametersExt.getThreadCount());
         assertFalse(parametersExt.isStartWithFrozenACEmulation());
         assertEquals("Default", parametersExt.getContingencyActivePowerLossDistribution());
-        assertEquals(OpenSecurityAnalysisParameters.NetworkPerThreadMode.REBUILD, parametersExt.getNetworkPerThreadMode());
         assertEquals(OpenSecurityAnalysisParameters.ContingencyPartitioningMode.ROUND_ROBIN, parametersExt.getContingencyPartitioningMode());
 
         // check test completeness

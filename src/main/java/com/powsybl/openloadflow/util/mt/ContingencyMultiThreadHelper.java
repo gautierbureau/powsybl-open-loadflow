@@ -9,6 +9,7 @@
 package com.powsybl.openloadflow.util.mt;
 
 import com.google.common.base.Stopwatch;
+import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.computation.CompletableFutureTask;
 import com.powsybl.contingency.Contingency;
@@ -37,8 +38,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 /**
@@ -158,9 +157,12 @@ public final class ContingencyMultiThreadHelper {
      * Build the LF networks once on the calling thread, then give each partition (but the first one)
      * its own deep copy ({@link LfNetworkCopier}), created in parallel and lock free. All partitions
      * simulate the same network as a single threaded analysis (built with the topo config covering
-     * all the contingencies), so results do not depend on the thread count. Falls back to
-     * {@link #createLFNetworksPerContingencyPartitionAndRunAnalysis} when the network uses features
-     * not supported by the copy.
+     * all the contingencies), so results do not depend on the thread count.
+     *
+     * <p>The worker threads only ever read the shared IIDM network (through their LfNetwork copies) on
+     * the single working variant selected on the calling thread, and never mutate it, so IIDM multi
+     * thread variant access is not required. Networks that {@link LfNetworkCopier#canCopy cannot be
+     * copied} are rejected with a {@link PowsyblException}: run them single-threaded instead.
      */
     public static <P extends AbstractLoadFlowParameters<P>> void buildOnceCopyAndRunAnalysis(Network network,
                                                                                              String workingVariantId,
@@ -176,87 +178,76 @@ public final class ContingencyMultiThreadHelper {
                                                                                              Executor executor) throws ExecutionException {
         int partitionCount = contingenciesPartitions.size();
         List<ReportNode> reportNodes = Collections.synchronizedList(new ArrayList<>(Collections.nCopies(partitionCount, ReportNode.NO_OP)));
-        boolean oldAllowVariantMultiThreadAccess = network.getVariantManager().isVariantMultiThreadAccessAllowed();
-        network.getVariantManager().allowVariantMultiThreadAccess(true);
-        boolean fallbackToRebuild = false;
-        try {
-            network.getVariantManager().setWorkingVariant(workingVariantId);
+        // COPY mode only accesses the IIDM network from the calling thread (contingency propagation,
+        // parameters, network build and, when applicable, the single pre-contingency solve below). The
+        // worker threads simulate isolated LfNetwork deep copies and only ever read the shared IIDM
+        // through them, all on the single working variant selected here. No worker ever mutates the
+        // IIDM network or its working variant, so multi thread variant access is not required.
+        network.getVariantManager().setWorkingVariant(workingVariantId);
 
-            // Create the propagated contingencies per partition, each with its own topo config, so we
-            // can later give each partition's network only its own single-side openable branches. The
-            // networks themselves are built once with the union topo config below, so the topology (and
-            // therefore the results) is identical to a single threaded analysis whatever the thread count.
-            Stopwatch phaseStopwatch = Stopwatch.createStarted();
-            var unionTopoConfig = new LfTopoConfig(topoConfig);
-            List<List<PropagatedContingency>> propagatedPartitions = new ArrayList<>(partitionCount);
-            List<Set<String>> partitionOpenableSide1 = new ArrayList<>(partitionCount);
-            List<Set<String>> partitionOpenableSide2 = new ArrayList<>(partitionCount);
-            int startIndex = 0;
-            for (List<Contingency> partition : contingenciesPartitions) {
-                var partitionTopoConfig = new LfTopoConfig(topoConfig);
-                propagatedPartitions.add(PropagatedContingency.createList(network, partition, partitionTopoConfig, creationParameters, startIndex));
-                startIndex += partition.size();
-                // single-side openable branches needed by this partition's contingencies only
-                partitionOpenableSide1.add(Set.copyOf(partitionTopoConfig.getBranchIdsOpenableSide1()));
-                partitionOpenableSide2.add(Set.copyOf(partitionTopoConfig.getBranchIdsOpenableSide2()));
-                // accumulate the union used to build the networks
-                unionTopoConfig.getSwitchesToOpen().addAll(partitionTopoConfig.getSwitchesToOpen());
-                unionTopoConfig.getBusIdsToLose().addAll(partitionTopoConfig.getBusIdsToLose());
-                unionTopoConfig.getBranchIdsOpenableSide1().addAll(partitionTopoConfig.getBranchIdsOpenableSide1());
-                unionTopoConfig.getBranchIdsOpenableSide2().addAll(partitionTopoConfig.getBranchIdsOpenableSide2());
-            }
-
-            long propagationMs = phaseStopwatch.elapsed(TimeUnit.MILLISECONDS);
-
-            // one parameters instance per partition, all created on the calling thread as IIDM is read
-            List<P> partitionParameters = new ArrayList<>(partitionCount);
-            for (int i = 0; i < partitionCount; i++) {
-                partitionParameters.add(parameterProvider.createParameters(unionTopoConfig));
-            }
-            long parametersMs = phaseStopwatch.elapsed(TimeUnit.MILLISECONDS) - propagationMs;
-
-            try (LfNetworkList lfNetworks = Networks.loadWithReconnectableElements(network, unionTopoConfig,
-                    partitionParameters.get(0).getNetworkParameters(), rootReportNode)) {
-                long buildMs = phaseStopwatch.elapsed(TimeUnit.MILLISECONDS) - propagationMs - parametersMs;
-                if (lfNetworks.getList().stream().allMatch(LfNetworkCopier::canCopy)) {
-                    boolean presolved = false;
-                    long presolveMs = 0;
-                    if (presolver != null) {
-                        // run the pre-contingency simulations once, on the calling thread, before the copies
-                        // are taken: every partition then starts from the solved state
-                        Stopwatch presolveStopwatch = Stopwatch.createStarted();
-                        presolver.presolve(lfNetworks, partitionParameters.get(0));
-                        presolveMs = presolveStopwatch.elapsed(TimeUnit.MILLISECONDS);
-                        // the solve may have changed the topology (e.g. an automation system tripping a
-                        // breaker), in which case the solved networks are not copyable anymore
-                        presolved = lfNetworks.getList().stream().allMatch(LfNetworkCopier::canCopy);
-                        if (!presolved) {
-                            LOGGER.warn("LF networks are not copyable anymore after the pre-contingency simulations: falling back to one network build per thread");
-                        }
-                    }
-                    LOGGER.info("COPY mode setup phases: contingency propagation {} ms, parameters {} ms, networks build {} ms, presolve {} ms (presolved={})",
-                            propagationMs, parametersMs, buildMs, presolveMs, presolved);
-                    if (presolver == null || presolved) {
-                        runOnCopies(network, workingVariantId, lfNetworks, propagatedPartitions, partitionParameters,
-                                partitionOpenableSide1, partitionOpenableSide2, contingencyRunner, rootReportNode, reportNodes,
-                                executor, presolved, detachFirstPartitionReporting);
-                    } else {
-                        fallbackToRebuild = true;
-                    }
-                } else {
-                    LOGGER.warn("LF network deep copy is not supported for this network: falling back to one network build per thread");
-                    fallbackToRebuild = true;
-                }
-            }
-        } finally {
-            network.getVariantManager().allowVariantMultiThreadAccess(oldAllowVariantMultiThreadAccess);
+        // Create the propagated contingencies per partition, each with its own topo config, so we
+        // can later give each partition's network only its own single-side openable branches. The
+        // networks themselves are built once with the union topo config below, so the topology (and
+        // therefore the results) is identical to a single threaded analysis whatever the thread count.
+        Stopwatch phaseStopwatch = Stopwatch.createStarted();
+        var unionTopoConfig = new LfTopoConfig(topoConfig);
+        List<List<PropagatedContingency>> propagatedPartitions = new ArrayList<>(partitionCount);
+        List<Set<String>> partitionOpenableSide1 = new ArrayList<>(partitionCount);
+        List<Set<String>> partitionOpenableSide2 = new ArrayList<>(partitionCount);
+        int startIndex = 0;
+        for (List<Contingency> partition : contingenciesPartitions) {
+            var partitionTopoConfig = new LfTopoConfig(topoConfig);
+            propagatedPartitions.add(PropagatedContingency.createList(network, partition, partitionTopoConfig, creationParameters, startIndex));
+            startIndex += partition.size();
+            // single-side openable branches needed by this partition's contingencies only
+            partitionOpenableSide1.add(Set.copyOf(partitionTopoConfig.getBranchIdsOpenableSide1()));
+            partitionOpenableSide2.add(Set.copyOf(partitionTopoConfig.getBranchIdsOpenableSide2()));
+            // accumulate the union used to build the networks
+            unionTopoConfig.getSwitchesToOpen().addAll(partitionTopoConfig.getSwitchesToOpen());
+            unionTopoConfig.getBusIdsToLose().addAll(partitionTopoConfig.getBusIdsToLose());
+            unionTopoConfig.getBranchIdsOpenableSide1().addAll(partitionTopoConfig.getBranchIdsOpenableSide1());
+            unionTopoConfig.getBranchIdsOpenableSide2().addAll(partitionTopoConfig.getBranchIdsOpenableSide2());
         }
 
-        if (fallbackToRebuild) {
-            createLFNetworksPerContingencyPartitionAndRunAnalysis(network, workingVariantId, contingenciesPartitions,
-                    creationParameters, topoConfig, parameterProvider, contingencyRunner, rootReportNode, reportMerger,
-                    detachFirstPartitionReporting, executor);
-            return;
+        long propagationMs = phaseStopwatch.elapsed(TimeUnit.MILLISECONDS);
+
+        // one parameters instance per partition, all created on the calling thread as IIDM is read
+        List<P> partitionParameters = new ArrayList<>(partitionCount);
+        for (int i = 0; i < partitionCount; i++) {
+            partitionParameters.add(parameterProvider.createParameters(unionTopoConfig));
+        }
+        long parametersMs = phaseStopwatch.elapsed(TimeUnit.MILLISECONDS) - propagationMs;
+
+        try (LfNetworkList lfNetworks = Networks.loadWithReconnectableElements(network, unionTopoConfig,
+                partitionParameters.get(0).getNetworkParameters(), rootReportNode)) {
+            long buildMs = phaseStopwatch.elapsed(TimeUnit.MILLISECONDS) - propagationMs - parametersMs;
+            if (!lfNetworks.getList().stream().allMatch(LfNetworkCopier::canCopy)) {
+                throw new PowsyblException("Multi-threaded analysis requires an LF network supporting deep copy "
+                        + "(see LfNetworkCopier#canCopy): this network uses element implementations that cannot be copied. "
+                        + "Run the analysis single-threaded (threadCount = 1) to simulate it.");
+            }
+            boolean presolved = false;
+            long presolveMs = 0;
+            if (presolver != null) {
+                // run the pre-contingency simulations once, on the calling thread, before the copies
+                // are taken: every partition then starts from the solved state
+                Stopwatch presolveStopwatch = Stopwatch.createStarted();
+                presolver.presolve(lfNetworks, partitionParameters.get(0));
+                presolveMs = presolveStopwatch.elapsed(TimeUnit.MILLISECONDS);
+                // the solve may have changed the topology (e.g. an automation system tripping a
+                // breaker), in which case the solved networks are not copyable anymore
+                if (!lfNetworks.getList().stream().allMatch(LfNetworkCopier::canCopy)) {
+                    throw new PowsyblException("The pre-contingency simulation changed the topology and the LF network "
+                            + "is not copyable anymore: multi-threaded analysis cannot proceed. "
+                            + "Run the analysis single-threaded (threadCount = 1) to simulate it.");
+                }
+                presolved = true;
+            }
+            LOGGER.info("COPY mode setup phases: contingency propagation {} ms, parameters {} ms, networks build {} ms, presolve {} ms (presolved={})",
+                    propagationMs, parametersMs, buildMs, presolveMs, presolved);
+            runOnCopies(network, workingVariantId, lfNetworks, propagatedPartitions, partitionParameters,
+                    partitionOpenableSide1, partitionOpenableSide2, contingencyRunner, rootReportNode, reportNodes,
+                    executor, presolved, detachFirstPartitionReporting);
         }
 
         reportMerger.mergeReportThreadResults(rootReportNode, collectThreadReportNodes(reportNodes, rootReportNode));
@@ -297,9 +288,13 @@ public final class ContingencyMultiThreadHelper {
                                                                               boolean presolved,
                                                                               boolean detachFirstPartitionReporting) throws ExecutionException {
         int partitionCount = propagatedPartitions.size();
-        // the networks may have been built on a temporary variant (when switches are retained): worker
-        // threads have their own working variant in multi thread access mode and must select it
+        // the networks may have been built on a temporary variant (when switches are retained); select it
+        // once here, on the calling thread, for the whole parallel region. The worker threads only read the
+        // shared IIDM (through their LfNetwork copies) on this single working variant and never change it,
+        // so a shared working variant is enough and multi thread variant access is not needed. The working
+        // variant is reverted when lfNetworks is closed by the caller.
         String builtVariantId = lfNetworks.getVariantCleaner() != null ? lfNetworks.getVariantCleaner().getTmpVariantId() : workingVariantId;
+        network.getVariantManager().setWorkingVariant(builtVariantId);
         LoadFlowModel loadFlowModel = partitionParameters.get(0).getNetworkParameters().getLoadFlowModel();
 
         // first phase: deep copy the networks in parallel; only reads the original networks, so no
@@ -323,7 +318,7 @@ public final class ContingencyMultiThreadHelper {
                 continue;
             }
             copyFutures.add(CompletableFutureTask.runAsync(
-                () -> copyNetworksForPartition(partitionNum, network, builtVariantId, lfNetworks, loadFlowModel,
+                () -> copyNetworksForPartition(partitionNum, lfNetworks, loadFlowModel,
                     detachFirstPartitionReporting, rootReportNode, partitionNetworks, reportNodes), executor));
         }
         waitForFutures(copyFutures);
@@ -338,7 +333,6 @@ public final class ContingencyMultiThreadHelper {
                 continue;
             }
             runFutures.add(CompletableFutureTask.runAsync(() -> {
-                network.getVariantManager().setWorkingVariant(builtVariantId);
                 // restrict the (result neutral, AC only) single-side open branch equation terms to the
                 // branches this partition actually opens, so each partition's equation system is as
                 // light as in the legacy one-build-per-thread mode while keeping identical results
@@ -388,81 +382,10 @@ public final class ContingencyMultiThreadHelper {
         }
     }
 
-    public static <P extends AbstractLoadFlowParameters<P>> void createLFNetworksPerContingencyPartitionAndRunAnalysis(Network network,
-                                                                                                                       String workingVariantId,
-                                                                                                                       List<List<Contingency>> contingenciesPartitions,
-                                                                                                                       PropagatedContingencyCreationParameters creationParameters,
-                                                                                                                       LfTopoConfig topoConfig,
-                                                                                                                       ParameterProvider<P> parameterProvider,
-                                                                                                                       ContingencyRunner<P> contingencyRunner,
-                                                                                                                       ReportNode rootReportNode,
-                                                                                                                       ReportMerger reportMerger,
-                                                                                                                       Executor executor) throws ExecutionException {
-        createLFNetworksPerContingencyPartitionAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters,
-                topoConfig, parameterProvider, contingencyRunner, rootReportNode, reportMerger, false, executor);
-    }
-
-    public static <P extends AbstractLoadFlowParameters<P>> void createLFNetworksPerContingencyPartitionAndRunAnalysis(Network network,
-                                                                                                                       String workingVariantId,
-                                                                                                                       List<List<Contingency>> contingenciesPartitions,
-                                                                                                                       PropagatedContingencyCreationParameters creationParameters,
-                                                                                                                       LfTopoConfig topoConfig,
-                                                                                                                       ParameterProvider<P> parameterProvider,
-                                                                                                                       ContingencyRunner<P> contingencyRunner,
-                                                                                                                       ReportNode rootReportNode,
-                                                                                                                       ReportMerger reportMerger,
-                                                                                                                       boolean detachFirstPartitionReporting,
-                                                                                                                       Executor executor) throws ExecutionException {
-
-        List<ReportNode> reportNodes = Collections.synchronizedList(new ArrayList<>(Collections.nCopies(contingenciesPartitions.size(), ReportNode.NO_OP)));
-        List<LfNetworkList> lfNetworksList = new ArrayList<>();
-        boolean oldAllowVariantMultiThreadAccess = network.getVariantManager().isVariantMultiThreadAccessAllowed();
-        network.getVariantManager().allowVariantMultiThreadAccess(true);
-        try {
-            Lock networkLock = new ReentrantLock();
-            List<CompletableFuture<Void>> futures = new ArrayList<>();
-            int startIndexMutable = 0;
-            for (int i = 0; i < contingenciesPartitions.size(); i++) {
-                final int partitionNum = i;
-                var contingenciesPartition = contingenciesPartitions.get(i);
-                if (partitionNum > 0 && contingenciesPartition.isEmpty()) {
-                    continue;
-                }
-                // store startIndex for completableFuture launched in this loop
-                final int startIndex = startIndexMutable;
-                futures.add(CompletableFutureTask.runAsync(
-                    () -> runRebuildPartition(partitionNum, network, workingVariantId, topoConfig, contingenciesPartition,
-                        creationParameters, startIndex, parameterProvider, contingencyRunner, rootReportNode, reportNodes,
-                        lfNetworksList, networkLock, detachFirstPartitionReporting),
-                    executor));
-                startIndexMutable += contingenciesPartition.size();
-            }
-
-            try {
-                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-                        .get(); // we need to use get instead of join to get an interruption exception
-            } catch (InterruptedException e) {
-                // also interrupt worker threads
-                for (var future : futures) {
-                    future.cancel(true);
-                }
-                Thread.currentThread().interrupt();
-            }
-        } finally {
-            network.getVariantManager().allowVariantMultiThreadAccess(oldAllowVariantMultiThreadAccess);
-        }
-
-        reportMerger.mergeReportThreadResults(rootReportNode, collectThreadReportNodes(reportNodes, rootReportNode));
-        for (var lfNetworks : lfNetworksList) {
-            lfNetworks.close();
-        }
-    }
-
-    private static Void copyNetworksForPartition(int partitionNum, Network network, String builtVariantId,
+    private static Void copyNetworksForPartition(int partitionNum,
                                                  LfNetworkList lfNetworks, LoadFlowModel loadFlowModel,
                                                  boolean detachFirstPartitionReporting, ReportNode rootReportNode,
                                                  List<LfNetworkList> partitionNetworks, List<ReportNode> reportNodes) {
-        network.getVariantManager().setWorkingVariant(builtVariantId);
         boolean detachedReporting = partitionNum > 0 || detachFirstPartitionReporting;
         ReportNode threadRootNode = detachedReporting ? Reports.createRootThreadReport(rootReportNode) : null;
         List<LfNetwork> copies = new ArrayList<>(lfNetworks.getList().size());
@@ -480,63 +403,6 @@ public final class ContingencyMultiThreadHelper {
         if (detachedReporting) {
             reportNodes.set(partitionNum, threadRootNode);
         }
-        return null;
-    }
-
-    private static <P extends AbstractLoadFlowParameters<P>> Void runRebuildPartition(int partitionNum, Network network, String workingVariantId,
-                                                                                      LfTopoConfig topoConfig, List<Contingency> contingenciesPartition,
-                                                                                      PropagatedContingencyCreationParameters creationParameters, int startIndex,
-                                                                                      ParameterProvider<P> parameterProvider, ContingencyRunner<P> contingencyRunner,
-                                                                                      ReportNode rootReportNode, List<ReportNode> reportNodes,
-                                                                                      List<LfNetworkList> lfNetworksList, Lock networkLock,
-                                                                                      boolean detachFirstPartitionReporting) {
-        var partitionTopoConfig = new LfTopoConfig(topoConfig);
-
-        //  we have to pay attention with IIDM network multi threading even when allowVariantMultiThreadAccess is set:
-        //    - variant cloning and removal is not thread safe
-        //    - we cannot read or write on an exising variant while another thread clone or remove a variant
-        //    - be aware that even after LF network loading, though LF network we get access to original IIDM
-        //      variant (for instance to get reactive capability curve), so allowVariantMultiThreadAccess mode
-        //      is absolutely required
-        //  so in order to be thread safe, we need to:
-        //    - lock LF network creation (which create a working variant, see {@code LfNetworkList})
-        //    - delay {@code LfNetworkList} closing (which remove a working variant) out of worker thread
-        LfNetworkList lfNetworks;
-        List<PropagatedContingency> propagatedContingencies;
-        P parameters;
-        Stopwatch lockStopwatch = Stopwatch.createStarted();
-        networkLock.lock();
-        long lockWaitMs = lockStopwatch.elapsed(TimeUnit.MILLISECONDS);
-        try {
-            network.getVariantManager().setWorkingVariant(workingVariantId);
-
-            propagatedContingencies = PropagatedContingency.createList(network, contingenciesPartition, partitionTopoConfig, creationParameters, startIndex);
-
-            parameters = parameterProvider.createParameters(partitionTopoConfig);
-
-            ReportNode threadRootNode = partitionNum == 0 ? rootReportNode : Reports.createRootThreadReport(rootReportNode);
-            reportNodes.set(partitionNum, threadRootNode);
-
-            // create networks including all necessary switches
-            lfNetworks = Networks.loadWithReconnectableElements(network, partitionTopoConfig, parameters.getNetworkParameters(), threadRootNode);
-            lfNetworksList.add(0, lfNetworks); // FIXME to workaround variant removal bug, to fix in core
-        } finally {
-            networkLock.unlock();
-        }
-        LOGGER.info("REBUILD mode partition {}: lock wait {} ms, in-lock propagation+parameters+build {} ms",
-                partitionNum, lockWaitMs, lockStopwatch.elapsed(TimeUnit.MILLISECONDS) - lockWaitMs);
-
-        if (partitionNum == 0 && detachFirstPartitionReporting) {
-            // the first partition's networks were built under the main report (network info
-            // belongs there); their simulation nodes must go to a detached thread root so the
-            // ordered merge can re-insert them in contingency order
-            reportNodes.set(0, detachSimulationReporting(lfNetworks.getList(), rootReportNode));
-        }
-
-        // run simulation on largest network
-        Stopwatch partitionStopwatch = Stopwatch.createStarted();
-        contingencyRunner.run(partitionNum, lfNetworks, propagatedContingencies, parameters, false);
-        LOGGER.info("REBUILD mode partition {} simulated in {} ms", partitionNum, partitionStopwatch.elapsed(TimeUnit.MILLISECONDS));
         return null;
     }
 

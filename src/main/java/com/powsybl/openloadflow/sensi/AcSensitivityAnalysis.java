@@ -350,16 +350,11 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                 };
                 ContingencyMultiThreadHelper.ReportMerger reportMerger = ContingencyMultiThreadHelper::mergeReportThreadResults;
 
-                if (sensitivityAnalysisParametersExt.getNetworkPerThreadMode() == OpenSensitivityAnalysisParameters.NetworkPerThreadMode.COPY) {
-                    // build the networks once with the topo config covering all the contingencies (like a
-                    // single-threaded analysis) and give each partition its own deep copy; no presolver:
-                    // the sensitivity base load flow is entangled with the factor states computation
-                    ContingencyMultiThreadHelper.buildOnceCopyAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, new LfTopoConfig(),
-                            parameterProvider, null, contingencyRunner, sensiReportNode, reportMerger, false, executor);
-                } else {
-                    ContingencyMultiThreadHelper.createLFNetworksPerContingencyPartitionAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, new LfTopoConfig(),
-                            parameterProvider, contingencyRunner, sensiReportNode, reportMerger, executor);
-                }
+                // build the networks once with the topo config covering all the contingencies (like a
+                // single-threaded analysis) and give each partition its own deep copy; no presolver:
+                // the sensitivity base load flow is entangled with the factor states computation
+                ContingencyMultiThreadHelper.buildOnceCopyAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, new LfTopoConfig(),
+                        parameterProvider, null, contingencyRunner, sensiReportNode, reportMerger, false, executor);
             }
         }
     }

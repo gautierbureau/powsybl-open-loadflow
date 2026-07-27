@@ -33,8 +33,6 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
 
     private boolean startWithFrozenACEmulation = START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE;
 
-    private NetworkPerThreadMode networkPerThreadMode = NETWORK_PER_THREAD_MODE_DEFAULT_VALUE;
-
     private ContingencyPartitioningMode contingencyPartitioningMode = CONTINGENCY_PARTITIONING_MODE_DEFAULT_VALUE;
 
     /**
@@ -50,16 +48,6 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
         ROUND_ROBIN
     }
 
-    /**
-     * How each additional thread of a multi-threaded analysis gets its own LfNetwork:
-     * {@link #COPY} deep copies the network built once (faster, results identical to single thread),
-     * {@link #REBUILD} rebuilds it from the IIDM network under a lock (legacy behavior).
-     */
-    public enum NetworkPerThreadMode {
-        COPY,
-        REBUILD
-    }
-
     public static final String CREATE_RESULT_EXTENSION_PARAM_NAME = "createResultExtension";
     public static final boolean CREATE_RESULT_EXTENSION_DEFAULT_VALUE = false;
     public static final String CONTINGENCY_PROPAGATION_PARAM_NAME = "contingencyPropagation";
@@ -72,17 +60,14 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
     public static final boolean START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE = true;
     public static final String CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME = "contingencyActivePowerLossDistribution";
     public static final String CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE = "Default";
-    public static final String NETWORK_PER_THREAD_MODE_PARAM_NAME = "networkPerThreadMode";
-    public static final NetworkPerThreadMode NETWORK_PER_THREAD_MODE_DEFAULT_VALUE = NetworkPerThreadMode.COPY;
     public static final String CONTINGENCY_PARTITIONING_MODE_PARAM_NAME = "contingencyPartitioningMode";
-    public static final ContingencyPartitioningMode CONTINGENCY_PARTITIONING_MODE_DEFAULT_VALUE = ContingencyPartitioningMode.SLICE;
+    public static final ContingencyPartitioningMode CONTINGENCY_PARTITIONING_MODE_DEFAULT_VALUE = ContingencyPartitioningMode.ROUND_ROBIN;
     public static final List<String> SPECIFIC_PARAMETERS_NAMES = List.of(CREATE_RESULT_EXTENSION_PARAM_NAME,
             CONTINGENCY_PROPAGATION_PARAM_NAME,
             THREAD_COUNT_PARAM_NAME,
             DC_FAST_MODE_PARAM_NAME,
             CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME,
             START_WITH_FROZEN_AC_EMULATION_PARAM_NAME,
-            NETWORK_PER_THREAD_MODE_PARAM_NAME,
             CONTINGENCY_PARTITIONING_MODE_PARAM_NAME);
 
     @Override
@@ -148,15 +133,6 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
         return this;
     }
 
-    public NetworkPerThreadMode getNetworkPerThreadMode() {
-        return networkPerThreadMode;
-    }
-
-    public OpenSecurityAnalysisParameters setNetworkPerThreadMode(NetworkPerThreadMode networkPerThreadMode) {
-        this.networkPerThreadMode = Objects.requireNonNull(networkPerThreadMode);
-        return this;
-    }
-
     public ContingencyPartitioningMode getContingencyPartitioningMode() {
         return contingencyPartitioningMode;
     }
@@ -189,7 +165,6 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
                         .setContingencyActivePowerLossDistribution(config.getStringProperty(CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME,
                             CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE))
                         .setStartWithFrozenACEmulation(config.getBooleanProperty(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME, START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE))
-                        .setNetworkPerThreadMode(config.getEnumProperty(NETWORK_PER_THREAD_MODE_PARAM_NAME, NetworkPerThreadMode.class, NETWORK_PER_THREAD_MODE_DEFAULT_VALUE))
                         .setContingencyPartitioningMode(config.getEnumProperty(CONTINGENCY_PARTITIONING_MODE_PARAM_NAME,
                             ContingencyPartitioningMode.class, CONTINGENCY_PARTITIONING_MODE_DEFAULT_VALUE)));
         return parameters;
@@ -213,8 +188,6 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
                 .ifPresent(this::setContingencyActivePowerLossDistribution);
         Optional.ofNullable(properties.get(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME))
                 .ifPresent(value -> this.setStartWithFrozenACEmulation(Boolean.parseBoolean(value)));
-        Optional.ofNullable(properties.get(NETWORK_PER_THREAD_MODE_PARAM_NAME))
-                .ifPresent(value -> this.setNetworkPerThreadMode(NetworkPerThreadMode.valueOf(value)));
         Optional.ofNullable(properties.get(CONTINGENCY_PARTITIONING_MODE_PARAM_NAME))
                 .ifPresent(value -> this.setContingencyPartitioningMode(ContingencyPartitioningMode.valueOf(value)));
         return this;

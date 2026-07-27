@@ -243,13 +243,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             ContingencyMultiThreadHelper.ReportMerger reportMerger = roundRobinPartitioning
                     ? (rootNode, threadNodes) -> ContingencyMultiThreadHelper.mergeReportThreadResultsOrdered(rootNode, threadNodes, contingencyPositions)
                     : ContingencyMultiThreadHelper::mergeReportThreadResults;
-            if (securityAnalysisParametersExt.getNetworkPerThreadMode() == OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY) {
-                ContingencyMultiThreadHelper.buildOnceCopyAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
-                        parameterProvider, presolver, contingencyRunner, saReportNode, reportMerger, roundRobinPartitioning, executor);
-            } else {
-                ContingencyMultiThreadHelper.createLFNetworksPerContingencyPartitionAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
-                        parameterProvider, contingencyRunner, saReportNode, reportMerger, roundRobinPartitioning, executor);
-            }
+            ContingencyMultiThreadHelper.buildOnceCopyAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
+                    parameterProvider, presolver, contingencyRunner, saReportNode, reportMerger, roundRobinPartitioning, executor);
 
             // we just need to merge post contingency and operator strategy results, all pre contingency are the same
             List<PostContingencyResult> postContingencyResults = new ArrayList<>();
