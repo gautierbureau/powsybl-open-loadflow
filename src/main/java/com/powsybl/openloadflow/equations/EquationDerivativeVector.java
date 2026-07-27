@@ -63,7 +63,24 @@ class EquationDerivativeVector {
         }
     }
 
-    void update(EquationArray<?, ?> equationArray) {
+    /**
+     * Refresh the cached derivative variable rows from the (mutable) variable row references.
+     * Rows only change when the equation system index is re-numbered (variable added/removed,
+     * or Fast Decoupled re-ordering), so this is called only when the rows have been invalidated,
+     * not on every Jacobian value update. This avoids a per-non-zero scattered pointer chase
+     * through the boxed {@link Number} row references on every Newton-Raphson iteration.
+     */
+    void refreshRows() {
+        for (int i = 0; i < rows.length; i++) {
+            rows[i] = rowRefs[i].intValue();
+        }
+    }
+
+    /**
+     * Update the derivative values (which change on every state update). Rows are handled
+     * separately by {@link #refreshRows()}.
+     */
+    void updateValues(EquationArray<?, ?> equationArray) {
         var termArrays = equationArray.getTermArrays();
         for (int i = 0; i < termNums.length; i++) {
             int termNum = termNums[i];
@@ -78,9 +95,6 @@ class EquationDerivativeVector {
             } else {
                 values[i] = 0.0;
             }
-        }
-        for (int i = 0; i < termNums.length; i++) {
-            rows[i] = rowRefs[i].intValue();
         }
     }
 }
