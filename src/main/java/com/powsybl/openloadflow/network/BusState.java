@@ -7,8 +7,7 @@
  */
 package com.powsybl.openloadflow.network;
 
-import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.List;
 
 /**
  * @author Florian Dupuy {@literal <florian.dupuy at rte-france.com>}
@@ -27,7 +26,8 @@ public class BusState extends BusDcState {
     private final double controllerShuntB;
     private final double controllerShuntG;
     private final double svcShuntB;
-    private final Map<String, LfGenerator.GeneratorControlType> generatorsControlType;
+    // generator control type indexed by position in bus.getGenerators() (see BusDcState)
+    private final LfGenerator.GeneratorControlType[] generatorsControlType;
     private final LfBus.QLimitType qLimitType;
 
     private static final class LoadState extends LoadDcState {
@@ -65,7 +65,11 @@ public class BusState extends BusDcState {
         shuntG = shunt != null ? shunt.getG() : Double.NaN;
         LfShunt svcShunt = bus.getSvcShunt().orElse(null);
         svcShuntB = svcShunt != null ? svcShunt.getB() : Double.NaN;
-        this.generatorsControlType = bus.getGenerators().stream().collect(Collectors.toMap(LfGenerator::getId, LfGenerator::getGeneratorControlType));
+        List<LfGenerator> generators = bus.getGenerators();
+        this.generatorsControlType = new LfGenerator.GeneratorControlType[generators.size()];
+        for (int i = 0; i < generators.size(); i++) {
+            this.generatorsControlType[i] = generators.get(i).getGeneratorControlType();
+        }
         qLimitType = bus.getQLimitType().orElse(null);
     }
 
@@ -102,8 +106,22 @@ public class BusState extends BusDcState {
         if (!Double.isNaN(svcShuntB)) {
             element.getSvcShunt().orElseThrow().setB(svcShuntB);
         }
-        element.getGenerators().forEach(g -> g.setGeneratorControlType(generatorsControlType.get(g.getId())));
+        List<LfGenerator> generators = element.getGenerators();
+        for (int i = 0; i < generators.size(); i++) {
+            generators.get(i).setGeneratorControlType(generatorsControlType[i]);
+        }
         element.setQLimitType(qLimitType);
+    }
+
+    /**
+     * Restore only the bus voltage (magnitude and angle), leaving the rest of the bus state untouched. A security
+     * analysis that warm-starts each contingency from the network state needs the base voltage back on every bus for
+     * reproducible results, while the rest of the per-bus state only needs restoring on the buses a contingency
+     * actually modified (see {@link NetworkState#restore(java.util.Collection, java.util.Collection, java.util.Collection)}).
+     */
+    public void restoreVoltage() {
+        element.setAngle(angle);
+        element.setV(voltage);
     }
 
     public static BusState save(LfBus bus) {

@@ -27,6 +27,10 @@ public class ElementState<T extends LfElement> {
         disabled = element.isDisabled();
     }
 
+    T getElement() {
+        return element;
+    }
+
     public void restore() {
         element.setDisabled(disabled);
     }
