@@ -116,9 +116,13 @@ public class LimitViolationManager {
     }
 
     private void detectBranchCurrentViolations(LfBranch branch, LfBus bus, Function<LfBranch, Evaluable> iGetter, LfBranch.LfLimitsGroup limitsGroup, TwoSides side) {
+        double i = iGetter.apply(branch).eval();
+        if (i <= limitsGroup.getMinReducedValue()) {
+            // below the lowest limit of the group: no limit can be violated, skip the scan of the sorted limits
+            return;
+        }
         List<LfBranch.LfLimit> limits = limitsGroup.getSortedLimits();
         String operationalLimitsGroupId = limitsGroup.getOperationalLimitsGroupId();
-        double i = iGetter.apply(branch).eval();
         for (LfBranch.LfLimit temporaryLimit : limits) {
             if (i > temporaryLimit.getReducedValue()) {
                 addBranchLimitViolation(createLimitViolation(branch, operationalLimitsGroupId, temporaryLimit, LimitViolationType.CURRENT, PerUnit.ib(bus.getNominalV()), i, side));
@@ -128,9 +132,13 @@ public class LimitViolationManager {
     }
 
     private void detectBranchActivePowerViolations(LfBranch branch, Function<LfBranch, Evaluable> pGetter, LfBranch.LfLimitsGroup limitsGroup, TwoSides side) {
+        double p = pGetter.apply(branch).eval();
+        if (Math.abs(p) <= limitsGroup.getMinReducedValue()) {
+            // below the lowest limit of the group: no limit can be violated, skip the scan of the sorted limits
+            return;
+        }
         List<LfBranch.LfLimit> limits = limitsGroup.getSortedLimits();
         String operationalLimitsGroupId = limitsGroup.getOperationalLimitsGroupId();
-        double p = pGetter.apply(branch).eval();
         for (LfBranch.LfLimit temporaryLimit : limits) {
             if (Math.abs(p) > temporaryLimit.getReducedValue()) {
                 addBranchLimitViolation(createLimitViolation(branch, operationalLimitsGroupId, temporaryLimit, LimitViolationType.ACTIVE_POWER, PerUnit.SB, p, side));
@@ -140,10 +148,14 @@ public class LimitViolationManager {
     }
 
     private void detectBranchApparentPowerViolations(LfBranch branch, ToDoubleFunction<LfBranch> sGetter, LfBranch.LfLimitsGroup limitsGroup, TwoSides side) {
-        List<LfBranch.LfLimit> limits = limitsGroup.getSortedLimits();
-        String operationalLimitsGroupId = limitsGroup.getOperationalLimitsGroupId();
         //Apparent power is not relevant for fictitious branches and may be NaN
         double s = sGetter.applyAsDouble(branch);
+        if (s <= limitsGroup.getMinReducedValue()) {
+            // below the lowest limit of the group: no limit can be violated, skip the scan of the sorted limits
+            return;
+        }
+        List<LfBranch.LfLimit> limits = limitsGroup.getSortedLimits();
+        String operationalLimitsGroupId = limitsGroup.getOperationalLimitsGroupId();
         if (!Double.isNaN(s)) {
             for (LfBranch.LfLimit temporaryLimit : limits) {
                 if (s > temporaryLimit.getReducedValue()) {
