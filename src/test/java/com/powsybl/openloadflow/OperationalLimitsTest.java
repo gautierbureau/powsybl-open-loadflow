@@ -215,4 +215,23 @@ class OperationalLimitsTest extends AbstractLoadFlowNetworkFactory {
         assertEquals(116.251, branch1.getP1().eval() * PerUnit.SB, DELTA);
         assertEquals(-11.5153, branch1.getP2().eval() * PerUnit.SB, DELTA);
     }
+
+    /**
+     * The lowest reduced limit of a group is what lets the violation detection rule the whole group out with a single
+     * comparison, so it has to be the real minimum: it is taken over all the limits (not assumed to be the permanent
+     * one, which the sorted list happens to put last) and it accounts for the limit reductions.
+     */
+    @Test
+    void testLimitsGroupMinReducedValue() {
+        LfBranch.LfLimit permanentLimit = LfBranch.LfLimit.createPermanentLimit("permanent", 100d, 1d);
+        LfBranch.LfLimit temporaryLimit = LfBranch.LfLimit.createTemporaryLimit("temporary", 60, 150d, 1d);
+        assertEquals(100d, new LfBranch.LfLimitsGroup(List.of(temporaryLimit, permanentLimit), "group").getMinReducedValue(), DELTA);
+
+        // a reduction can bring a temporary limit below the permanent one: the minimum is then the reduced temporary one
+        LfBranch.LfLimit reducedTemporaryLimit = LfBranch.LfLimit.createTemporaryLimit("temporary", 60, 150d, 0.5d);
+        assertEquals(75d, new LfBranch.LfLimitsGroup(List.of(reducedTemporaryLimit, permanentLimit), "group").getMinReducedValue(), DELTA);
+
+        // a group without any limit can never be violated
+        assertEquals(Double.POSITIVE_INFINITY, new LfBranch.LfLimitsGroup(List.of(), "group").getMinReducedValue());
+    }
 }

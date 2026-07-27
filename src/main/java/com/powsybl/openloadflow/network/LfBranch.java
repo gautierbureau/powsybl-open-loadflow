@@ -44,9 +44,16 @@ public interface LfBranch extends LfElement {
 
         private final String operationalLimitsGroupId;
 
+        private final double minReducedValue;
+
         public LfLimitsGroup(List<LfLimit> sortedLimits, String operationalLimitsGroupId) {
             this.sortedLimits = sortedLimits;
             this.operationalLimitsGroupId = operationalLimitsGroupId;
+            double min = Double.POSITIVE_INFINITY;
+            for (LfLimit limit : sortedLimits) {
+                min = Math.min(min, limit.getReducedValue());
+            }
+            this.minReducedValue = min;
         }
 
         public String getOperationalLimitsGroupId() {
@@ -55,6 +62,16 @@ public interface LfBranch extends LfElement {
 
         public List<LfLimit> getSortedLimits() {
             return sortedLimits;
+        }
+
+        /**
+         * The lowest reduced value of the group's limits (positive infinity when the group carries no limit). A flow
+         * that does not exceed it cannot violate any limit of the group, so a single comparison rules the whole group
+         * out. Limit values and their reductions are fixed once the group is created, so this is computed once here
+         * instead of on every violation detection.
+         */
+        public double getMinReducedValue() {
+            return minReducedValue;
         }
 
         private static double getScaleForLimitType(LimitType type, LfBus bus) {
