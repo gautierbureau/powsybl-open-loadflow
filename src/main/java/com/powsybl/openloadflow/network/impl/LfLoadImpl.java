@@ -267,7 +267,12 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
 
     @Override
     public void setOriginalLoadDisabled(String originalId, boolean disabled) {
-        loadsDisablingStatus.put(originalId, disabled);
+        Boolean previous = loadsDisablingStatus.put(originalId, disabled);
+        if (!Objects.equals(previous, disabled)) {
+            for (LfNetworkListener listener : bus.getNetwork().getListeners()) {
+                listener.onLoadDisablingStatusChange(this);
+            }
+        }
     }
 
     @Override
