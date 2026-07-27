@@ -18,6 +18,8 @@ import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.loadflow.resultswriter.NetworkResultWriter;
 import com.powsybl.loadflow.resultswriter.NetworkResultWriterFactory;
+import com.powsybl.math.matrix.DenseMatrix;
+import com.powsybl.math.matrix.MatrixException;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
@@ -29,6 +31,9 @@ import com.powsybl.openloadflow.dc.DcLoadFlowContext;
 import com.powsybl.openloadflow.dc.DcLoadFlowEngine;
 import com.powsybl.openloadflow.dc.DcLoadFlowParameters;
 import com.powsybl.openloadflow.dc.DcLoadFlowResult;
+import com.powsybl.openloadflow.dc.equations.DcEquationType;
+import com.powsybl.openloadflow.dc.equations.DcVariableType;
+import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -60,6 +65,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -307,30 +313,244 @@ public final class TimeSeriesLoadFlow {
                 runs.add(new NetworkRun(lfNetwork, engine, setpoints, baseState));
             }
 
-            List<StepResult> results = new ArrayList<>();
-            for (int step = range[0]; step < range[1]; step++) {
-                Instant timestamp = index.getInstantAt(step);
-                String stateId = timestamp.toString();
-                LoadFlowResult.ComponentResult.Status status = runs.isEmpty()
-                        ? LoadFlowResult.ComponentResult.Status.FAILED
-                        : LoadFlowResult.ComponentResult.Status.CONVERGED;
-                double distributedActivePower = 0;
-                double slackBusActivePowerMismatch = 0;
-                for (NetworkRun run : runs) {
-                    run.baseState().restore();
-                    applySetpoints(run.setpoints(), step, networkParameters);
-                    SolveResult solveResult = run.engine().solve();
-                    status = mergeStatus(status, solveResult.status());
-                    distributedActivePower += solveResult.distributedActivePower();
-                    slackBusActivePowerMismatch += solveResult.slackBusActivePowerMismatch();
-                    emit(run.lfNetwork(), stateId, solveResult.status(), loadFlowModel, dcPowerFactor, parameters, writer);
-                }
-                results.add(new StepResult(step, timestamp, status, slackBusActivePowerMismatch, distributedActivePower));
-            }
-            return results;
+            StepContext stepContext = new StepContext(runs, index, loadFlowModel, networkParameters, dcPowerFactor, parameters, writer);
+            // The batched DC path is an optimization that must stream byte-identical rows to the per-step path, so it
+            // is taken only when every run can be batched (see StepEngine.batchableDcContext) and the caller asked for
+            // it; otherwise, and for any chunk the batch cannot solve cleanly, the per-step path is the reference.
+            boolean batched = parameters.isDcBatchedSolve() && !runs.isEmpty()
+                    && runs.stream().allMatch(run -> run.engine().batchableDcContext().isPresent());
+            return batched ? runStepsBatchedDc(stepContext, range)
+                    : driveChunk(stepContext, range[0], range[1], new PerStepSolver(stepContext));
         } finally {
             runs.forEach(run -> run.engine().close());
         }
+    }
+
+    /** Everything a step needs beyond its index: the networks to solve and where to stream their results. */
+    private record StepContext(List<NetworkRun> runs, TimeSeriesIndex index, LoadFlowModel loadFlowModel,
+                               LfNetworkParameters networkParameters, double dcPowerFactor,
+                               TimeSeriesLoadFlowParameters parameters, NetworkResultWriter writer) {
+    }
+
+    // A chunk's worth of steps is solved together by the batched solver: the memory it holds is buses x DC_BATCH_SIZE
+    // per run, so it caps the batch rather than letting it grow with the partition length.
+    private static final int DC_BATCH_SIZE = 256;
+
+    /**
+     * One run's result for one step, once its network has been left in that step's solved state: the status and
+     * accounting the per-step summary sums, and the generator rows to stream ({@code null} when generators are not
+     * streamed). Branch and bus rows are not carried here -- they are read straight from the solved network.
+     */
+    private record RunStepOutcome(LoadFlowResult.ComponentResult.Status status, double slackBusActivePowerMismatch,
+                                  double distributedActivePower, List<GeneratorRow> generatorRows) {
+    }
+
+    /**
+     * How a chunk of steps is solved. The two implementations are the only thing that differs between the per-step and
+     * the batched paths: {@link #driveChunk} owns the shared loop that, for each step and run, streams the rows and
+     * builds the per-step summary. A solver leaves a run's network in a step's solved state and reports its outcome; a
+     * batched solver does the heavy lifting up front in {@link #prepareChunk}.
+     */
+    private interface StepSolver {
+
+        /**
+         * Prepare to solve steps {@code [from, to)}. Returns {@code false} to say this solver cannot serve the chunk --
+         * only the batched solver does, on a slack distribution failure or a singular system -- so the caller falls
+         * back to the per-step path.
+         */
+        boolean prepareChunk(int from, int to);
+
+        /** Leave run {@code runIndex}'s network in step {@code step}'s solved state and report its outcome. */
+        RunStepOutcome solveRunAtStep(int step, int runIndex);
+    }
+
+    /**
+     * The shared driver of both paths: for each step, for each run, ask the solver to leave the run's network in that
+     * step's solved state, stream its branch, bus and generator rows, and fold its status and accounting into the
+     * per-step summary. Returns {@code null} if the solver declined the chunk (batched only), so the caller can fall
+     * back.
+     */
+    private static List<StepResult> driveChunk(StepContext ctx, int from, int to, StepSolver solver) {
+        if (!solver.prepareChunk(from, to)) {
+            return null;
+        }
+        List<NetworkRun> runs = ctx.runs();
+        List<StepResult> results = new ArrayList<>(to - from);
+        for (int step = from; step < to; step++) {
+            Instant timestamp = ctx.index().getInstantAt(step);
+            String stateId = timestamp.toString();
+            LoadFlowResult.ComponentResult.Status status = runs.isEmpty()
+                    ? LoadFlowResult.ComponentResult.Status.FAILED
+                    : LoadFlowResult.ComponentResult.Status.CONVERGED;
+            double distributedActivePower = 0;
+            double slackBusActivePowerMismatch = 0;
+            for (int r = 0; r < runs.size(); r++) {
+                LfNetwork lfNetwork = runs.get(r).lfNetwork();
+                RunStepOutcome outcome = solver.solveRunAtStep(step, r);
+                String statusName = outcome.status().name();
+                emitBranchesAndBuses(lfNetwork, stateId, statusName, ctx.loadFlowModel(), ctx.dcPowerFactor(),
+                        ctx.parameters(), ctx.writer());
+                if (outcome.generatorRows() != null) {
+                    writeGeneratorRows(ctx.writer(), stateId, statusName, outcome.generatorRows());
+                }
+                status = mergeStatus(status, outcome.status());
+                distributedActivePower += outcome.distributedActivePower();
+                slackBusActivePowerMismatch += outcome.slackBusActivePowerMismatch();
+            }
+            results.add(new StepResult(step, timestamp, status, slackBusActivePowerMismatch, distributedActivePower));
+        }
+        return results;
+    }
+
+    /**
+     * The reference per-step path: each run restores its base state, applies the step, and solves on its own -- the
+     * only path for AC (Newton-Raphson has no batchable right hand side) and the fallback for any chunk the batched
+     * solver declines. Stateless across steps, so it holds no per-chunk memory.
+     */
+    private static final class PerStepSolver implements StepSolver {
+
+        private final StepContext ctx;
+
+        private PerStepSolver(StepContext ctx) {
+            this.ctx = ctx;
+        }
+
+        @Override
+        public boolean prepareChunk(int from, int to) {
+            return true;
+        }
+
+        @Override
+        public RunStepOutcome solveRunAtStep(int step, int runIndex) {
+            NetworkRun run = ctx.runs().get(runIndex);
+            run.baseState().restore();
+            applySetpoints(run.setpoints(), step, ctx.networkParameters());
+            SolveResult solveResult = run.engine().solve();
+            List<GeneratorRow> generatorRows = ctx.parameters().isStreamGeneratorResults()
+                    ? captureGeneratorRows(run.lfNetwork()) : null;
+            return new RunStepOutcome(solveResult.status(), solveResult.slackBusActivePowerMismatch(),
+                    solveResult.distributedActivePower(), generatorRows);
+        }
+    }
+
+    /**
+     * The batched DC solver: in {@link #prepareChunk} it assembles, for each run, one right hand side column per step
+     * and solves the whole chunk at once on the shared factorization -- one linear solve per chunk per run instead of
+     * one per step. Because the streamed row order is step-outer, run-inner while that solve is per run, it captures
+     * each step's dispatch and accounting in that same pass; {@link #solveRunAtStep} then only installs the already
+     * solved column, with no second slack distribution -- which is what makes the batch worth its overhead.
+     */
+    private static final class BatchDcSolver implements StepSolver {
+
+        private final StepContext ctx;
+
+        private final boolean streamGenerators;
+
+        private int from;
+
+        private List<DenseMatrix> solvedPerRun;
+
+        private List<double[]> distributedPerRun;
+
+        private List<double[]> mismatchPerRun;
+
+        private List<List<List<GeneratorRow>>> generatorRowsPerRun;
+
+        private BatchDcSolver(StepContext ctx) {
+            this.ctx = ctx;
+            this.streamGenerators = ctx.parameters().isStreamGeneratorResults();
+        }
+
+        @Override
+        public boolean prepareChunk(int from, int to) {
+            this.from = from;
+            int chunkLen = to - from;
+            List<NetworkRun> runs = ctx.runs();
+            solvedPerRun = new ArrayList<>(runs.size());
+            distributedPerRun = new ArrayList<>(runs.size());
+            mismatchPerRun = new ArrayList<>(runs.size());
+            generatorRowsPerRun = new ArrayList<>(runs.size());
+            for (NetworkRun run : runs) {
+                DcLoadFlowContext context = run.engine().batchableDcContext().orElseThrow();
+                DenseMatrix rhs = null;
+                double[] distributed = new double[chunkLen];
+                double[] mismatch = new double[chunkLen];
+                List<List<GeneratorRow>> generatorRows = streamGenerators ? new ArrayList<>(chunkLen) : null;
+                for (int step = from; step < to; step++) {
+                    run.baseState().restore();
+                    applySetpoints(run.setpoints(), step, ctx.networkParameters());
+                    DcLoadFlowEngine.PreparedTargets prepared = new DcLoadFlowEngine(context).prepareTargets(false);
+                    if (prepared.slackDistributionFailed()) {
+                        return false;
+                    }
+                    int index = step - from;
+                    distributed[index] = prepared.distributedActivePower();
+                    // in DC the solve moves only the angles, leaving the generation and load targets the mismatch is a
+                    // sum of, so the post-solve mismatch buildDcLoadFlowResult would report equals this pre-solve one
+                    mismatch[index] = DcLoadFlowEngine.getActivePowerMismatch(run.lfNetwork().getBuses());
+                    if (streamGenerators) {
+                        generatorRows.add(captureGeneratorRows(run.lfNetwork()));
+                    }
+                    double[] column = prepared.targetVectorArray();
+                    if (rhs == null) {
+                        rhs = new DenseMatrix(column.length, chunkLen);
+                    }
+                    for (int row = 0; row < column.length; row++) {
+                        rhs.set(row, index, column[row]);
+                    }
+                }
+                try {
+                    // the shared factorization is built once, on first use, and reused for every column of the chunk --
+                    // which is the whole point, and what the DC jacobian freeze made safe across steps
+                    context.getJacobianMatrix().solveTransposed(rhs);
+                } catch (MatrixException e) {
+                    return false;
+                }
+                solvedPerRun.add(rhs);
+                distributedPerRun.add(distributed);
+                mismatchPerRun.add(mismatch);
+                generatorRowsPerRun.add(generatorRows);
+            }
+            return true;
+        }
+
+        @Override
+        public RunStepOutcome solveRunAtStep(int step, int runIndex) {
+            NetworkRun run = ctx.runs().get(runIndex);
+            DcLoadFlowContext context = run.engine().batchableDcContext().orElseThrow();
+            EquationSystem<DcVariableType, DcEquationType> equationSystem = context.getEquationSystem();
+            int index = step - from;
+            double[] solution = extractColumn(solvedPerRun.get(runIndex), index);
+            equationSystem.getStateVector().set(solution);
+            DcLoadFlowEngine.updateNetwork(run.lfNetwork(), equationSystem, solution);
+            List<GeneratorRow> generatorRows = streamGenerators ? generatorRowsPerRun.get(runIndex).get(index) : null;
+            return new RunStepOutcome(LoadFlowResult.ComponentResult.Status.CONVERGED,
+                    mismatchPerRun.get(runIndex)[index], distributedPerRun.get(runIndex)[index], generatorRows);
+        }
+    }
+
+    /**
+     * The batched DC path: solve a partition's steps {@link #DC_BATCH_SIZE} at a time. Each chunk goes through the same
+     * {@link #driveChunk} as the per-step path, only with the batched solver; a chunk the batched solver declines (a
+     * slack distribution failure, or a singular system) is redone with the per-step solver, so its streamed rows are
+     * exactly the per-step path's.
+     */
+    private static List<StepResult> runStepsBatchedDc(StepContext ctx, int[] range) {
+        List<StepResult> results = new ArrayList<>();
+        for (int from = range[0]; from < range[1]; from += DC_BATCH_SIZE) {
+            int to = Math.min(from + DC_BATCH_SIZE, range[1]);
+            List<StepResult> chunk = driveChunk(ctx, from, to, new BatchDcSolver(ctx));
+            results.addAll(chunk != null ? chunk : driveChunk(ctx, from, to, new PerStepSolver(ctx)));
+        }
+        return results;
+    }
+
+    private static double[] extractColumn(DenseMatrix matrix, int column) {
+        double[] values = new double[matrix.getRowCount()];
+        for (int row = 0; row < values.length; row++) {
+            values[row] = matrix.get(row, column);
+        }
+        return values;
     }
 
     /**
@@ -441,10 +661,14 @@ public final class TimeSeriesLoadFlow {
         return info;
     }
 
-    private static void emit(LfNetwork lfNetwork, String stateId, LoadFlowResult.ComponentResult.Status status,
-                             LoadFlowModel loadFlowModel, double dcPowerFactor, TimeSeriesLoadFlowParameters parameters,
-                             NetworkResultWriter writer) {
-        String statusName = status.name();
+    /**
+     * The branch and bus rows, read from the network's state (bus angles, branch flows) once a step is solved. Split
+     * from the generator rows, which read the injection dispatch: the batched path streams these from the installed
+     * solution but takes the generator rows from what it captured before its dispatch-less second pass.
+     */
+    private static void emitBranchesAndBuses(LfNetwork lfNetwork, String stateId, String statusName,
+                                             LoadFlowModel loadFlowModel, double dcPowerFactor,
+                                             TimeSeriesLoadFlowParameters parameters, NetworkResultWriter writer) {
         if (parameters.isStreamBranchResults()) {
             Map<String, LfBranch.LfBranchResults> zeroImpedanceFlows = computeZeroImpedanceFlows(lfNetwork, loadFlowModel, dcPowerFactor);
             LfBranch.BranchFlowConsumer sink = (branchId, p1, q1, i1, p2, q2, i2, flowTransfer) ->
@@ -463,16 +687,33 @@ public final class TimeSeriesLoadFlow {
                 }
             }
         }
-        if (parameters.isStreamGeneratorResults()) {
-            for (LfBus bus : lfNetwork.getBuses()) {
-                if (!bus.isDisabled()) {
-                    for (LfGenerator generator : bus.getGenerators()) {
-                        // targetP: the requested setpoint (before slack distribution); p: the actual power after it.
-                        writer.writeGeneratorResult(stateId, "", statusName, generator.getId(),
-                                generator.getInitialTargetP() * PerUnit.SB, generator.getTargetP() * PerUnit.SB);
-                    }
+    }
+
+    /**
+     * One generator's streamed row: its id, requested set point ({@code targetP}) and dispatched power ({@code p}),
+     * both in MW. The batched path captures these in its first pass, while the network holds the step's dispatch, so
+     * its second pass need not reconstruct it.
+     */
+    private record GeneratorRow(String id, double targetP, double p) {
+    }
+
+    /** Snapshots a network's generator dispatch in the same order {@link #emit} streams it, for later writing. */
+    private static List<GeneratorRow> captureGeneratorRows(LfNetwork lfNetwork) {
+        List<GeneratorRow> rows = new ArrayList<>();
+        for (LfBus bus : lfNetwork.getBuses()) {
+            if (!bus.isDisabled()) {
+                for (LfGenerator generator : bus.getGenerators()) {
+                    rows.add(new GeneratorRow(generator.getId(), generator.getInitialTargetP() * PerUnit.SB,
+                            generator.getTargetP() * PerUnit.SB));
                 }
             }
+        }
+        return rows;
+    }
+
+    private static void writeGeneratorRows(NetworkResultWriter writer, String stateId, String statusName, List<GeneratorRow> rows) {
+        for (GeneratorRow row : rows) {
+            writer.writeGeneratorResult(stateId, "", statusName, row.id(), row.targetP(), row.p());
         }
     }
 
@@ -507,12 +748,25 @@ public final class TimeSeriesLoadFlow {
                 @Override
                 public StepEngine createEngine(LfNetwork lfNetwork) {
                     DcLoadFlowContext context = new DcLoadFlowContext(lfNetwork, dcParameters);
+                    // A step is batchable only when nothing beyond the target vector moves between steps: no active
+                    // outer loop re-solves with a changed right hand side, so the whole partition is one linear solve
+                    // on the shared factorization. isNeeded is evaluated once, on the as-built network -- the plan
+                    // changes injection targets, not the topology or controls the outer loops key off. Zero-impedance
+                    // subnetworks are excluded too: their branch flows are recomputed from the per-step bus injections,
+                    // which the batched path's dispatch-less second pass no longer has to hand.
+                    boolean batchable = dcParameters.getOuterLoops().stream().noneMatch(o -> o.isNeeded(context))
+                            && lfNetwork.getZeroImpedanceNetworks(LoadFlowModel.DC).isEmpty();
                     return new StepEngine() {
                         @Override
                         public SolveResult solve() {
                             DcLoadFlowResult result = new DcLoadFlowEngine(context).run();
                             return new SolveResult(result.toComponentResultStatus().status(),
                                     result.getSlackBusActivePowerMismatch(), result.getDistributedActivePower());
+                        }
+
+                        @Override
+                        public Optional<DcLoadFlowContext> batchableDcContext() {
+                            return batchable ? Optional.of(context) : Optional.empty();
                         }
 
                         @Override
@@ -602,6 +856,16 @@ public final class TimeSeriesLoadFlow {
 
     private interface StepEngine extends AutoCloseable {
         SolveResult solve();
+
+        /**
+         * The DC context to batch this engine's steps on, present only when batching would be equivalent to solving
+         * each step on its own: a DC model with no active outer loop, whose steps are a single linear solve on a
+         * shared factorization. Empty for AC, or for a DC network with an active outer loop (its per-step re-solves
+         * cannot be pre-batched) -- the caller then keeps the per-step path.
+         */
+        default Optional<DcLoadFlowContext> batchableDcContext() {
+            return Optional.empty();
+        }
 
         @Override
         void close();
