@@ -178,6 +178,11 @@ public class LfShuntImpl extends AbstractLfShunt {
     }
 
     @Override
+    public LfBus getBus() {
+        return bus;
+    }
+
+    @Override
     public double getB() {
         return b;
     }
