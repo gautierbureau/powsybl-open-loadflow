@@ -33,11 +33,14 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 /**
@@ -82,6 +85,20 @@ public final class ContingencyMultiThreadHelper {
          *                  networks and the runner can skip its own pre-contingency simulation
          */
         void run(int partitionNum, LfNetworkList lfNetworks, List<PropagatedContingency> propagatedContingencies, P parameters, boolean presolved);
+    }
+
+    /**
+     * Runner for the shared-queue mode ({@link #buildOnceCopyAndRunQueue}): each worker owns its own
+     * network copy and pulls its next contingency from {@code sharedQueue} (drained concurrently by all
+     * the workers) until it is empty.
+     *
+     * @param allPropagatedContingencies the full contingency list (shared by all workers, needed e.g. to
+     *                                    index operator strategies); the per-worker work items come from
+     *                                    {@code sharedQueue}
+     */
+    public interface QueueContingencyRunner<P extends AbstractLoadFlowParameters<P>> {
+        void run(int workerNum, LfNetworkList lfNetworks, List<PropagatedContingency> allPropagatedContingencies,
+                 Queue<PropagatedContingency> sharedQueue, P parameters, boolean presolved);
     }
 
     /**
@@ -251,6 +268,132 @@ public final class ContingencyMultiThreadHelper {
         }
 
         reportMerger.mergeReportThreadResults(rootReportNode, collectThreadReportNodes(reportNodes, rootReportNode));
+    }
+
+    /**
+     * Build the LF networks once (union topo config, like a single-threaded analysis), then run the
+     * contingencies with a shared work queue: {@code threadCount} workers each own a deep copy and pull
+     * their next contingency from a shared thread-safe queue (dynamic load balancing). Each worker reuses
+     * one load flow context (equation system + Jacobian + LU factorization) across the contingencies it
+     * pulls; the copies keep the union of {@code disconnectionAllowed} terms (never trimmed by
+     * {@code restrictDisconnectionAllowed}), so applying any queued contingency reuses the LU analyze.
+     *
+     * <p>Applicable to AC single simulated component analyses only. Returns {@code false} without running
+     * anything (the caller then falls back to {@link #buildOnceCopyAndRunAnalysis}) when more than one
+     * component would be simulated ({@code singleComponentEligible}); throws when the network cannot be
+     * deep copied. Like COPY mode, the IIDM network is only accessed from the calling thread and workers
+     * read their copies on a single working variant, so multi thread variant access is not required.
+     */
+    public static <P extends AbstractLoadFlowParameters<P>> boolean buildOnceCopyAndRunQueue(Network network,
+                                                                                             String workingVariantId,
+                                                                                             List<Contingency> contingencies,
+                                                                                             int threadCount,
+                                                                                             PropagatedContingencyCreationParameters creationParameters,
+                                                                                             LfTopoConfig topoConfig,
+                                                                                             ParameterProvider<P> parameterProvider,
+                                                                                             NetworksPresolver<P> presolver,
+                                                                                             QueueContingencyRunner<P> queueRunner,
+                                                                                             ReportNode rootReportNode,
+                                                                                             ReportMerger reportMerger,
+                                                                                             Executor executor,
+                                                                                             Predicate<LfNetworkList> singleComponentEligible) throws ExecutionException {
+        List<ReportNode> reportNodes = Collections.synchronizedList(new ArrayList<>(Collections.nCopies(threadCount, ReportNode.NO_OP)));
+        network.getVariantManager().setWorkingVariant(workingVariantId);
+
+        Stopwatch phaseStopwatch = Stopwatch.createStarted();
+        // union topo config over all the contingencies: every worker copy is built with it and keeps the
+        // union of disconnectionAllowed terms, so any queued contingency can be applied without an LU re-analyze
+        var unionTopoConfig = new LfTopoConfig(topoConfig);
+        List<PropagatedContingency> allPropagatedContingencies =
+                PropagatedContingency.createList(network, contingencies, unionTopoConfig, creationParameters, 0);
+
+        List<P> workerParameters = new ArrayList<>(threadCount);
+        for (int i = 0; i < threadCount; i++) {
+            workerParameters.add(parameterProvider.createParameters(unionTopoConfig));
+        }
+
+        try (LfNetworkList lfNetworks = Networks.loadWithReconnectableElements(network, unionTopoConfig,
+                workerParameters.get(0).getNetworkParameters(), rootReportNode)) {
+            if (!lfNetworks.getList().stream().allMatch(LfNetworkCopier::canCopy)) {
+                throw new PowsyblException("Multi-threaded analysis requires an LF network supporting deep copy "
+                        + "(see LfNetworkCopier#canCopy): this network uses element implementations that cannot be copied. "
+                        + "Run the analysis single-threaded (threadCount = 1) to simulate it.");
+            }
+            if (!singleComponentEligible.test(lfNetworks)) {
+                // the shared-queue mode reuses one context/LU per worker across the contingencies it pulls,
+                // which needs a single simulated component; let the caller fall back to round-robin partitions
+                LOGGER.info("SHARED_QUEUE mode not applicable (more than one simulated component): falling back to ROUND_ROBIN");
+                return false;
+            }
+            boolean presolved = false;
+            if (presolver != null) {
+                presolver.presolve(lfNetworks, workerParameters.get(0));
+                if (!lfNetworks.getList().stream().allMatch(LfNetworkCopier::canCopy)) {
+                    throw new PowsyblException("The pre-contingency simulation changed the topology and the LF network "
+                            + "is not copyable anymore: multi-threaded analysis cannot proceed. "
+                            + "Run the analysis single-threaded (threadCount = 1) to simulate it.");
+                }
+                presolved = true;
+            }
+            LOGGER.info("SHARED_QUEUE mode setup completed in {} ms (presolved={})",
+                    phaseStopwatch.elapsed(TimeUnit.MILLISECONDS), presolved);
+            runQueue(network, workingVariantId, lfNetworks, allPropagatedContingencies, workerParameters, threadCount,
+                    queueRunner, rootReportNode, reportNodes, executor, presolved);
+        }
+
+        reportMerger.mergeReportThreadResults(rootReportNode, collectThreadReportNodes(reportNodes, rootReportNode));
+        return true;
+    }
+
+    private static <P extends AbstractLoadFlowParameters<P>> void runQueue(Network network, String workingVariantId,
+                                                                           LfNetworkList lfNetworks,
+                                                                           List<PropagatedContingency> allPropagatedContingencies,
+                                                                           List<P> workerParameters, int threadCount,
+                                                                           QueueContingencyRunner<P> queueRunner, ReportNode rootReportNode,
+                                                                           List<ReportNode> reportNodes, Executor executor,
+                                                                           boolean presolved) throws ExecutionException {
+        // select the built variant once, on the calling thread, for the whole parallel region (see runOnCopies)
+        String builtVariantId = lfNetworks.getVariantCleaner() != null ? lfNetworks.getVariantCleaner().getTmpVariantId() : workingVariantId;
+        network.getVariantManager().setWorkingVariant(builtVariantId);
+        LoadFlowModel loadFlowModel = workerParameters.get(0).getNetworkParameters().getLoadFlowModel();
+
+        // one network copy per worker (worker 0 reuses the built network when it was not presolved). The
+        // copies are NOT trimmed by restrictDisconnectionAllowed: they keep the union disconnectionAllowed
+        // terms so any pulled contingency reuses the LU analyze. Reporting is always detached and merged in
+        // contingency order because the workers pull contingencies in an interleaved order.
+        List<LfNetworkList> workerNetworks = Collections.synchronizedList(new ArrayList<>(Collections.nCopies(threadCount, (LfNetworkList) null)));
+        reportNodes.set(0, rootReportNode);
+        if (!presolved) {
+            workerNetworks.set(0, lfNetworks);
+            reportNodes.set(0, detachSimulationReporting(lfNetworks.getList(), rootReportNode));
+        }
+        Stopwatch copyPhaseStopwatch = Stopwatch.createStarted();
+        List<CompletableFuture<Void>> copyFutures = new ArrayList<>();
+        for (int i = presolved ? 0 : 1; i < threadCount; i++) {
+            final int workerNum = i;
+            copyFutures.add(CompletableFutureTask.runAsync(
+                () -> copyNetworksForPartition(workerNum, lfNetworks, loadFlowModel, true, rootReportNode, workerNetworks, reportNodes), executor));
+        }
+        waitForFutures(copyFutures);
+        LOGGER.info("SHARED_QUEUE mode copy phase (parallel) completed in {} ms", copyPhaseStopwatch.elapsed(TimeUnit.MILLISECONDS));
+
+        // shared work queue drained concurrently by all the workers (dynamic load balancing)
+        Queue<PropagatedContingency> sharedQueue = new ConcurrentLinkedQueue<>(allPropagatedContingencies);
+
+        Stopwatch runPhaseStopwatch = Stopwatch.createStarted();
+        List<CompletableFuture<Void>> runFutures = new ArrayList<>();
+        for (int i = 0; i < threadCount; i++) {
+            final int workerNum = i;
+            runFutures.add(CompletableFutureTask.runAsync(() -> {
+                Stopwatch workerStopwatch = Stopwatch.createStarted();
+                queueRunner.run(workerNum, workerNetworks.get(workerNum), allPropagatedContingencies, sharedQueue,
+                        workerParameters.get(workerNum), presolved);
+                LOGGER.info("SHARED_QUEUE mode worker {} drained the queue in {} ms", workerNum, workerStopwatch.elapsed(TimeUnit.MILLISECONDS));
+                return null;
+            }, executor));
+        }
+        waitForFutures(runFutures);
+        LOGGER.info("SHARED_QUEUE mode run phase completed in {} ms", runPhaseStopwatch.elapsed(TimeUnit.MILLISECONDS));
     }
 
     /**

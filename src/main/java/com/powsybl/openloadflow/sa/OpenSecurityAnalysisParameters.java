@@ -40,12 +40,17 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
      * {@link #SLICE} gives each partition a contiguous slice of the contingency list (legacy behavior;
      * contingency lists are usually ordered by electrical region, so a partition can get a much heavier
      * region than another), {@link #ROUND_ROBIN} interleaves them (contingency i goes to partition
-     * i modulo thread count), decorrelating partitions from regions and balancing the load. Results
-     * and reports are restored to the contingency list order in both modes.
+     * i modulo thread count), decorrelating partitions from regions and balancing the load.
+     * {@link #SHARED_QUEUE} does not partition statically at all: every thread pulls its next
+     * contingency from a shared thread-safe queue (dynamic work stealing), so no thread stays idle while
+     * another finishes a heavy slice — best load balancing when contingency costs are uneven. It applies
+     * to AC single-component analyses only; other cases fall back to {@link #ROUND_ROBIN}. Results and
+     * reports are restored to the contingency list order in all modes.
      */
     public enum ContingencyPartitioningMode {
         SLICE,
-        ROUND_ROBIN
+        ROUND_ROBIN,
+        SHARED_QUEUE
     }
 
     public static final String CREATE_RESULT_EXTENSION_PARAM_NAME = "createResultExtension";
