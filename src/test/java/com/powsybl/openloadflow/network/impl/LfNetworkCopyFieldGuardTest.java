@@ -59,10 +59,10 @@ class LfNetworkCopyFieldGuardTest {
         expected.put(AbstractElement.class, Set.of("network", "num", "disabled"));
         expected.put(AbstractPropertyBag.class, Set.of("properties"));
         expected.put(AbstractLfBus.class, Set.of("slack", "reference", "v", "calculatedV", "angle", "hasGeneratorsWithSlope", "generatorVoltageControlEnabled",
-                "generatorReactivePowerControlEnabled", "generationTargetP", "generationTargetQ", "invalidatedGenerationTargetQ", "qLimitType", "generators", "converters", "shunt",
-                "controllerShunt", "svcShunt", "distributedOnConformLoad", "loads", "loadTargetP", "loadTargetQ", "branches", "hvdcs", "generatorVoltageControl", "generatorReactivePowerControl",
-                "transformerVoltageControl", "voltageSourceConverterVoltageControl", "shuntVoltageControl", "p", "q", "remoteControlReactivePercent", "zeroImpedanceNetwork", "asym", "area",
-                "isGenerationTargetQFrozen", "forceTargetQInReactiveLimits", "numSC"));
+                "generatorReactivePowerControlEnabled", "generationTargetP", "generationTargetPValid", "generationTargetQ", "invalidatedGenerationTargetQ", "qLimitType", "generators",
+                "converters", "shunt", "controllerShunt", "svcShunt", "distributedOnConformLoad", "loads", "loadTargetP", "loadTargetPValid", "loadTargetQ", "branches", "hvdcs",
+                "generatorVoltageControl", "generatorReactivePowerControl", "transformerVoltageControl", "voltageSourceConverterVoltageControl", "shuntVoltageControl", "p", "q",
+                "remoteControlReactivePercent", "zeroImpedanceNetwork", "asym", "area", "isGenerationTargetQFrozen", "forceTargetQInReactiveLimits", "numSC"));
         expected.put(LfBusImpl.class, Set.of("busRef", "nominalV", "lowVoltageLimit", "highVoltageLimit", "participating", "breakers", "country", "bbsIds", "fictitiousInjectionTargetP",
                 "fictitiousInjectionTargetQ", "violationLocation"));
         expected.put(LfStarBus.class, Set.of("t3wtRef", "nominalV"));
