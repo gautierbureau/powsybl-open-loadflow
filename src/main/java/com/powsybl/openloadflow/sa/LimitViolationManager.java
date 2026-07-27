@@ -115,56 +115,108 @@ public class LimitViolationManager {
         Objects.requireNonNull(network);
         Objects.requireNonNull(screen);
 
+        // first pass: screen every check, one tight loop per kind over contiguous thresholds, with the flow accessor
+        // fixed for the whole loop. The exceeded checks are packed as (rank, check index) so that the second pass can
+        // report them in the original order.
+        // The disabling status is tested first: the flow of a disabled branch cannot be evaluated, as its variables
+        // are not in the state vector. A flow that does not exceed the lowest limit of the check cannot violate any of
+        // its groups; an undefined (NaN) flow fails the comparison, as it failed the scan of the limits.
+        ExceededChecks exceeded = new ExceededChecks();
         LfBranch[] branches = screen.getBranches();
-        LfBus[] buses = screen.getBuses();
         double[] thresholds = screen.getThresholds();
-        byte[] kinds = screen.getKinds();
-        List<LfBranch.LfLimitsGroup>[] groups = screen.getGroups();
-        for (int k = 0; k < branches.length; k++) {
+        int[] ranks = screen.getRanks();
+        int[] kindStart = screen.getKindStart();
+        for (int k = kindStart[BranchLimitScreen.SIDE_1_CURRENT]; k < kindStart[BranchLimitScreen.SIDE_1_CURRENT + 1]; k++) {
             LfBranch branch = branches[k];
-            // the disabling status is tested first: the flow of a disabled branch cannot be evaluated, as its
-            // variables are not in the state vector
-            if (isBranchDisabled.test(branch)) {
-                continue;
+            if (!isBranchDisabled.test(branch) && branch.getI1().eval() > thresholds[k]) {
+                exceeded.add(ranks[k], k);
             }
-            // a flow that does not exceed the lowest limit of the check cannot violate any of its groups; an
-            // undefined (NaN) flow fails the comparison, as it failed the scan of the limits
-            switch (kinds[k]) {
-                case BranchLimitScreen.SIDE_1_CURRENT -> {
-                    if (branch.getI1().eval() > thresholds[k]) {
-                        detectBranchCurrentViolations(branch, buses[k], LfBranch::getI1, groups[k], TwoSides.ONE);
-                    }
-                }
-                case BranchLimitScreen.SIDE_1_ACTIVE_POWER -> {
-                    if (Math.abs(branch.getP1().eval()) > thresholds[k]) {
-                        detectBranchActivePowerViolations(branch, LfBranch::getP1, groups[k], TwoSides.ONE);
-                    }
-                }
-                case BranchLimitScreen.SIDE_1_APPARENT_POWER -> {
-                    if (branch.computeApparentPower1() > thresholds[k]) {
-                        detectBranchApparentPowerViolations(branch, LfBranch::computeApparentPower1, groups[k], TwoSides.ONE);
-                    }
-                }
-                case BranchLimitScreen.SIDE_2_CURRENT -> {
-                    if (branch.getI2().eval() > thresholds[k]) {
-                        detectBranchCurrentViolations(branch, buses[k], LfBranch::getI2, groups[k], TwoSides.TWO);
-                    }
-                }
-                case BranchLimitScreen.SIDE_2_ACTIVE_POWER -> {
-                    if (Math.abs(branch.getP2().eval()) > thresholds[k]) {
-                        detectBranchActivePowerViolations(branch, LfBranch::getP2, groups[k], TwoSides.TWO);
-                    }
-                }
-                case BranchLimitScreen.SIDE_2_APPARENT_POWER -> {
-                    if (branch.computeApparentPower2() > thresholds[k]) {
-                        detectBranchApparentPowerViolations(branch, LfBranch::computeApparentPower2, groups[k], TwoSides.TWO);
-                    }
-                }
-                default -> throw new IllegalStateException("Unsupported branch limit check: " + kinds[k]);
+        }
+        for (int k = kindStart[BranchLimitScreen.SIDE_1_ACTIVE_POWER]; k < kindStart[BranchLimitScreen.SIDE_1_ACTIVE_POWER + 1]; k++) {
+            LfBranch branch = branches[k];
+            if (!isBranchDisabled.test(branch) && Math.abs(branch.getP1().eval()) > thresholds[k]) {
+                exceeded.add(ranks[k], k);
+            }
+        }
+        for (int k = kindStart[BranchLimitScreen.SIDE_1_APPARENT_POWER]; k < kindStart[BranchLimitScreen.SIDE_1_APPARENT_POWER + 1]; k++) {
+            LfBranch branch = branches[k];
+            if (!isBranchDisabled.test(branch) && branch.computeApparentPower1() > thresholds[k]) {
+                exceeded.add(ranks[k], k);
+            }
+        }
+        for (int k = kindStart[BranchLimitScreen.SIDE_2_CURRENT]; k < kindStart[BranchLimitScreen.SIDE_2_CURRENT + 1]; k++) {
+            LfBranch branch = branches[k];
+            if (!isBranchDisabled.test(branch) && branch.getI2().eval() > thresholds[k]) {
+                exceeded.add(ranks[k], k);
+            }
+        }
+        for (int k = kindStart[BranchLimitScreen.SIDE_2_ACTIVE_POWER]; k < kindStart[BranchLimitScreen.SIDE_2_ACTIVE_POWER + 1]; k++) {
+            LfBranch branch = branches[k];
+            if (!isBranchDisabled.test(branch) && Math.abs(branch.getP2().eval()) > thresholds[k]) {
+                exceeded.add(ranks[k], k);
+            }
+        }
+        for (int k = kindStart[BranchLimitScreen.SIDE_2_APPARENT_POWER]; k < kindStart[BranchLimitScreen.SIDE_2_APPARENT_POWER + 1]; k++) {
+            LfBranch branch = branches[k];
+            if (!isBranchDisabled.test(branch) && branch.computeApparentPower2() > thresholds[k]) {
+                exceeded.add(ranks[k], k);
+            }
+        }
+
+        // second pass: report the exceeded checks in the order the original detection visited them, so that the
+        // violations keep their insertion order. Exceeded checks are rare, so this sorts a handful of elements
+        int exceededCount = exceeded.size();
+        if (exceededCount > 0) {
+            long[] sorted = exceeded.sorted();
+            LfBus[] buses = screen.getBuses();
+            List<LfBranch.LfLimitsGroup>[] groups = screen.getGroups();
+            for (int i = 0; i < exceededCount; i++) {
+                int k = (int) sorted[i];
+                reportCheckViolations(branches[k], buses[k], groups[k], ranks[k] % BranchLimitScreen.KIND_COUNT);
             }
         }
 
         detectBusAndVoltageAngleViolations(network);
+    }
+
+    /**
+     * The checks whose flow exceeded their screening threshold, packed as (rank, check index) so that sorting them
+     * restores the order in which the original detection visited the checks. Growable, and only appended to on the
+     * rare path where a check is not screened out.
+     */
+    private static final class ExceededChecks {
+
+        private long[] packed = new long[16];
+
+        private int count;
+
+        void add(int rank, int checkIndex) {
+            if (count == packed.length) {
+                packed = Arrays.copyOf(packed, packed.length * 2);
+            }
+            packed[count++] = ((long) rank << 32) | checkIndex;
+        }
+
+        int size() {
+            return count;
+        }
+
+        long[] sorted() {
+            Arrays.sort(packed, 0, count);
+            return packed;
+        }
+    }
+
+    private void reportCheckViolations(LfBranch branch, LfBus bus, List<LfBranch.LfLimitsGroup> groups, int kind) {
+        switch (kind) {
+            case BranchLimitScreen.SIDE_1_CURRENT -> detectBranchCurrentViolations(branch, bus, LfBranch::getI1, groups, TwoSides.ONE);
+            case BranchLimitScreen.SIDE_1_ACTIVE_POWER -> detectBranchActivePowerViolations(branch, LfBranch::getP1, groups, TwoSides.ONE);
+            case BranchLimitScreen.SIDE_1_APPARENT_POWER -> detectBranchApparentPowerViolations(branch, LfBranch::computeApparentPower1, groups, TwoSides.ONE);
+            case BranchLimitScreen.SIDE_2_CURRENT -> detectBranchCurrentViolations(branch, bus, LfBranch::getI2, groups, TwoSides.TWO);
+            case BranchLimitScreen.SIDE_2_ACTIVE_POWER -> detectBranchActivePowerViolations(branch, LfBranch::getP2, groups, TwoSides.TWO);
+            case BranchLimitScreen.SIDE_2_APPARENT_POWER -> detectBranchApparentPowerViolations(branch, LfBranch::computeApparentPower2, groups, TwoSides.TWO);
+            default -> throw new IllegalStateException("Unsupported branch limit check: " + kind);
+        }
     }
 
     private void detectBranchCurrentViolations(LfBranch branch, LfBus bus, Function<LfBranch, Evaluable> iGetter,
