@@ -20,7 +20,8 @@ import java.util.*;
 /**
  * @author Geoffroy Jamgotchian <geoffroy.jamgotchian at rte-france.com>
  */
-public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> {
+public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity>
+        implements EquationSystemIndexListener<V, E> {
 
     private final E type;
 
@@ -49,6 +50,11 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
 
     private final int[] equationDerivativeVectorStartIndices;
     private EquationDerivativeVector equationDerivativeVector;
+
+    // whether the cached derivative variable rows are up to date; invalidated when the equation
+    // system index re-numbers variables (rows), so that rows are re-read only when needed instead
+    // of on every Jacobian value update
+    private boolean equationDerivativeRowsValid = false;
 
     private final class AdditionalSingleTermsByEquation {
         private final List<SingleEquationTerm<V, E>> terms = new ArrayList<>();
@@ -103,6 +109,40 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         Arrays.fill(hasSingleEquationTerms, false);
         this.length = elementCount; // all activated initially
         this.equationDerivativeVectorStartIndices = new int[elementCount + 1];
+        // listen for index re-numbering to know when cached derivative rows must be refreshed
+        equationSystem.getIndex().addListener(this);
+    }
+
+    @Override
+    public void onVariableChange(Variable<V> variable, ChangeType changeType) {
+        // a variable added or removed re-numbers rows in the index
+        equationDerivativeRowsValid = false;
+    }
+
+    @Override
+    public void onEquationChange(SingleEquation<V, E> equation, ChangeType changeType) {
+        // nothing to do
+    }
+
+    @Override
+    public void onEquationTermChange(SingleEquationTerm<V, E> term) {
+        // nothing to do
+    }
+
+    @Override
+    public void onEquationArrayChange(EquationArray<V, E> equationArray, ChangeType changeType) {
+        // nothing to do
+    }
+
+    @Override
+    public void onEquationTermArrayChange(EquationTermArray<V, E> equationTermArray, int termNum, ChangeType changeType) {
+        // nothing to do
+    }
+
+    @Override
+    public void onEquationIndexOrderChanged() {
+        // Fast Decoupled re-orders rows without necessarily adding/removing variables
+        equationDerivativeRowsValid = false;
     }
 
     public E getType() {
@@ -404,6 +444,8 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
             }
             equationDerivativeVectorStartIndices[elementCount] = allTerms.size();
             equationDerivativeVector = new EquationDerivativeVector(allTerms, this);
+            // the freshly built vector already holds up to date rows
+            equationDerivativeRowsValid = true;
         }
     }
 
@@ -440,7 +482,12 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         Objects.requireNonNull(handler);
 
         updateEquationDerivativeVectors();
-        equationDerivativeVector.update(this);
+        // rows only change on index re-numbering: refresh them only when invalidated
+        if (!equationDerivativeRowsValid) {
+            equationDerivativeVector.refreshRows();
+            equationDerivativeRowsValid = true;
+        }
+        equationDerivativeVector.updateValues(this);
 
         // calculate all derivative values
         // process column by column so equation by equation of the array
