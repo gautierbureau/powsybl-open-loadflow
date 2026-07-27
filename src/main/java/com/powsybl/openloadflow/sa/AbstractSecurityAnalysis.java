@@ -807,6 +807,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         boolean createResultExtension = openSecurityAnalysisParameters.isCreateResultExtension();
 
         P p = copyParameters(acParameters);
+        // a worker pulls arbitrary contingencies from the shared queue, so adapt the parameters (e.g. the
+        // alternative-equations islandable bus ids) to the full contingency list, not a static partition subset
+        adaptParameters(p, lfNetwork, allPropagatedContingencies);
 
         try (C context = createLoadFlowContext(lfNetwork, p)) {
             ReportNode networkReportNode = lfNetwork.getReportNode();
