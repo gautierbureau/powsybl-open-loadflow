@@ -493,7 +493,6 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         // process column by column so equation by equation of the array
         int valueIndex = 0;
         for (int elementNum = 0; elementNum < elementCount; elementNum++) {
-            List<Integer> computedRows = new ArrayList<>();
             // skip inactive elements
             if (!elementActive[elementNum]) {
                 continue;
@@ -507,9 +506,14 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
             double value = 0;
             int row = 0;
 
+            // computedRows is only needed when the equation also has non-vectorized single terms,
+            // which is rare: allocate it lazily to avoid a per-element allocation on the common
+            // (fully vectorized) path
             AdditionalSingleTermsByEquation additionalTerms = null;
+            TIntArrayList computedRows = null;
             if (hasSingleEquationTerms[elementNum]) {
                 additionalTerms = singleTermsByEquationElementNum.get(elementNum);
+                computedRows = new TIntArrayList();
             }
 
             int prevRow = -1;
