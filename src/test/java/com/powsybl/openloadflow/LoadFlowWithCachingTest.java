@@ -519,6 +519,89 @@ class LoadFlowWithCachingTest {
         assertNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
     }
 
+    private void useFinerStoppingCriterion(OpenLoadFlowParameters ext) {
+        // Finer tolerance because the network cache can lead to a slightly different distribution:
+        // the cached run restarts the solver from the previously converged state, so it stops at a
+        // slightly different point of the convergence band than a cache free run.
+        ext.setMaxActivePowerMismatch(0.001)
+                .setMaxReactivePowerMismatch(0.001)
+                .setNewtonRaphsonStoppingCriteriaType(NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA);
+    }
+
+    private LoadFlowParameters createCacheFreeParameters() {
+        LoadFlowParameters cacheFreeParameters = new LoadFlowParameters();
+        useFinerStoppingCriterion(OpenLoadFlowParameters.create(cacheFreeParameters).setNetworkCacheEnabled(false));
+        return cacheFreeParameters;
+    }
+
+    private static Network createNetworkWithRegulatingSvc() {
+        Network network = VoltageControlNetworkFactory.createWithStaticVarCompensator();
+        // the compensator does not regulate in the factory, so its susceptance limits would never bind
+        network.getStaticVarCompensator("svc1").setVoltageSetpoint(400).setRegulating(true);
+        return network;
+    }
+
+    /**
+     * The susceptance limits of a static var compensator are read from the iidm network on each
+     * access, so updating them only requires reporting the update, not rebuilding the LfNetwork.
+     */
+    @Test
+    void testStaticVarCompensatorSusceptanceLimitUpdateReusesCache() {
+        useFinerStoppingCriterion(parametersExt);
+        var network = createNetworkWithRegulatingSvc();
+        var svc = network.getStaticVarCompensator("svc1");
+
+        loadFlowRunner.run(network, parameters);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        svc.setBmax(1e-5); // the compensator can no longer hold its voltage target
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        assertEquals(1, NetworkCache.AC_LF_INSTANCE.getEntryCount());
+        double cachedQ = svc.getTerminal().getQ();
+
+        // same scenario without the cache, as a reference
+        var network2 = createNetworkWithRegulatingSvc();
+        LoadFlowParameters cacheFreeParameters = createCacheFreeParameters();
+        loadFlowRunner.run(network2, cacheFreeParameters);
+        network2.getStaticVarCompensator("svc1").setBmax(1e-5);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+
+        assertEquals(network2.getStaticVarCompensator("svc1").getTerminal().getQ(), cachedQ, DELTA_POWER);
+    }
+
+    /**
+     * Same for the reactive limits of a generator, which the target Q is forced into here.
+     */
+    @Test
+    void testGeneratorReactiveLimitsUpdateReusesCache() {
+        useFinerStoppingCriterion(parametersExt.setForceTargetQInReactiveLimits(true));
+        // g2 does not regulate voltage, so its target Q is used, and forced within its reactive limits
+        var network = DistributedSlackNetworkFactory.create();
+
+        loadFlowRunner.run(network, parameters);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        network.getGenerator("g2").newMinMaxReactiveLimits().setMinQ(-10).setMaxQ(10).add();
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        double cachedQ = network.getGenerator("g2").getTerminal().getQ();
+
+        // same scenario without the cache, as a reference
+        var network2 = DistributedSlackNetworkFactory.create();
+        LoadFlowParameters cacheFreeParameters = createCacheFreeParameters();
+        OpenLoadFlowParameters.get(cacheFreeParameters).setForceTargetQInReactiveLimits(true);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+        network2.getGenerator("g2").newMinMaxReactiveLimits().setMinQ(-10).setMaxQ(10).add();
+        loadFlowRunner.run(network2, cacheFreeParameters);
+
+        assertEquals(network2.getGenerator("g2").getTerminal().getQ(), cachedQ, DELTA_POWER);
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void testUnsupportedAttributeChange(boolean isDc) {

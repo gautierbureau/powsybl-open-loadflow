@@ -415,6 +415,24 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             return CacheUpdateResult.elementUpdated(value);
         }
 
+        /**
+         * Reactive limits of a generator, a battery or a static var compensator, and susceptance
+         * limits of a static var compensator. The Lf model holds no copy of them: they are read from
+         * the IIDM network on each access, and the reactive power limits of the bus are computed from
+         * them on the fly. Only the bus aggregated generation target Q can be derived from them, when
+         * the target Q is forced within the reactive limits, and {@link LfBus#invalidateGenerationTargetP()}
+         * recomputes it in exactly that case. So there is nothing to reapply: the update only has to be
+         * reported, otherwise the next run would reuse the previous result without solving again.
+         */
+        private static <V extends Value> CacheUpdateResult<V> updateLfGeneratorReactiveLimits(V value, LfBus lfBus) {
+            lfBus.invalidateGenerationTargetP();
+            // read it back so that it is recomputed now and the equation system target vector is
+            // notified: invalidating only raises a flag, and the recomputation that fires the
+            // listeners would otherwise happen too late
+            lfBus.getGenerationTargetQ();
+            return CacheUpdateResult.elementUpdated(value);
+        }
+
         private static boolean isActivePowerLimit(String attribute) {
             return "minP".equals(attribute) || "maxP".equals(attribute);
         }
@@ -482,6 +500,8 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
                 return updateLfGeneratorTargetP(generator.getId(), (double) oldValue, (double) newValue, value, lfBus);
             } else if (isActivePowerLimit(attribute)) {
                 return updateLfGeneratorActivePowerLimits(generator.getId(), value, lfBus);
+            } else if ("reactiveLimits".equals(attribute)) {
+                return updateLfGeneratorReactiveLimits(value, lfBus);
             }
             return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(generator, attribute));
         }
@@ -492,6 +512,8 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
                     return updateLfGeneratorTargetP(battery.getId(), (double) oldValue, (double) newValue, value, lfBus);
                 } else if (isActivePowerLimit(attribute)) {
                     return updateLfGeneratorActivePowerLimits(battery.getId(), value, lfBus);
+                } else if ("reactiveLimits".equals(attribute)) {
+                    return updateLfGeneratorReactiveLimits(value, lfBus);
                 }
                 return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(battery, attribute));
             });
@@ -534,6 +556,15 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
                 }
             }
             return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(boundaryLine, attribute));
+        }
+
+        private CacheUpdateResult<V> onStaticVarCompensatorUpdate(StaticVarCompensator svc, String attribute) {
+            return onInjectionUpdate(svc, (value, lfBus) -> {
+                if ("bMin".equals(attribute) || "bMax".equals(attribute)) {
+                    return updateLfGeneratorReactiveLimits(value, lfBus);
+                }
+                return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(svc, attribute));
+            });
         }
 
         private CacheUpdateResult<V> onShuntUpdate(ShuntCompensator shunt, String attribute) {
@@ -678,7 +709,31 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             return CacheUpdateResult.multipleElementsUpdated(Set.of(result1.values.iterator().next(), result2.values.iterator().next()));
         }
 
+        /**
+         * Max P of an HVDC line, which bounds the active power of its VSC converter stations. Like for
+         * the generators, {@link LfGenerator#getMaxP()} reads it from the IIDM network, and the slack
+         * distribution limits default to it, so only the active power control checks have to be run
+         * again on both stations.
+         */
+        private CacheUpdateResult<V> onHvdcLineMaxPUpdate(HvdcLine hvdcLine) {
+            Set<V> updatedValues = new LinkedHashSet<>();
+            for (HvdcConverterStation<?> station : List.of(hvdcLine.getConverterStation1(), hvdcLine.getConverterStation2())) {
+                CacheUpdateResult<V> result = onInjectionUpdate(station,
+                    (value, lfBus) -> updateLfGeneratorActivePowerLimits(station.getId(), value, lfBus));
+                if (!result.status.equals(CacheUpdateStatus.ELEMENT_UPDATED)) {
+                    return result;
+                }
+                updatedValues.addAll(result.values);
+            }
+            return CacheUpdateResult.multipleElementsUpdated(updatedValues);
+        }
+
         private CacheUpdateResult<V> onHvdcLineUpdate(HvdcLine hvdcLine, String attribute, Object oldValue, Object newValue) {
+            if ("maxP".equals(attribute)
+                    && hvdcLine.getConverterStation1().getHvdcType().equals(HvdcConverterStation.HvdcType.VSC)) {
+                // LCC converter stations are modelled as loads, which max P does not bound
+                return onHvdcLineMaxPUpdate(hvdcLine);
+            }
             if ("activePowerSetpoint".equals(attribute)) {
                 if (hvdcLine.getConverterStation1().getHvdcType().equals(HvdcConverterStation.HvdcType.LCC)) {
                     return onHvdcLineWithLccActiveSetpointUpdate(hvdcLine, oldValue, newValue);
@@ -754,6 +809,10 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
                         // supports attribute: "sectionCount"
                         ShuntCompensator shunt = (ShuntCompensator) identifiable;
                         result = onShuntUpdate(shunt, attribute);
+                    } else if (identifiable.getType() == IdentifiableType.STATIC_VAR_COMPENSATOR) {
+                        // supports attributes: "bMin" and "bMax"
+                        StaticVarCompensator svc = (StaticVarCompensator) identifiable;
+                        result = onStaticVarCompensatorUpdate(svc, attribute);
                     } else if (identifiable.getType() == IdentifiableType.HVDC_LINE) {
                         // supports attribute: "activePowerSetpoint"
                         HvdcLine hvdcLine = (HvdcLine) identifiable;
