@@ -450,6 +450,21 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
     }
 
     @Override
+    public void resetControlDecisions() {
+        isGenerationTargetQFrozen = false;
+        qLimitType = null;
+        for (LfGenerator generator : generators) {
+            generator.setCalculatedQ(Double.NaN);
+        }
+        if (hasGeneratorVoltageControllerCapability()
+                && generators.stream().anyMatch(g -> g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE)) {
+            setGeneratorVoltageControlEnabled(true);
+        }
+        invalidateGenerationTargetQ();
+        getGenerationTargetQ(); // recompute now so that the equation system target vector is notified
+    }
+
+    @Override
     public double getGenerationTargetQ() {
         if (invalidatedGenerationTargetQ) {
             updateGenerationTargetQ(getGenerators().stream()

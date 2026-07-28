@@ -637,6 +637,97 @@ class LoadFlowWithCachingTest {
         assertEquals(network2.getGenerator("GEN").getTerminal().getQ(), cachedQ, DELTA_POWER);
     }
 
+    private static Network twoVoltageRegulatingGenerators() {
+        Network network = DistributedSlackNetworkFactory.create();
+        // a second voltage regulating generator, so that switching g1 off keeps the network valid
+        network.getGenerator("g2").setTargetV(400).setVoltageRegulatorOn(true);
+        network.getGenerator("g1").setTargetQ(20);
+        return network;
+    }
+
+    /**
+     * Stopping to control voltage is reapplied on the cached network: the generator control is
+     * switched off and the decisions the previous run made on its bus are reset.
+     */
+    @Test
+    void testGeneratorStopsControllingVoltageReusesCache() {
+        useFinerStoppingCriterion(parametersExt);
+        var network = twoVoltageRegulatingGenerators();
+
+        loadFlowRunner.run(network, parameters);
+        network.getGenerator("g1").setVoltageRegulatorOn(false);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        double cachedQ = network.getGenerator("g1").getTerminal().getQ();
+
+        // same scenario without the cache, as a reference
+        var network2 = twoVoltageRegulatingGenerators();
+        LoadFlowParameters cacheFreeParameters = createCacheFreeParameters();
+        loadFlowRunner.run(network2, cacheFreeParameters);
+        network2.getGenerator("g1").setVoltageRegulatorOn(false);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+
+        assertEquals(network2.getGenerator("g1").getTerminal().getQ(), cachedQ, DELTA_POWER);
+    }
+
+    /**
+     * The other way round cannot be reapplied: the generator was built without a voltage control, so
+     * there is nothing to switch back on and the LfNetwork has to be rebuilt.
+     */
+    @Test
+    void testGeneratorStartsControllingVoltageInvalidatesCache() {
+        var network = twoVoltageRegulatingGenerators();
+        network.getGenerator("g1").setVoltageRegulatorOn(false);
+
+        loadFlowRunner.run(network, parameters);
+        network.getGenerator("g1").setVoltageRegulatorOn(true);
+        assertNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+    }
+
+    private static Network svcInVoltageMode() {
+        Network network = VoltageControlNetworkFactory.createWithStaticVarCompensator();
+        network.getStaticVarCompensator("svc1").setVoltageSetpoint(400).setReactivePowerSetpoint(60)
+                .setRegulationMode(StaticVarCompensator.RegulationMode.VOLTAGE).setRegulating(true);
+        return network;
+    }
+
+    /** Same for a static var compensator leaving the voltage regulation mode. */
+    @Test
+    void testSvcLeavingVoltageRegulationReusesCache() {
+        useFinerStoppingCriterion(parametersExt);
+        var network = svcInVoltageMode();
+
+        loadFlowRunner.run(network, parameters);
+        network.getStaticVarCompensator("svc1").setRegulationMode(StaticVarCompensator.RegulationMode.REACTIVE_POWER);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        double cachedQ = network.getStaticVarCompensator("svc1").getTerminal().getQ();
+
+        // same scenario without the cache, as a reference
+        var network2 = svcInVoltageMode();
+        LoadFlowParameters cacheFreeParameters = createCacheFreeParameters();
+        loadFlowRunner.run(network2, cacheFreeParameters);
+        network2.getStaticVarCompensator("svc1").setRegulationMode(StaticVarCompensator.RegulationMode.REACTIVE_POWER);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+
+        assertEquals(network2.getStaticVarCompensator("svc1").getTerminal().getQ(), cachedQ, DELTA_POWER);
+    }
+
+    /** And entering it needs a rebuild, the voltage control was not created. */
+    @Test
+    void testSvcEnteringVoltageRegulationInvalidatesCache() {
+        var network = svcInVoltageMode();
+        network.getStaticVarCompensator("svc1").setRegulationMode(StaticVarCompensator.RegulationMode.REACTIVE_POWER);
+
+        loadFlowRunner.run(network, parameters);
+        network.getStaticVarCompensator("svc1").setRegulationMode(StaticVarCompensator.RegulationMode.VOLTAGE);
+        assertNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void testUnsupportedAttributeChange(boolean isDc) {

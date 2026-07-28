@@ -137,6 +137,16 @@ public interface LfBus extends LfElement {
 
     double getMaxP();
 
+    /**
+     * Reset the decisions the previous run made on this bus: switch from PV to PQ (voltage control
+     * disabled and generation target Q frozen), reactive limit reached, reactive power dispatched to
+     * the generators. The next run then makes them again from the state of the network model, the way
+     * the slack distribution resets the generators to their initial target P before redistributing.
+     * <p>The voltage of the bus is left untouched: it is the starting point of the next run, not a
+     * decision.
+     */
+    void resetControlDecisions();
+
     double getGenerationTargetQ();
 
     void freezeGenerationTargetQAndDisableGeneratorVoltageControl(double generationTargetQ);

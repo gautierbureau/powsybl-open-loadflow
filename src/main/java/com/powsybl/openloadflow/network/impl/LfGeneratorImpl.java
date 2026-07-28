@@ -91,6 +91,11 @@ public final class LfGeneratorImpl extends AbstractLfGenerator {
         }
     }
 
+    @Override
+    public boolean reApplyVoltageControlChecks() {
+        return reApplyVoltageControl(getGenerator().isVoltageRegulatorOn());
+    }
+
     private void readActivePowerControl(Generator generator) {
         var apcHelper = ActivePowerControlHelper.create(generator, generator.getMinP(), generator.getMaxP());
         initialParticipating = apcHelper.participating();

@@ -434,6 +434,23 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             return CacheUpdateResult.elementUpdated(value);
         }
 
+        /**
+         * Voltage control of a generator or a static var compensator. The element tells whether it
+         * could be reapplied: it cannot when it starts to control voltage while it was built without
+         * a voltage control, as there is nothing to switch back on.
+         */
+        private CacheUpdateResult<V> updateLfGeneratorVoltageControl(Identifiable<?> identifiable, String attribute, V value, LfBus lfBus) {
+            LfGenerator lfGenerator = lfBus.getNetwork().getGeneratorById(identifiable.getId());
+            if (lfGenerator == null) {
+                return CacheUpdateResult.elementNotFound();
+            }
+            if (!lfGenerator.reApplyVoltageControlChecks()) {
+                return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(identifiable, attribute));
+            }
+            value.getNetwork().validate(input.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC, null);
+            return CacheUpdateResult.elementUpdated(value);
+        }
+
         private static boolean isActivePowerLimit(String attribute) {
             return "minP".equals(attribute) || "maxP".equals(attribute);
         }
@@ -503,6 +520,8 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
                 return updateLfGeneratorActivePowerLimits(generator.getId(), value, lfBus);
             } else if ("reactiveLimits".equals(attribute)) {
                 return updateLfGeneratorReactiveLimits(value, lfBus);
+            } else if ("voltageRegulatorOn".equals(attribute)) {
+                return updateLfGeneratorVoltageControl(generator, attribute, value, lfBus);
             }
             return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(generator, attribute));
         }
@@ -563,6 +582,9 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             return onInjectionUpdate(svc, (value, lfBus) -> {
                 if ("bMin".equals(attribute) || "bMax".equals(attribute)) {
                     return updateLfGeneratorReactiveLimits(value, lfBus);
+                } else if ("regulationMode".equals(attribute) || "regulating".equals(attribute)
+                        || "reactivePowerSetpoint".equals(attribute)) {
+                    return updateLfGeneratorVoltageControl(svc, attribute, value, lfBus);
                 }
                 return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(svc, attribute));
             });
@@ -833,7 +855,7 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
                         ShuntCompensator shunt = (ShuntCompensator) identifiable;
                         result = onShuntUpdate(shunt, attribute, newValue);
                     } else if (identifiable.getType() == IdentifiableType.STATIC_VAR_COMPENSATOR) {
-                        // supports attributes: "bMin" and "bMax"
+                        // supports attributes: "bMin", "bMax", "regulationMode", "regulating" and "reactivePowerSetpoint"
                         StaticVarCompensator svc = (StaticVarCompensator) identifiable;
                         result = onStaticVarCompensatorUpdate(svc, attribute);
                     } else if (identifiable.getType() == IdentifiableType.HVDC_LINE) {
