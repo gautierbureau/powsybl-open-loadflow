@@ -29,6 +29,7 @@ import java.util.*;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiFunction;
+import java.util.stream.Stream;
 
 /**
  * @author Geoffroy Jamgotchian {@literal <geoffroy.jamgotchian at rte-france.com>}
@@ -567,18 +568,40 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             });
         }
 
-        private CacheUpdateResult<V> onShuntUpdate(ShuntCompensator shunt, String attribute) {
+        /**
+         * Section count of a shunt compensator. A shunt that can control voltage is modelled by a
+         * controller per shunt compensator, which position is the section: it holds the section the
+         * previous run settled on, and is reset here to the one of the IIDM network. Moving it updates
+         * the susceptance of the whole shunt, which notifies the equation system. A shunt that cannot
+         * control voltage has no controller, and is simply read again from the IIDM network.
+         */
+        private static <V extends Value> CacheUpdateResult<V> updateLfShuntSectionCount(ShuntCompensator shunt, LfShunt lfShunt,
+                                                                                        int newSectionCount, V value) {
+            LfShunt.Controller controller = lfShunt.getControllers().stream()
+                    .filter(c -> c.getId().equals(shunt.getId()))
+                    .findFirst()
+                    .orElse(null);
+            if (controller == null) {
+                lfShunt.reInit();
+            } else {
+                controller.updateSectionB(newSectionCount);
+            }
+            return CacheUpdateResult.elementUpdated(value);
+        }
+
+        private CacheUpdateResult<V> onShuntUpdate(ShuntCompensator shunt, String attribute, Object newValue) {
             return onInjectionUpdate(shunt, (value, lfBus) -> {
                 if ("sectionCount".equals(attribute)) {
-                    if (lfBus.getControllerShunt().isEmpty()) {
-                        LfShunt lfShunt = lfBus.getShunt().orElseThrow();
-                        lfShunt.reInit();
-                        return CacheUpdateResult.elementUpdated(value);
-                    } else {
-                        LOGGER.info("Shunt compensator {} is controlling voltage or connected to a bus containing a shunt compensator" +
-                                "with an active voltage control: not supported", shunt.getId());
-                        return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(shunt, attribute));
+                    // the shunt compensator is either in the controller shunt of the bus or in its other one
+                    LfShunt lfShunt = Stream.of(lfBus.getControllerShunt(), lfBus.getShunt())
+                            .flatMap(Optional::stream)
+                            .filter(s -> s.getOriginalIds().contains(shunt.getId()))
+                            .findFirst()
+                            .orElse(null);
+                    if (lfShunt == null) {
+                        return CacheUpdateResult.elementNotFound();
                     }
+                    return updateLfShuntSectionCount(shunt, lfShunt, (int) newValue, value);
                 }
                 return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(shunt, attribute));
             });
@@ -808,7 +831,7 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
                     } else if (identifiable.getType() == IdentifiableType.SHUNT_COMPENSATOR) {
                         // supports attribute: "sectionCount"
                         ShuntCompensator shunt = (ShuntCompensator) identifiable;
-                        result = onShuntUpdate(shunt, attribute);
+                        result = onShuntUpdate(shunt, attribute, newValue);
                     } else if (identifiable.getType() == IdentifiableType.STATIC_VAR_COMPENSATOR) {
                         // supports attributes: "bMin" and "bMax"
                         StaticVarCompensator svc = (StaticVarCompensator) identifiable;

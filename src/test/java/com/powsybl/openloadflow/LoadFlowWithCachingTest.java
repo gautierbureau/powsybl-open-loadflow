@@ -790,8 +790,44 @@ class LoadFlowWithCachingTest {
         assertEquals(1, shunt.getSolvedSectionCount());
         assertEquals(0, shunt.getSectionCount());
 
+        // the section count is reapplied on the cached network, also when the shunt controls voltage
         shunt.setSectionCount(1);
-        assertNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues()); // cache has been invalidated
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+    }
+
+    /**
+     * A shunt that can control voltage is modelled by a controller per shunt compensator, which
+     * position is the section the previous run settled on. Updating the section count resets it from
+     * the iidm network instead of rebuilding the LfNetwork.
+     */
+    @Test
+    void testControllingShuntSectionCountUpdateReusesCache() {
+        parameters.setShuntCompensatorVoltageControlOn(true);
+        parametersExt.setNewtonRaphsonConvEpsPerEq(1e-10).setSlackBusPMaxMismatch(1e-6);
+        var network = ShuntNetworkFactory.createWithTwoShuntCompensators();
+
+        loadFlowRunner.run(network, parameters);
+        network.getShuntCompensator("SHUNT2").setSectionCount(1);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        assertEquals(1, NetworkCache.AC_LF_INSTANCE.getEntryCount());
+        double cachedQ = network.getShuntCompensator("SHUNT2").getTerminal().getQ();
+
+        // same scenario without the cache, as a reference
+        var network2 = ShuntNetworkFactory.createWithTwoShuntCompensators();
+        LoadFlowParameters cacheFreeParameters = new LoadFlowParameters();
+        cacheFreeParameters.setShuntCompensatorVoltageControlOn(true);
+        OpenLoadFlowParameters.create(cacheFreeParameters)
+                .setNetworkCacheEnabled(false)
+                .setNewtonRaphsonConvEpsPerEq(1e-10)
+                .setSlackBusPMaxMismatch(1e-6);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+        network2.getShuntCompensator("SHUNT2").setSectionCount(1);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+
+        assertEquals(network2.getShuntCompensator("SHUNT2").getTerminal().getQ(), cachedQ, DELTA_POWER);
     }
 
     @Test
