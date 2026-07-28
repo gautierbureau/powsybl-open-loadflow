@@ -667,11 +667,48 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             return CacheUpdateResult.elementNotFound();
         }
 
-        private CacheUpdateResult<V> onTransformerTapPositionUpdate(String twtId, int newTapPosition) {
+        /**
+         * Regulation value of a phase tap changer, which is the target of the phase control. It is
+         * expressed in MW when the tap changer controls the active power flow, and in A when it limits
+         * the current, so it is converted the way the network was loaded.
+         */
+        private CacheUpdateResult<V> onTransformerPhaseControlValueUpdate(String branchId, double newValue) {
             for (V value : values) {
-                LfNetwork lfNetwork = value.getNetwork();
-                LfBranch lfBranch = lfNetwork.getBranchById(twtId);
+                LfBranch lfBranch = value.getNetwork().getBranchById(branchId);
                 if (lfBranch != null) {
+                    TransformerPhaseControl phaseControl = lfBranch.getPhaseControl().orElse(null);
+                    if (phaseControl == null) {
+                        return CacheUpdateResult.unsupportedUpdate(branchId + "_phaseTapChanger.regulationValue");
+                    }
+                    phaseControl.setTargetValue(newValue / phaseControlUnitBase(phaseControl));
+                    return CacheUpdateResult.elementUpdated(value);
+                }
+            }
+            return CacheUpdateResult.elementNotFound();
+        }
+
+        private static double phaseControlUnitBase(TransformerPhaseControl phaseControl) {
+            if (phaseControl.getUnit() == TransformerPhaseControl.Unit.MW) {
+                return PerUnit.SB;
+            }
+            LfBranch controlledBranch = phaseControl.getControlledBranch();
+            LfBus controlledBus = phaseControl.getControlledSide() == TwoSides.ONE
+                    ? controlledBranch.getBus1() : controlledBranch.getBus2();
+            return PerUnit.ib(controlledBus.getNominalV());
+        }
+
+        /**
+         * Tap position of a tap changer. The LfNetwork only models the positions of a tap changer that
+         * can be operated: when it cannot, it is loaded with the pi model of its current position only,
+         * and changing the position changes the impedance of the branch, which cannot be reapplied.
+         */
+        private CacheUpdateResult<V> onTransformerTapPositionUpdate(String branchId, String attribute, int newTapPosition) {
+            for (V value : values) {
+                LfBranch lfBranch = value.getNetwork().getBranchById(branchId);
+                if (lfBranch != null) {
+                    if (!(lfBranch.getPiModel() instanceof PiModelArray)) {
+                        return CacheUpdateResult.unsupportedUpdate(branchId + "_" + attribute);
+                    }
                     lfBranch.getPiModel().setTapPosition(newTapPosition);
                     return CacheUpdateResult.elementUpdated(value);
                 }
@@ -867,16 +904,24 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
                     } else if (identifiable.getType() == IdentifiableType.TWO_WINDINGS_TRANSFORMER) {
                         if ("ratioTapChanger.regulationValue".equals(attribute)) {
                             result = onTransformerTargetVoltageUpdate(identifiable.getId(), (double) newValue);
-                        } else if ("ratioTapChanger.tapPosition".equals(attribute)) {
-                            result = onTransformerTapPositionUpdate(identifiable.getId(), (int) newValue);
+                        } else if ("ratioTapChanger.tapPosition".equals(attribute)
+                                || "phaseTapChanger.tapPosition".equals(attribute)) {
+                            result = onTransformerTapPositionUpdate(identifiable.getId(), attribute, (int) newValue);
+                        } else if ("phaseTapChanger.regulationValue".equals(attribute)) {
+                            result = onTransformerPhaseControlValueUpdate(identifiable.getId(), (double) newValue);
                         }
                     } else if (identifiable.getType() == IdentifiableType.THREE_WINDINGS_TRANSFORMER) {
                         for (ThreeSides side : ThreeSides.values()) {
+                            String legId = LfLegBranch.getId(identifiable.getId(), side.getNum());
                             if (("ratioTapChanger" + side.getNum() + ".regulationValue").equals(attribute)) {
-                                result = onTransformerTargetVoltageUpdate(LfLegBranch.getId(identifiable.getId(), side.getNum()), (double) newValue);
+                                result = onTransformerTargetVoltageUpdate(legId, (double) newValue);
                                 break;
-                            } else if (("ratioTapChanger" + side.getNum() + ".tapPosition").equals(attribute)) {
-                                result = onTransformerTapPositionUpdate(LfLegBranch.getId(identifiable.getId(), side.getNum()), (int) newValue);
+                            } else if (("ratioTapChanger" + side.getNum() + ".tapPosition").equals(attribute)
+                                    || ("phaseTapChanger" + side.getNum() + ".tapPosition").equals(attribute)) {
+                                result = onTransformerTapPositionUpdate(legId, attribute, (int) newValue);
+                                break;
+                            } else if (("phaseTapChanger" + side.getNum() + ".regulationValue").equals(attribute)) {
+                                result = onTransformerPhaseControlValueUpdate(legId, (double) newValue);
                                 break;
                             }
                         }

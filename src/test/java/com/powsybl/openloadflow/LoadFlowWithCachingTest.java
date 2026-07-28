@@ -728,6 +728,55 @@ class LoadFlowWithCachingTest {
         assertNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
     }
 
+    /**
+     * A phase tap changer position is reapplied like a ratio tap changer one, as long as the tap
+     * changer can be operated and the LfNetwork therefore models all its positions.
+     */
+    @Test
+    void testPhaseTapChangerTapPositionUpdateReusesCache() {
+        parameters.setPhaseShifterRegulationOn(true);
+        var network = PhaseControlFactory.createNetworkWithT2wt();
+        network.getTwoWindingsTransformer("PS1").getPhaseTapChanger()
+                .setRegulationMode(PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL)
+                .setRegulationValue(83).setTargetDeadband(1).setRegulating(true);
+
+        loadFlowRunner.run(network, parameters);
+        network.getTwoWindingsTransformer("PS1").getPhaseTapChanger().setTapPosition(0);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+    }
+
+    /**
+     * When the tap changer cannot be operated, the LfNetwork is loaded with the pi model of its
+     * current position only: changing the position changes the impedance of the branch, which cannot
+     * be reapplied. It used to raise an exception that the iidm network listener list swallowed,
+     * leaving the cache neither updated nor invalidated.
+     */
+    @Test
+    void testFixedTapChangerPositionUpdateInvalidatesCache() {
+        useFinerStoppingCriterion(parametersExt);
+        var network = PhaseControlFactory.createNetworkWithT2wt();
+
+        loadFlowRunner.run(network, parameters);
+        network.getTwoWindingsTransformer("PS1").getPhaseTapChanger().setTapPosition(0);
+        assertNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        double cachedP = network.getLine("L1").getTerminal1().getP();
+
+        // same scenario without the cache, as a reference
+        var network2 = PhaseControlFactory.createNetworkWithT2wt();
+        LoadFlowParameters cacheFreeParameters = createCacheFreeParameters();
+        loadFlowRunner.run(network2, cacheFreeParameters);
+        network2.getTwoWindingsTransformer("PS1").getPhaseTapChanger().setTapPosition(0);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+
+        assertEquals(network2.getLine("L1").getTerminal1().getP(), cachedP, DELTA_POWER);
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void testUnsupportedAttributeChange(boolean isDc) {
