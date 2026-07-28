@@ -29,6 +29,7 @@ import java.util.*;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiFunction;
+import java.util.stream.Stream;
 
 /**
  * @author Geoffroy Jamgotchian {@literal <geoffroy.jamgotchian at rte-france.com>}
@@ -415,6 +416,66 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             return CacheUpdateResult.elementUpdated(value);
         }
 
+        /**
+         * Reactive limits of a generator, a battery or a static var compensator, and susceptance
+         * limits of a static var compensator. The Lf model holds no copy of them: they are read from
+         * the IIDM network on each access, and the reactive power limits of the bus are computed from
+         * them on the fly. Only the bus aggregated generation target Q can be derived from them, when
+         * the target Q is forced within the reactive limits, and {@link LfBus#invalidateGenerationTargetP()}
+         * recomputes it in exactly that case. So there is nothing to reapply: the update only has to be
+         * reported, otherwise the next run would reuse the previous result without solving again.
+         */
+        private static <V extends Value> CacheUpdateResult<V> updateLfGeneratorReactiveLimits(V value, LfBus lfBus) {
+            lfBus.invalidateGenerationTargetP();
+            // read it back so that it is recomputed now and the equation system target vector is
+            // notified: invalidating only raises a flag, and the recomputation that fires the
+            // listeners would otherwise happen too late
+            lfBus.getGenerationTargetQ();
+            return CacheUpdateResult.elementUpdated(value);
+        }
+
+        /**
+         * Voltage control of a generator or a static var compensator. The element tells whether it
+         * could be reapplied: it cannot when it starts to control voltage while it was built without
+         * a voltage control, as there is nothing to switch back on.
+         */
+        private CacheUpdateResult<V> updateLfGeneratorVoltageControl(Identifiable<?> identifiable, String attribute, V value, LfBus lfBus) {
+            LfGenerator lfGenerator = lfBus.getNetwork().getGeneratorById(identifiable.getId());
+            if (lfGenerator == null) {
+                return CacheUpdateResult.elementNotFound();
+            }
+            if (!lfGenerator.reApplyVoltageControlChecks()) {
+                return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(identifiable, attribute));
+            }
+            value.getNetwork().validate(input.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC, null);
+            return CacheUpdateResult.elementUpdated(value);
+        }
+
+        private static boolean isActivePowerLimit(String attribute) {
+            return "minP".equals(attribute) || "maxP".equals(attribute);
+        }
+
+        /**
+         * Active power limits of a generator or a battery. They feed the active power control data
+         * (participation, min/max target P) computed when the network was built, so it is read again
+         * from the IIDM network. Note that the slack distribution limits come from that data, not from
+         * {@link LfGenerator#getMaxP()} which reads the IIDM network directly.
+         */
+        private static <V extends Value> CacheUpdateResult<V> updateLfGeneratorActivePowerLimits(String id, V value, LfBus lfBus) {
+            LfGenerator lfGenerator = lfBus.getNetwork().getGeneratorById(id);
+            if (lfGenerator == null) {
+                return CacheUpdateResult.elementNotFound();
+            }
+            // Undo the slack distribution of the previous run for this generator, before re-running the
+            // checks: its target P still holds the distributed increment, which may now violate the
+            // updated limits and would wrongly stop the generator from participating. It also brings
+            // back the mismatch the distribution outer loop needs to redistribute under the new limits
+            // (it resets all the participating generators to their initial target P when it runs).
+            lfGenerator.setTargetP(lfGenerator.getInitialTargetP());
+            lfGenerator.reApplyActivePowerControlChecks(value.getNetworkParameters(), null);
+            return CacheUpdateResult.elementUpdated(value);
+        }
+
         private static <V extends Value> CacheUpdateResult<V> updateLfLoadTargetQ(String id, double oldValue, double newValue, V value, LfBus lfBus) {
             double valueShift = newValue - oldValue;
             LfLoad lfLoad = lfBus.getNetwork().getLoadById(id);
@@ -455,6 +516,12 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
                 return CacheUpdateResult.elementUpdated(value);
             } else if ("targetP".equals(attribute)) {
                 return updateLfGeneratorTargetP(generator.getId(), (double) oldValue, (double) newValue, value, lfBus);
+            } else if (isActivePowerLimit(attribute)) {
+                return updateLfGeneratorActivePowerLimits(generator.getId(), value, lfBus);
+            } else if ("reactiveLimits".equals(attribute)) {
+                return updateLfGeneratorReactiveLimits(value, lfBus);
+            } else if ("voltageRegulatorOn".equals(attribute)) {
+                return updateLfGeneratorVoltageControl(generator, attribute, value, lfBus);
             }
             return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(generator, attribute));
         }
@@ -463,6 +530,10 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             return onInjectionUpdate(battery, (value, lfBus) -> {
                 if ("targetP".equals(attribute)) {
                     return updateLfGeneratorTargetP(battery.getId(), (double) oldValue, (double) newValue, value, lfBus);
+                } else if (isActivePowerLimit(attribute)) {
+                    return updateLfGeneratorActivePowerLimits(battery.getId(), value, lfBus);
+                } else if ("reactiveLimits".equals(attribute)) {
+                    return updateLfGeneratorReactiveLimits(value, lfBus);
                 }
                 return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(battery, attribute));
             });
@@ -507,18 +578,52 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(boundaryLine, attribute));
         }
 
-        private CacheUpdateResult<V> onShuntUpdate(ShuntCompensator shunt, String attribute) {
+        private CacheUpdateResult<V> onStaticVarCompensatorUpdate(StaticVarCompensator svc, String attribute) {
+            return onInjectionUpdate(svc, (value, lfBus) -> {
+                if ("bMin".equals(attribute) || "bMax".equals(attribute)) {
+                    return updateLfGeneratorReactiveLimits(value, lfBus);
+                } else if ("regulationMode".equals(attribute) || "regulating".equals(attribute)
+                        || "reactivePowerSetpoint".equals(attribute)) {
+                    return updateLfGeneratorVoltageControl(svc, attribute, value, lfBus);
+                }
+                return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(svc, attribute));
+            });
+        }
+
+        /**
+         * Section count of a shunt compensator. A shunt that can control voltage is modelled by a
+         * controller per shunt compensator, which position is the section: it holds the section the
+         * previous run settled on, and is reset here to the one of the IIDM network. Moving it updates
+         * the susceptance of the whole shunt, which notifies the equation system. A shunt that cannot
+         * control voltage has no controller, and is simply read again from the IIDM network.
+         */
+        private static <V extends Value> CacheUpdateResult<V> updateLfShuntSectionCount(ShuntCompensator shunt, LfShunt lfShunt,
+                                                                                        int newSectionCount, V value) {
+            LfShunt.Controller controller = lfShunt.getControllers().stream()
+                    .filter(c -> c.getId().equals(shunt.getId()))
+                    .findFirst()
+                    .orElse(null);
+            if (controller == null) {
+                lfShunt.reInit();
+            } else {
+                controller.updateSectionB(newSectionCount);
+            }
+            return CacheUpdateResult.elementUpdated(value);
+        }
+
+        private CacheUpdateResult<V> onShuntUpdate(ShuntCompensator shunt, String attribute, Object newValue) {
             return onInjectionUpdate(shunt, (value, lfBus) -> {
                 if ("sectionCount".equals(attribute)) {
-                    if (lfBus.getControllerShunt().isEmpty()) {
-                        LfShunt lfShunt = lfBus.getShunt().orElseThrow();
-                        lfShunt.reInit();
-                        return CacheUpdateResult.elementUpdated(value);
-                    } else {
-                        LOGGER.info("Shunt compensator {} is controlling voltage or connected to a bus containing a shunt compensator" +
-                                "with an active voltage control: not supported", shunt.getId());
-                        return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(shunt, attribute));
+                    // the shunt compensator is either in the controller shunt of the bus or in its other one
+                    LfShunt lfShunt = Stream.of(lfBus.getControllerShunt(), lfBus.getShunt())
+                            .flatMap(Optional::stream)
+                            .filter(s -> s.getOriginalIds().contains(shunt.getId()))
+                            .findFirst()
+                            .orElse(null);
+                    if (lfShunt == null) {
+                        return CacheUpdateResult.elementNotFound();
                     }
+                    return updateLfShuntSectionCount(shunt, lfShunt, (int) newValue, value);
                 }
                 return CacheUpdateResult.unsupportedUpdate(createInvalidationReason(shunt, attribute));
             });
@@ -562,11 +667,48 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             return CacheUpdateResult.elementNotFound();
         }
 
-        private CacheUpdateResult<V> onTransformerTapPositionUpdate(String twtId, int newTapPosition) {
+        /**
+         * Regulation value of a phase tap changer, which is the target of the phase control. It is
+         * expressed in MW when the tap changer controls the active power flow, and in A when it limits
+         * the current, so it is converted the way the network was loaded.
+         */
+        private CacheUpdateResult<V> onTransformerPhaseControlValueUpdate(String branchId, double newValue) {
             for (V value : values) {
-                LfNetwork lfNetwork = value.getNetwork();
-                LfBranch lfBranch = lfNetwork.getBranchById(twtId);
+                LfBranch lfBranch = value.getNetwork().getBranchById(branchId);
                 if (lfBranch != null) {
+                    TransformerPhaseControl phaseControl = lfBranch.getPhaseControl().orElse(null);
+                    if (phaseControl == null) {
+                        return CacheUpdateResult.unsupportedUpdate(branchId + "_phaseTapChanger.regulationValue");
+                    }
+                    phaseControl.setTargetValue(newValue / phaseControlUnitBase(phaseControl));
+                    return CacheUpdateResult.elementUpdated(value);
+                }
+            }
+            return CacheUpdateResult.elementNotFound();
+        }
+
+        private static double phaseControlUnitBase(TransformerPhaseControl phaseControl) {
+            if (phaseControl.getUnit() == TransformerPhaseControl.Unit.MW) {
+                return PerUnit.SB;
+            }
+            LfBranch controlledBranch = phaseControl.getControlledBranch();
+            LfBus controlledBus = phaseControl.getControlledSide() == TwoSides.ONE
+                    ? controlledBranch.getBus1() : controlledBranch.getBus2();
+            return PerUnit.ib(controlledBus.getNominalV());
+        }
+
+        /**
+         * Tap position of a tap changer. The LfNetwork only models the positions of a tap changer that
+         * can be operated: when it cannot, it is loaded with the pi model of its current position only,
+         * and changing the position changes the impedance of the branch, which cannot be reapplied.
+         */
+        private CacheUpdateResult<V> onTransformerTapPositionUpdate(String branchId, String attribute, int newTapPosition) {
+            for (V value : values) {
+                LfBranch lfBranch = value.getNetwork().getBranchById(branchId);
+                if (lfBranch != null) {
+                    if (!(lfBranch.getPiModel() instanceof PiModelArray)) {
+                        return CacheUpdateResult.unsupportedUpdate(branchId + "_" + attribute);
+                    }
                     lfBranch.getPiModel().setTapPosition(newTapPosition);
                     return CacheUpdateResult.elementUpdated(value);
                 }
@@ -649,7 +791,31 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
             return CacheUpdateResult.multipleElementsUpdated(Set.of(result1.values.iterator().next(), result2.values.iterator().next()));
         }
 
+        /**
+         * Max P of an HVDC line, which bounds the active power of its VSC converter stations. Like for
+         * the generators, {@link LfGenerator#getMaxP()} reads it from the IIDM network, and the slack
+         * distribution limits default to it, so only the active power control checks have to be run
+         * again on both stations.
+         */
+        private CacheUpdateResult<V> onHvdcLineMaxPUpdate(HvdcLine hvdcLine) {
+            Set<V> updatedValues = new LinkedHashSet<>();
+            for (HvdcConverterStation<?> station : List.of(hvdcLine.getConverterStation1(), hvdcLine.getConverterStation2())) {
+                CacheUpdateResult<V> result = onInjectionUpdate(station,
+                    (value, lfBus) -> updateLfGeneratorActivePowerLimits(station.getId(), value, lfBus));
+                if (!result.status.equals(CacheUpdateStatus.ELEMENT_UPDATED)) {
+                    return result;
+                }
+                updatedValues.addAll(result.values);
+            }
+            return CacheUpdateResult.multipleElementsUpdated(updatedValues);
+        }
+
         private CacheUpdateResult<V> onHvdcLineUpdate(HvdcLine hvdcLine, String attribute, Object oldValue, Object newValue) {
+            if ("maxP".equals(attribute)
+                    && hvdcLine.getConverterStation1().getHvdcType().equals(HvdcConverterStation.HvdcType.VSC)) {
+                // LCC converter stations are modelled as loads, which max P does not bound
+                return onHvdcLineMaxPUpdate(hvdcLine);
+            }
             if ("activePowerSetpoint".equals(attribute)) {
                 if (hvdcLine.getConverterStation1().getHvdcType().equals(HvdcConverterStation.HvdcType.LCC)) {
                     return onHvdcLineWithLccActiveSetpointUpdate(hvdcLine, oldValue, newValue);
@@ -680,7 +846,11 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
         }
 
         private boolean skipUpdate(String variantId) {
-            return values == null || pause || !variantId.equals(workingVariantId);
+            // a null variant id means the updated attribute does not depend on the variant (minP,
+            // maxP, r, x...): it applies to all of them, so it must not be skipped. Note that
+            // dereferencing it instead used to throw, and the exception was swallowed by the iidm
+            // network listener list, leaving the cache neither updated nor invalidated.
+            return values == null || pause || variantId != null && !variantId.equals(workingVariantId);
         }
 
         @Override
@@ -720,7 +890,11 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
                     } else if (identifiable.getType() == IdentifiableType.SHUNT_COMPENSATOR) {
                         // supports attribute: "sectionCount"
                         ShuntCompensator shunt = (ShuntCompensator) identifiable;
-                        result = onShuntUpdate(shunt, attribute);
+                        result = onShuntUpdate(shunt, attribute, newValue);
+                    } else if (identifiable.getType() == IdentifiableType.STATIC_VAR_COMPENSATOR) {
+                        // supports attributes: "bMin", "bMax", "regulationMode", "regulating" and "reactivePowerSetpoint"
+                        StaticVarCompensator svc = (StaticVarCompensator) identifiable;
+                        result = onStaticVarCompensatorUpdate(svc, attribute);
                     } else if (identifiable.getType() == IdentifiableType.HVDC_LINE) {
                         // supports attribute: "activePowerSetpoint"
                         HvdcLine hvdcLine = (HvdcLine) identifiable;
@@ -730,16 +904,24 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
                     } else if (identifiable.getType() == IdentifiableType.TWO_WINDINGS_TRANSFORMER) {
                         if ("ratioTapChanger.regulationValue".equals(attribute)) {
                             result = onTransformerTargetVoltageUpdate(identifiable.getId(), (double) newValue);
-                        } else if ("ratioTapChanger.tapPosition".equals(attribute)) {
-                            result = onTransformerTapPositionUpdate(identifiable.getId(), (int) newValue);
+                        } else if ("ratioTapChanger.tapPosition".equals(attribute)
+                                || "phaseTapChanger.tapPosition".equals(attribute)) {
+                            result = onTransformerTapPositionUpdate(identifiable.getId(), attribute, (int) newValue);
+                        } else if ("phaseTapChanger.regulationValue".equals(attribute)) {
+                            result = onTransformerPhaseControlValueUpdate(identifiable.getId(), (double) newValue);
                         }
                     } else if (identifiable.getType() == IdentifiableType.THREE_WINDINGS_TRANSFORMER) {
                         for (ThreeSides side : ThreeSides.values()) {
+                            String legId = LfLegBranch.getId(identifiable.getId(), side.getNum());
                             if (("ratioTapChanger" + side.getNum() + ".regulationValue").equals(attribute)) {
-                                result = onTransformerTargetVoltageUpdate(LfLegBranch.getId(identifiable.getId(), side.getNum()), (double) newValue);
+                                result = onTransformerTargetVoltageUpdate(legId, (double) newValue);
                                 break;
-                            } else if (("ratioTapChanger" + side.getNum() + ".tapPosition").equals(attribute)) {
-                                result = onTransformerTapPositionUpdate(LfLegBranch.getId(identifiable.getId(), side.getNum()), (int) newValue);
+                            } else if (("ratioTapChanger" + side.getNum() + ".tapPosition").equals(attribute)
+                                    || ("phaseTapChanger" + side.getNum() + ".tapPosition").equals(attribute)) {
+                                result = onTransformerTapPositionUpdate(legId, attribute, (int) newValue);
+                                break;
+                            } else if (("phaseTapChanger" + side.getNum() + ".regulationValue").equals(attribute)) {
+                                result = onTransformerPhaseControlValueUpdate(legId, (double) newValue);
                                 break;
                             }
                         }

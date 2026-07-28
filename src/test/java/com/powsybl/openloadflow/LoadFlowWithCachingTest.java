@@ -474,6 +474,309 @@ class LoadFlowWithCachingTest {
         assertEquals(2, network.getVariantManager().getVariantIds().size());
     }
 
+    /**
+     * Active power limits feed the active power control data computed when the network was built,
+     * so they are reapplied on the cached LfNetwork instead of leaving it out of sync.
+     */
+    @Test
+    void testGeneratorActivePowerLimitUpdateReusesCache() {
+        // Same finer tolerance as the other cache tests: the cached run restarts the solver from the
+        // previously converged state, so it stops at a slightly different point of the convergence band.
+        parametersExt.setMaxActivePowerMismatch(0.001)
+                .setMaxReactivePowerMismatch(0.001)
+                .setNewtonRaphsonStoppingCriteriaType(NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA);
+        var network = DistributedSlackNetworkFactory.create();
+        var g1 = network.getGenerator("g1");
+
+        loadFlowRunner.run(network, parameters);
+        assertActivePowerEquals(-115.0, g1.getTerminal()); // 100 -> 115
+
+        g1.setMaxP(105);
+        // the active power limits are reapplied on the cached network
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        assertEquals(1, NetworkCache.AC_LF_INSTANCE.getEntryCount());
+        // g1 is now capped by its new max P, the rest of the mismatch goes to the other generators
+        assertActivePowerEquals(-105.0, g1.getTerminal());
+        assertActivePowerEquals(-249.286, network.getGenerator("g2").getTerminal());
+        assertActivePowerEquals(-106.429, network.getGenerator("g3").getTerminal());
+        assertActivePowerEquals(-139.286, network.getGenerator("g4").getTerminal());
+    }
+
+    /**
+     * A branch impedance update cannot be reapplied, but it must at least invalidate the cache: it
+     * used to be silently ignored, leaving the cached LfNetwork out of sync with the iidm network.
+     */
+    @Test
+    void testBranchImpedanceUpdateInvalidatesCache() {
+        var network = DistributedSlackNetworkFactory.create();
+        loadFlowRunner.run(network, parameters);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        network.getLine("l14").setR(1.5);
+        assertNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+    }
+
+    private void useFinerStoppingCriterion(OpenLoadFlowParameters ext) {
+        // Finer tolerance because the network cache can lead to a slightly different distribution:
+        // the cached run restarts the solver from the previously converged state, so it stops at a
+        // slightly different point of the convergence band than a cache free run.
+        ext.setMaxActivePowerMismatch(0.001)
+                .setMaxReactivePowerMismatch(0.001)
+                .setNewtonRaphsonStoppingCriteriaType(NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA);
+    }
+
+    private LoadFlowParameters createCacheFreeParameters() {
+        LoadFlowParameters cacheFreeParameters = new LoadFlowParameters();
+        useFinerStoppingCriterion(OpenLoadFlowParameters.create(cacheFreeParameters).setNetworkCacheEnabled(false));
+        return cacheFreeParameters;
+    }
+
+    private static Network createNetworkWithRegulatingSvc() {
+        Network network = VoltageControlNetworkFactory.createWithStaticVarCompensator();
+        // the compensator does not regulate in the factory, so its susceptance limits would never bind
+        network.getStaticVarCompensator("svc1").setVoltageSetpoint(400).setRegulating(true);
+        return network;
+    }
+
+    /**
+     * The susceptance limits of a static var compensator are read from the iidm network on each
+     * access, so updating them only requires reporting the update, not rebuilding the LfNetwork.
+     */
+    @Test
+    void testStaticVarCompensatorSusceptanceLimitUpdateReusesCache() {
+        useFinerStoppingCriterion(parametersExt);
+        var network = createNetworkWithRegulatingSvc();
+        var svc = network.getStaticVarCompensator("svc1");
+
+        loadFlowRunner.run(network, parameters);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        svc.setBmax(1e-5); // the compensator can no longer hold its voltage target
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        assertEquals(1, NetworkCache.AC_LF_INSTANCE.getEntryCount());
+        double cachedQ = svc.getTerminal().getQ();
+
+        // same scenario without the cache, as a reference
+        var network2 = createNetworkWithRegulatingSvc();
+        LoadFlowParameters cacheFreeParameters = createCacheFreeParameters();
+        loadFlowRunner.run(network2, cacheFreeParameters);
+        network2.getStaticVarCompensator("svc1").setBmax(1e-5);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+
+        assertEquals(network2.getStaticVarCompensator("svc1").getTerminal().getQ(), cachedQ, DELTA_POWER);
+    }
+
+    /**
+     * Same for the reactive limits of a generator, which the target Q is forced into here.
+     */
+    @Test
+    void testGeneratorReactiveLimitsUpdateReusesCache() {
+        useFinerStoppingCriterion(parametersExt.setForceTargetQInReactiveLimits(true));
+        // g2 does not regulate voltage, so its target Q is used, and forced within its reactive limits
+        var network = DistributedSlackNetworkFactory.create();
+
+        loadFlowRunner.run(network, parameters);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        network.getGenerator("g2").newMinMaxReactiveLimits().setMinQ(-10).setMaxQ(10).add();
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        double cachedQ = network.getGenerator("g2").getTerminal().getQ();
+
+        // same scenario without the cache, as a reference
+        var network2 = DistributedSlackNetworkFactory.create();
+        LoadFlowParameters cacheFreeParameters = createCacheFreeParameters();
+        OpenLoadFlowParameters.get(cacheFreeParameters).setForceTargetQInReactiveLimits(true);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+        network2.getGenerator("g2").newMinMaxReactiveLimits().setMinQ(-10).setMaxQ(10).add();
+        loadFlowRunner.run(network2, cacheFreeParameters);
+
+        assertEquals(network2.getGenerator("g2").getTerminal().getQ(), cachedQ, DELTA_POWER);
+    }
+
+    /**
+     * A cached network carries the state the previous run left behind (bus switched from PV to PQ,
+     * frozen generation target Q, generator voltage control switched off when the target voltage is
+     * not plausible anymore...). Checks that the reactive results of a re-run still match a cache
+     * free run.
+     * <p>Both convergence bands have to be tightened for the comparison to mean anything: the solver
+     * one, and the slack distribution outer loop one, which is looser by default (1 MW) and is the
+     * one that dominates the difference between a warm started run and a run from scratch.
+     */
+    @ParameterizedTest
+    @ValueSource(doubles = {23.5, 5.0}) // 5 kV is not plausible: the generator voltage control is switched off
+    void testReactiveResultsMatchCacheFreeRunAfterTargetVUpdate(double newTargetV) {
+        parametersExt.setNewtonRaphsonConvEpsPerEq(1e-10).setSlackBusPMaxMismatch(1e-6);
+        var network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+
+        loadFlowRunner.run(network, parameters);
+        network.getGenerator("GEN").setTargetV(newTargetV);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+        loadFlowRunner.run(network, parameters);
+        double cachedQ = network.getGenerator("GEN").getTerminal().getQ();
+
+        // same scenario without the cache, as a reference
+        var network2 = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+        LoadFlowParameters cacheFreeParameters = new LoadFlowParameters();
+        OpenLoadFlowParameters.create(cacheFreeParameters)
+                .setNetworkCacheEnabled(false)
+                .setNewtonRaphsonConvEpsPerEq(1e-10)
+                .setSlackBusPMaxMismatch(1e-6);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+        network2.getGenerator("GEN").setTargetV(newTargetV);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+
+        assertEquals(network2.getGenerator("GEN").getTerminal().getQ(), cachedQ, DELTA_POWER);
+    }
+
+    private static Network twoVoltageRegulatingGenerators() {
+        Network network = DistributedSlackNetworkFactory.create();
+        // a second voltage regulating generator, so that switching g1 off keeps the network valid
+        network.getGenerator("g2").setTargetV(400).setVoltageRegulatorOn(true);
+        network.getGenerator("g1").setTargetQ(20);
+        return network;
+    }
+
+    /**
+     * Stopping to control voltage is reapplied on the cached network: the generator control is
+     * switched off and the decisions the previous run made on its bus are reset.
+     */
+    @Test
+    void testGeneratorStopsControllingVoltageReusesCache() {
+        useFinerStoppingCriterion(parametersExt);
+        var network = twoVoltageRegulatingGenerators();
+
+        loadFlowRunner.run(network, parameters);
+        network.getGenerator("g1").setVoltageRegulatorOn(false);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        double cachedQ = network.getGenerator("g1").getTerminal().getQ();
+
+        // same scenario without the cache, as a reference
+        var network2 = twoVoltageRegulatingGenerators();
+        LoadFlowParameters cacheFreeParameters = createCacheFreeParameters();
+        loadFlowRunner.run(network2, cacheFreeParameters);
+        network2.getGenerator("g1").setVoltageRegulatorOn(false);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+
+        assertEquals(network2.getGenerator("g1").getTerminal().getQ(), cachedQ, DELTA_POWER);
+    }
+
+    /**
+     * The other way round cannot be reapplied: the generator was built without a voltage control, so
+     * there is nothing to switch back on and the LfNetwork has to be rebuilt.
+     */
+    @Test
+    void testGeneratorStartsControllingVoltageInvalidatesCache() {
+        var network = twoVoltageRegulatingGenerators();
+        network.getGenerator("g1").setVoltageRegulatorOn(false);
+
+        loadFlowRunner.run(network, parameters);
+        network.getGenerator("g1").setVoltageRegulatorOn(true);
+        assertNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+    }
+
+    private static Network svcInVoltageMode() {
+        Network network = VoltageControlNetworkFactory.createWithStaticVarCompensator();
+        network.getStaticVarCompensator("svc1").setVoltageSetpoint(400).setReactivePowerSetpoint(60)
+                .setRegulationMode(StaticVarCompensator.RegulationMode.VOLTAGE).setRegulating(true);
+        return network;
+    }
+
+    /** Same for a static var compensator leaving the voltage regulation mode. */
+    @Test
+    void testSvcLeavingVoltageRegulationReusesCache() {
+        useFinerStoppingCriterion(parametersExt);
+        var network = svcInVoltageMode();
+
+        loadFlowRunner.run(network, parameters);
+        network.getStaticVarCompensator("svc1").setRegulationMode(StaticVarCompensator.RegulationMode.REACTIVE_POWER);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        double cachedQ = network.getStaticVarCompensator("svc1").getTerminal().getQ();
+
+        // same scenario without the cache, as a reference
+        var network2 = svcInVoltageMode();
+        LoadFlowParameters cacheFreeParameters = createCacheFreeParameters();
+        loadFlowRunner.run(network2, cacheFreeParameters);
+        network2.getStaticVarCompensator("svc1").setRegulationMode(StaticVarCompensator.RegulationMode.REACTIVE_POWER);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+
+        assertEquals(network2.getStaticVarCompensator("svc1").getTerminal().getQ(), cachedQ, DELTA_POWER);
+    }
+
+    /** And entering it needs a rebuild, the voltage control was not created. */
+    @Test
+    void testSvcEnteringVoltageRegulationInvalidatesCache() {
+        var network = svcInVoltageMode();
+        network.getStaticVarCompensator("svc1").setRegulationMode(StaticVarCompensator.RegulationMode.REACTIVE_POWER);
+
+        loadFlowRunner.run(network, parameters);
+        network.getStaticVarCompensator("svc1").setRegulationMode(StaticVarCompensator.RegulationMode.VOLTAGE);
+        assertNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+    }
+
+    /**
+     * A phase tap changer position is reapplied like a ratio tap changer one, as long as the tap
+     * changer can be operated and the LfNetwork therefore models all its positions.
+     */
+    @Test
+    void testPhaseTapChangerTapPositionUpdateReusesCache() {
+        parameters.setPhaseShifterRegulationOn(true);
+        var network = PhaseControlFactory.createNetworkWithT2wt();
+        network.getTwoWindingsTransformer("PS1").getPhaseTapChanger()
+                .setRegulationMode(PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL)
+                .setRegulationValue(83).setTargetDeadband(1).setRegulating(true);
+
+        loadFlowRunner.run(network, parameters);
+        network.getTwoWindingsTransformer("PS1").getPhaseTapChanger().setTapPosition(0);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+    }
+
+    /**
+     * When the tap changer cannot be operated, the LfNetwork is loaded with the pi model of its
+     * current position only: changing the position changes the impedance of the branch, which cannot
+     * be reapplied. It used to raise an exception that the iidm network listener list swallowed,
+     * leaving the cache neither updated nor invalidated.
+     */
+    @Test
+    void testFixedTapChangerPositionUpdateInvalidatesCache() {
+        useFinerStoppingCriterion(parametersExt);
+        var network = PhaseControlFactory.createNetworkWithT2wt();
+
+        loadFlowRunner.run(network, parameters);
+        network.getTwoWindingsTransformer("PS1").getPhaseTapChanger().setTapPosition(0);
+        assertNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        double cachedP = network.getLine("L1").getTerminal1().getP();
+
+        // same scenario without the cache, as a reference
+        var network2 = PhaseControlFactory.createNetworkWithT2wt();
+        LoadFlowParameters cacheFreeParameters = createCacheFreeParameters();
+        loadFlowRunner.run(network2, cacheFreeParameters);
+        network2.getTwoWindingsTransformer("PS1").getPhaseTapChanger().setTapPosition(0);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+
+        assertEquals(network2.getLine("L1").getTerminal1().getP(), cachedP, DELTA_POWER);
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void testUnsupportedAttributeChange(boolean isDc) {
@@ -627,8 +930,44 @@ class LoadFlowWithCachingTest {
         assertEquals(1, shunt.getSolvedSectionCount());
         assertEquals(0, shunt.getSectionCount());
 
+        // the section count is reapplied on the cached network, also when the shunt controls voltage
         shunt.setSectionCount(1);
-        assertNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues()); // cache has been invalidated
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+    }
+
+    /**
+     * A shunt that can control voltage is modelled by a controller per shunt compensator, which
+     * position is the section the previous run settled on. Updating the section count resets it from
+     * the iidm network instead of rebuilding the LfNetwork.
+     */
+    @Test
+    void testControllingShuntSectionCountUpdateReusesCache() {
+        parameters.setShuntCompensatorVoltageControlOn(true);
+        parametersExt.setNewtonRaphsonConvEpsPerEq(1e-10).setSlackBusPMaxMismatch(1e-6);
+        var network = ShuntNetworkFactory.createWithTwoShuntCompensators();
+
+        loadFlowRunner.run(network, parameters);
+        network.getShuntCompensator("SHUNT2").setSectionCount(1);
+        assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues());
+
+        var result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        assertEquals(1, NetworkCache.AC_LF_INSTANCE.getEntryCount());
+        double cachedQ = network.getShuntCompensator("SHUNT2").getTerminal().getQ();
+
+        // same scenario without the cache, as a reference
+        var network2 = ShuntNetworkFactory.createWithTwoShuntCompensators();
+        LoadFlowParameters cacheFreeParameters = new LoadFlowParameters();
+        cacheFreeParameters.setShuntCompensatorVoltageControlOn(true);
+        OpenLoadFlowParameters.create(cacheFreeParameters)
+                .setNetworkCacheEnabled(false)
+                .setNewtonRaphsonConvEpsPerEq(1e-10)
+                .setSlackBusPMaxMismatch(1e-6);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+        network2.getShuntCompensator("SHUNT2").setSectionCount(1);
+        loadFlowRunner.run(network2, cacheFreeParameters);
+
+        assertEquals(network2.getShuntCompensator("SHUNT2").getTerminal().getQ(), cachedQ, DELTA_POWER);
     }
 
     @Test

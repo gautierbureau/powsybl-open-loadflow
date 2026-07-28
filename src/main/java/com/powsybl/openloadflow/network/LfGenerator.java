@@ -146,4 +146,14 @@ public interface LfGenerator extends PropertyBag, LfReferencePriorityInjection {
     void setAsym(LfAsymGenerator asym);
 
     void reApplyActivePowerControlChecks(LfNetworkParameters parameters, LfNetworkLoadingReport report);
+
+    /**
+     * Reapply, from the network model, the fact that this generator controls voltage or not, and reset
+     * the control decisions the previous run made on its bus. Returns {@code false} when the update
+     * cannot be reapplied and the caller has to rebuild the LfNetwork, which is the case when the
+     * generator starts to control voltage while it was built without a voltage control.
+     */
+    default boolean reApplyVoltageControlChecks() {
+        return false;
+    }
 }

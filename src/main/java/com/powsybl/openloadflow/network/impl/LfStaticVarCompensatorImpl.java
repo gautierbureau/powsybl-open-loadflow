@@ -125,6 +125,22 @@ public final class LfStaticVarCompensatorImpl extends AbstractLfGenerator implem
         }
     }
 
+    @Override
+    public boolean reApplyVoltageControlChecks() {
+        StaticVarCompensator svc = getSvc();
+        if (standByAutomaton != null || slope != 0) {
+            // the standby automaton and the slope are set up together with the voltage control
+            return false;
+        }
+        boolean regulating = svc.isRegulating();
+        StaticVarCompensator.RegulationMode mode = svc.getRegulationMode();
+        // set the target Q first: reApplyVoltageControl recomputes the aggregated target Q of the bus
+        targetQ = regulating && mode == StaticVarCompensator.RegulationMode.REACTIVE_POWER
+                ? -svc.getReactivePowerSetpoint() / PerUnit.SB
+                : 0;
+        return reApplyVoltageControl(regulating && mode == StaticVarCompensator.RegulationMode.VOLTAGE);
+    }
+
     private void setupVoltageControl(StaticVarCompensator svc, LfNetworkParameters parameters, LfNetworkLoadingReport report) {
         setVoltageControl(svc.getVoltageSetpoint(), svc.getTerminal(), svc.getRegulatingTerminal(), parameters, report);
 

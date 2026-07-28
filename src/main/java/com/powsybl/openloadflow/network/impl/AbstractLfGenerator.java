@@ -522,4 +522,26 @@ public abstract class AbstractLfGenerator extends AbstractLfInjection implements
     public void reApplyActivePowerControlChecks(LfNetworkParameters parameters, LfNetworkLoadingReport report) {
         // nothing to do
     }
+
+    /**
+     * Reapply whether this generator controls voltage. Starting to control voltage is only possible
+     * when it was built with a voltage control, which the previous runs may have switched off.
+     */
+    protected boolean reApplyVoltageControl(boolean controlsVoltage) {
+        if (controlsVoltage) {
+            if (controlledBusId == null) {
+                // built without a voltage control, there is nothing to switch back on. Note that
+                // getControlledBus() cannot be used here, it throws when there is no controlled bus.
+                return false;
+            }
+            setGeneratorControlType(GeneratorControlType.VOLTAGE);
+        } else {
+            setGeneratorControlType(GeneratorControlType.OFF);
+        }
+        // the bus keeps its voltage control as long as one of its generators still controls voltage
+        bus.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(
+                bus.getGenerators().stream().anyMatch(g -> g.getGeneratorControlType() == GeneratorControlType.VOLTAGE));
+        bus.resetControlDecisions();
+        return true;
+    }
 }
