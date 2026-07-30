@@ -1056,11 +1056,13 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
      * same restored base state, so results are identical and are reordered back to the input order by the caller.
      *
      * <p>Building a {@link LfContingency} is not free of side effects on the network: a contingency that isolates the
-     * slack bus relocates it, by excluding the buses of the isolated component from the slack bus selection
-     * ({@code LfSynchronousNetwork.setExcludedSlackBuses}), and that exclusion outlives the call. In the simulation
-     * loop each contingency undoes it when restoring the base state, but this classification pass builds every
-     * contingency up front, so its side effects would otherwise leak into the first contingency simulated and change
-     * its result. Hence the base state restoration below.
+     * slack bus relocates it, which excludes the buses of the isolated component from the slack bus selection
+     * ({@code LfSynchronousNetwork.setExcludedSlackBuses}) and moves the connectivity main component vertex. Both
+     * outlive the call. In the simulation loop each contingency undoes the exclusion when restoring the base state,
+     * but this pass builds every contingency up front, so the relocation would leak into the first contingency
+     * simulated and change its result. As this pass only inspects contingencies, it builds them without relocating
+     * the slack bus, which is also the only way to leave the connectivity untouched: a state restoration would not
+     * undo the main component vertex move.
      */
     private List<PropagatedContingency> orderContingenciesForStructureReuse(LfNetwork lfNetwork, C context, NetworkState networkState,
                                                                             List<PropagatedContingency> propagatedContingencies) {
@@ -1068,7 +1070,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         List<PropagatedContingency> structureRebuilding = new ArrayList<>();
         try {
             for (PropagatedContingency propagatedContingency : propagatedContingencies) {
-                Optional<LfContingency> lfContingency = propagatedContingency.toLfContingency(lfNetwork);
+                Optional<LfContingency> lfContingency = propagatedContingency.toLfContingency(lfNetwork, false);
                 if (lfContingency.isPresent() && contingencyPreservesMatrixStructure(context, lfContingency.get())) {
                     structurePreserving.add(propagatedContingency);
                 } else {
@@ -1076,8 +1078,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 }
             }
         } finally {
-            // discard the side effects of the contingencies built above, so that the first contingency of the
-            // simulation loop starts from the very same base state as if this pass had not run
+            // safety net: whatever element state the inspection above may have touched, the simulation loop starts
+            // from the very same base state as if this pass had not run
             networkState.restore();
         }
         if (structurePreserving.isEmpty() || structureRebuilding.isEmpty()) {

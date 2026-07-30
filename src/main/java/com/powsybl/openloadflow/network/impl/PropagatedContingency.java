@@ -458,7 +458,17 @@ public class PropagatedContingency {
     }
 
     public Optional<LfContingency> toLfContingency(LfNetwork network) {
-        return toLfContingency(network, true, PropagatedContingency::findBusesAndBranchesImpactedBecauseOfConnectivityLoss);
+        return toLfContingency(network, true);
+    }
+
+    /**
+     * Same as {@link #toLfContingency(LfNetwork)} but letting the caller disable the slack bus relocation. Relocating
+     * the slack bus mutates the network beyond this call (it excludes the isolated buses from the slack bus selection
+     * and moves the connectivity main component vertex), so a caller that only inspects a contingency, without
+     * simulating it, must not relocate.
+     */
+    public Optional<LfContingency> toLfContingency(LfNetwork network, boolean relocateSlackBus) {
+        return toLfContingency(network, relocateSlackBus, PropagatedContingency::findBusesAndBranchesImpactedBecauseOfConnectivityLoss);
     }
 
     public Optional<LfContingency> toLfContingency(LfNetwork network, boolean relocateSlackBus, ContingencyConnectivityLossImpactAnalysis analysis) {
