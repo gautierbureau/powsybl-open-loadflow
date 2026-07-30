@@ -43,8 +43,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * thread pulls its next contingency from a shared queue and reuses one load flow context (and its LU
  * factorization) across the contingencies it happens to process. Because every thread simulates a copy of
  * the very same network as the single-threaded analysis, the results and reports must be identical to
- * single-thread mode (and to the static partitioning modes) whatever the thread count. DC and
- * multi-component analyses fall back to ROUND_ROBIN.
+ * single-thread mode (and to the static partitioning modes) whatever the thread count. When several
+ * components are simulated, a worker owns one context per component and simulates each contingency it pulls
+ * on all of them. DC analyses fall back to ROUND_ROBIN.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -179,11 +180,12 @@ class MtSharedQueueTest extends AbstractOpenSecurityAnalysisTest {
         assertSameResults(singleThread, multiThread);
     }
 
-    @Test
-    void testMultiComponentFallsBackToRoundRobin() throws java.io.IOException {
-        // more than one simulated component: the shared-queue mode is not applicable and the analysis falls
-        // back to the round-robin partitions. The report must stay identical to the single-threaded one (the
-        // networks built by the aborted shared-queue attempt must not leave their report nodes behind).
+    @ParameterizedTest(name = "threads={0}")
+    @CsvSource({"2", "3"})
+    void testMultiComponentSharedQueue(int threadCount) throws java.io.IOException {
+        // several simulated components: each worker owns one context per component and simulates every
+        // contingency it pulls on all of them, merging the per-component results in component order. Results
+        // and report must stay identical to the single-threaded run.
         Network network = FourBusNetworkFactory.createWithTwoScs();
         network.getBusBreakerView().getBus("c1").getVoltageLevel().newLoad()
                 .setId("dummyLoad")
@@ -200,9 +202,14 @@ class MtSharedQueueTest extends AbstractOpenSecurityAnalysisTest {
         ReportNode singleThreadReport = newRootReportNode();
         SecurityAnalysisResult singleThread = runAllComponents(network, contingencies, 1, singleThreadReport);
         ReportNode multiThreadReport = newRootReportNode();
-        SecurityAnalysisResult multiThread = runAllComponents(network, contingencies, 2, multiThreadReport);
+        SecurityAnalysisResult multiThread = runAllComponents(network, contingencies, threadCount, multiThreadReport);
 
         assertSameResults(singleThread, multiThread);
+        // the violations of all the components must be there, merged per contingency
+        assertEquals(singleThread.getPostContingencyResults().stream()
+                        .map(r -> r.getLimitViolationsResult().getLimitViolations().size()).toList(),
+                multiThread.getPostContingencyResults().stream()
+                        .map(r -> r.getLimitViolationsResult().getLimitViolations().size()).toList());
 
         StringWriter singleThreadWriter = new StringWriter();
         singleThreadReport.print(singleThreadWriter);

@@ -103,18 +103,17 @@ public final class ContingencyMultiThreadHelper {
 
     /**
      * Shared-queue mode request passed to {@code buildOnceCopyAndRunAnalysis}:
-     * the contingencies are then run with a shared work queue instead of the static partitions. The mode is
-     * only applicable when a single component is simulated, which is known once the networks are built:
-     * {@code singleComponentEligible} is evaluated on the built networks and, when it does not hold, the
-     * analysis silently falls back to the static partitions <em>on the very same networks</em> (they are
-     * neither rebuilt nor reported twice).
+     * the contingencies are then run with a shared work queue instead of the static partitions. Its
+     * applicability can only be decided once the networks are built: {@code eligible} is evaluated on the
+     * built networks and, when it does not hold, the analysis silently falls back to the static partitions
+     * <em>on the very same networks</em> (they are neither rebuilt nor reported twice).
      *
      * @param contingencies the contingency list, in input order: the shared queue is filled with it and the
      *                      workers drain it in that order
      */
     public record QueueMode<P extends AbstractLoadFlowParameters<P>>(List<Contingency> contingencies,
                                                                      QueueContingencyRunner<P> queueRunner,
-                                                                     Predicate<LfNetworkList> singleComponentEligible) {
+                                                                     Predicate<LfNetworkList> eligible) {
     }
 
     /**
@@ -305,12 +304,11 @@ public final class ContingencyMultiThreadHelper {
                 }
                 presolved = true;
             }
-            // the shared-queue mode reuses one context/LU per worker across the contingencies it pulls, which
-            // needs a single simulated component: this is only known now that the networks are built, and
+            // whether the shared-queue mode applies is only known now that the networks are built, and
             // rebuilding them for the fallback would report their build twice under the root report node
-            boolean queueApplicable = queueMode != null && queueMode.singleComponentEligible().test(lfNetworks);
+            boolean queueApplicable = queueMode != null && queueMode.eligible().test(lfNetworks);
             if (queueMode != null && !queueApplicable) {
-                LOGGER.info("SHARED_QUEUE mode not applicable (more than one simulated component): falling back to the static contingency partitions");
+                LOGGER.info("SHARED_QUEUE mode not applicable to the built networks: falling back to the static contingency partitions");
             }
             LOGGER.info("{} mode setup phases: contingency propagation {} ms, parameters {} ms, networks build {} ms, presolve {} ms (presolved={})",
                     queueApplicable ? "SHARED_QUEUE" : "COPY", propagationMs, parametersMs, buildMs, presolveMs, presolved);
