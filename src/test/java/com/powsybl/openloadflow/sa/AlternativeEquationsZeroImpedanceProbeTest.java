@@ -36,14 +36,12 @@ import java.util.stream.Stream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * The zero impedance path of the alternative equations: a bus connected to a zero impedance branch stays on the legacy
- * modeling, but that eligibility is decided once, when the equation system is created, while a remedial action closing
- * a coupler <em>adds</em> a zero impedance branch to a bus that was eligible - the reverse direction of a contingency,
- * which can only open. Together with the contingency itself changing which zero impedance branches carry the
- * ZERO_PHI / ZERO_V constraints rather than the DUMMY_TARGET ones, this is the modeling the reported
- * "same number of equations and variables" failures live in.
+ * The zero impedance path of the alternative equations. Buses connected to a zero impedance branch are kept on the
+ * legacy modeling, but that is not enough: on a node-breaker network whose couplers are retained, a plain branch
+ * contingency already gives a post-contingency flow that differs from the legacy modeling, without any remedial action
+ * and without the equation system becoming non square.
  *
- * <p>Results must be identical to the legacy modeling, whether that is reached natively or through the fallback.
+ * <p>Results must be identical to the legacy modeling, whether that is reached natively or through a fallback.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at gmail.com>}
  */
@@ -86,18 +84,19 @@ class AlternativeEquationsZeroImpedanceProbeTest extends AbstractOpenSecurityAna
         SecurityAnalysisParameters saParameters = new SecurityAnalysisParameters();
         saParameters.setLoadFlowParameters(lfParameters);
 
-        return runSecurityAnalysis(network, contingencies, monitors, saParameters, operatorStrategies, actions, ReportNode.NO_OP);
+        return runSecurityAnalysis(network, contingencies, monitors, saParameters, List.of(), List.of(), ReportNode.NO_OP);
     }
 
     @Test
-    @Disabled("reproduces an open bug of the alternative equations on the zero impedance path: the remedial action "
-            + "closing a coupler adds a zero impedance branch to buses that were eligible to the alternative modeling "
-            + "when the equation system was created, and the post-contingency flow of L2 then comes out at 299.9997 MW "
-            + "instead of the legacy 301.8633 MW - a wrong result, silently, without the equation system becoming non "
-            + "square. Reproduced identically on the alternative equations branch alone, so it predates the security "
-            + "analysis performance and fallback work. Enable once the zero impedance path is either supported or "
-            + "excluded from the alternative modeling.")
-    void zeroImpedanceAddedByRemedialActionGivesLegacyResultsTest() {
+    @Disabled("reproduces an open bug of the alternative equations on the zero impedance path: on a node-breaker "
+            + "network whose couplers are retained (so modelled as zero impedance branches), a plain branch "
+            + "contingency gives a post-contingency flow of 299.9997 MW on L2 against 301.8633 MW on the legacy "
+            + "modeling. No remedial action and no operator strategy are needed, and the result is wrong silently: it "
+            + "converges and the equation system stays square, so neither the non-square fallback nor any other check "
+            + "detects it. Reproduced identically on the alternative equations branch alone, so it predates the "
+            + "security analysis performance and fallback work. Enable once the zero impedance path is either "
+            + "supported by the alternative modeling or excluded from it.")
+    void zeroImpedanceContingencyGivesLegacyResultsTest() {
         SecurityAnalysisResult legacyResult = run(false);
         SecurityAnalysisResult result = run(true);
 
