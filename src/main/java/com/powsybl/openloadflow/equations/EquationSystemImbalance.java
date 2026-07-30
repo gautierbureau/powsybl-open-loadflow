@@ -95,6 +95,28 @@ public final class EquationSystemImbalance {
     }
 
     /**
+     * The equations an element carries, with whether each is active, e.g. {@code [BUS_TARGET_Q(inactive),
+     * DISTR_Q(inactive)]}. This is what tells apart the two ways a variable ends up orphaned: no equation of the
+     * expected kind was ever created for the element, or one exists but every alternative of it was left deactivated -
+     * the case a control whose controller set was reconfigured produces.
+     */
+    public static <V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> String describeElementEquations(EquationSystem<V, E> equationSystem,
+                                                                                                              ElementType elementType,
+                                                                                                              int elementNum) {
+        List<String> equations = new ArrayList<>();
+        for (var equation : equationSystem.getEquations(elementType, elementNum)) {
+            equations.add(equation.getType() + (equation.isActive() ? "(active)" : "(inactive)"));
+        }
+        for (var equationArray : equationSystem.getEquationArrays()) {
+            if (equationArray.getType().getElementType() == elementType && elementNum < equationArray.getElementCount()) {
+                equations.add(equationArray.getType()
+                        + (equationArray.isElementActive(elementNum) ? "(active)" : "(inactive)"));
+            }
+        }
+        return equations.toString();
+    }
+
+    /**
      * Describe the imbalance by the counts of variables and of active equations per type only, for callers that name
      * the imbalanced elements themselves (a caller holding the network can resolve their ids, which is more useful).
      */

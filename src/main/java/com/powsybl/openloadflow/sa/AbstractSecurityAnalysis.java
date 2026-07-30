@@ -1010,7 +1010,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 .<String>map(imbalancedElement -> {
                     LfElement element = lfNetwork.getElement(imbalancedElement.elementType(), imbalancedElement.elementNum());
                     return imbalancedElement.elementType() + " '" + (element != null ? element.getId() : imbalancedElement.elementNum())
-                            + "' (" + imbalancedElement.variableCount() + " variables, " + imbalancedElement.equationCount() + " active equations)";
+                            + "' (" + imbalancedElement.variableCount() + " variables, " + imbalancedElement.equationCount()
+                            + " active equations, equations=" + EquationSystemImbalance.describeElementEquations(
+                                    context.getEquationSystem(), imbalancedElement.elementType(), imbalancedElement.elementNum()) + ")";
                 })
                 .collect(Collectors.joining(", ", ", imbalanced element ids=", imbalancedElements.size() > 5 ? ", ..." : ""));
     }
