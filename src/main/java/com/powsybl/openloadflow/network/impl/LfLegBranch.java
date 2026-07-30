@@ -50,13 +50,6 @@ public final class LfLegBranch extends AbstractImpedantLfBranch {
         this.nominalV = leg.getTerminal().getVoltageLevel().getNominalV();
     }
 
-    /**
-     * Nominal voltage of the leg terminal, cached at build time (no iidm network access).
-     */
-    public double getLegNominalV() {
-        return nominalV;
-    }
-
     protected LfLegBranch(LfLegBranch other, LfNetwork network, LfBus bus1, LfBus bus0) {
         super(other, network, bus1, bus0);
         this.twtRef = other.twtRef;
@@ -65,6 +58,13 @@ public final class LfLegBranch extends AbstractImpedantLfBranch {
         this.side = other.side;
         this.phaseControllerCapability = other.phaseControllerCapability;
         this.nominalV = other.nominalV;
+    }
+
+    /**
+     * Nominal voltage of the leg terminal, cached at build time (no iidm network access).
+     */
+    public double getLegNominalV() {
+        return nominalV;
     }
 
     public ThreeWindingsTransformer getTwt() {

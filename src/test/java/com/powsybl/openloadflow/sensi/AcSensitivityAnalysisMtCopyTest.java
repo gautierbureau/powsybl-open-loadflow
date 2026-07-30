@@ -14,7 +14,6 @@ import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.network.NodeBreakerNetworkFactory;
 import com.powsybl.openloadflow.network.impl.RefThreadGuardTestUtil;
-import org.junit.jupiter.api.Test;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityAnalysisResult;
 import com.powsybl.sensitivity.SensitivityAnalysisRunParameters;
