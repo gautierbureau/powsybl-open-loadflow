@@ -18,6 +18,10 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      # SonarCloud is only configured on the powsybl repository: on other repositories (personal forks
+      # for instance) the secret is not defined and the analysis is skipped instead of failing the build.
+      HAS_SONAR_TOKEN: ${{ secrets.SONAR_TOKEN != '' }}
 
     steps:
       - name: Checkout sources
@@ -41,8 +45,12 @@ jobs:
         run: mvnw.cmd --batch-mode install
         shell: cmd
 
+      - name: Skip SonarCloud analysis
+        if: matrix.os == 'ubuntu-latest' && env.HAS_SONAR_TOKEN != 'true'
+        run: echo "::notice::SONAR_TOKEN is not defined on this repository, skipping the SonarCloud analysis"
+
       - name: Run SonarCloud analysis
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && env.HAS_SONAR_TOKEN == 'true'
         run: >
           ./mvnw --batch-mode -DskipTests sonar:sonar
           -Dsonar.host.url=https://sonarcloud.io

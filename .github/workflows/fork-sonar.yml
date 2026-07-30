@@ -9,12 +9,35 @@ on:
 permissions: {}
 
 jobs:
-  sonar:
-    name: Run Sonar Analysis for forks
+  # SonarCloud is only configured on the powsybl repository: on other repositories (personal forks
+  # for instance) the secret is not defined and the analysis is skipped instead of failing.
+  # A job condition cannot read the secrets context, hence this separate job.
+  check-sonar-token:
+    name: Check SonarCloud configuration
     runs-on: ubuntu-latest
     if: >
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'success'
+    outputs:
+      has-sonar-token: ${{ steps.check.outputs.has-sonar-token }}
+    env:
+      HAS_SONAR_TOKEN: ${{ secrets.SONAR_TOKEN != '' }}
+    steps:
+      - name: Check whether SONAR_TOKEN is defined
+        id: check
+        run: |
+          echo "has-sonar-token=$HAS_SONAR_TOKEN" >> $GITHUB_OUTPUT
+          if [ "$HAS_SONAR_TOKEN" != "true" ]; then
+            echo "::notice::SONAR_TOKEN is not defined on this repository, skipping the Sonar analysis"
+          fi
+
+  sonar:
+    name: Run Sonar Analysis for forks
+    runs-on: ubuntu-latest
+    needs: check-sonar-token
+    # When skipped, the artifacts uploaded by the build workflow are not deleted here,
+    # but they are uploaded with a one day retention so they expire on their own.
+    if: needs.check-sonar-token.outputs.has-sonar-token == 'true'
     permissions:
       actions: write
       checks: write
