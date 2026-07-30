@@ -19,6 +19,7 @@ import com.powsybl.contingency.strategy.condition.TrueCondition;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.CommonTestConfig;
+import com.powsybl.openloadflow.network.FourBusNetworkFactory;
 import com.powsybl.openloadflow.network.NodeBreakerNetworkFactory;
 import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
@@ -176,6 +177,47 @@ class MtSharedQueueTest extends AbstractOpenSecurityAnalysisTest {
         SecurityAnalysisResult singleThread = run(network, contingencies, 1, true, SHARED_QUEUE, ReportNode.NO_OP);
         SecurityAnalysisResult multiThread = run(network, contingencies, 2, true, SHARED_QUEUE, ReportNode.NO_OP);
         assertSameResults(singleThread, multiThread);
+    }
+
+    @Test
+    void testMultiComponentFallsBackToRoundRobin() throws java.io.IOException {
+        // more than one simulated component: the shared-queue mode is not applicable and the analysis falls
+        // back to the round-robin partitions. The report must stay identical to the single-threaded one (the
+        // networks built by the aborted shared-queue attempt must not leave their report nodes behind).
+        Network network = FourBusNetworkFactory.createWithTwoScs();
+        network.getBusBreakerView().getBus("c1").getVoltageLevel().newLoad()
+                .setId("dummyLoad")
+                .setBus("c1")
+                .setConnectableBus("c1")
+                .setP0(1)
+                .setQ0(0)
+                .add();
+        List<Contingency> contingencies = List.of(
+                new Contingency("l13", new BranchContingency("l13")),
+                new Contingency("l14", new BranchContingency("l14")),
+                new Contingency("dummyLoad", new LoadContingency("dummyLoad")));
+
+        ReportNode singleThreadReport = newRootReportNode();
+        SecurityAnalysisResult singleThread = runAllComponents(network, contingencies, 1, singleThreadReport);
+        ReportNode multiThreadReport = newRootReportNode();
+        SecurityAnalysisResult multiThread = runAllComponents(network, contingencies, 2, multiThreadReport);
+
+        assertSameResults(singleThread, multiThread);
+
+        StringWriter singleThreadWriter = new StringWriter();
+        singleThreadReport.print(singleThreadWriter);
+        StringWriter multiThreadWriter = new StringWriter();
+        multiThreadReport.print(multiThreadWriter);
+        assertEquals(singleThreadWriter.toString(), multiThreadWriter.toString(),
+                "multi-thread report should be identical to the single-thread one");
+    }
+
+    private SecurityAnalysisResult runAllComponents(Network network, List<Contingency> contingencies, int threadCount, ReportNode reportNode) {
+        SecurityAnalysisParameters saParameters = new SecurityAnalysisParameters();
+        saParameters.setLoadFlowParameters(new LoadFlowParameters().setComponentMode(LoadFlowParameters.ComponentMode.ALL_CONNECTED));
+        saParameters.addExtension(OpenSecurityAnalysisParameters.class,
+                new OpenSecurityAnalysisParameters().setThreadCount(threadCount).setContingencyPartitioningMode(SHARED_QUEUE));
+        return runSecurityAnalysis(network, contingencies, createNetworkMonitors(network), saParameters, reportNode);
     }
 
     private SecurityAnalysisResult runStrategies(Network network, List<Contingency> contingencies, List<OperatorStrategy> operatorStrategies,

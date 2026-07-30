@@ -31,6 +31,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -88,9 +89,8 @@ public final class ContingencyMultiThreadHelper {
     }
 
     /**
-     * Runner for the shared-queue mode ({@link #buildOnceCopyAndRunQueue}): each worker owns its own
-     * network copy and pulls its next contingency from {@code sharedQueue} (drained concurrently by all
-     * the workers) until it is empty.
+     * Runner for the shared-queue mode: each worker owns its own network copy and pulls its next
+     * contingency from {@code sharedQueue} (drained concurrently by all the workers) until it is empty.
      *
      * @param allPropagatedContingencies the full contingency list (shared by all workers, needed e.g. to
      *                                    index operator strategies); the per-worker work items come from
@@ -99,6 +99,22 @@ public final class ContingencyMultiThreadHelper {
     public interface QueueContingencyRunner<P extends AbstractLoadFlowParameters<P>> {
         void run(int workerNum, LfNetworkList lfNetworks, List<PropagatedContingency> allPropagatedContingencies,
                  Queue<PropagatedContingency> sharedQueue, P parameters, boolean presolved);
+    }
+
+    /**
+     * Shared-queue mode request passed to {@code buildOnceCopyAndRunAnalysis}:
+     * the contingencies are then run with a shared work queue instead of the static partitions. The mode is
+     * only applicable when a single component is simulated, which is known once the networks are built:
+     * {@code singleComponentEligible} is evaluated on the built networks and, when it does not hold, the
+     * analysis silently falls back to the static partitions <em>on the very same networks</em> (they are
+     * neither rebuilt nor reported twice).
+     *
+     * @param contingencies the contingency list, in input order: the shared queue is filled with it and the
+     *                      workers drain it in that order
+     */
+    public record QueueMode<P extends AbstractLoadFlowParameters<P>>(List<Contingency> contingencies,
+                                                                     QueueContingencyRunner<P> queueRunner,
+                                                                     Predicate<LfNetworkList> singleComponentEligible) {
     }
 
     /**
@@ -193,6 +209,33 @@ public final class ContingencyMultiThreadHelper {
                                                                                              ReportMerger reportMerger,
                                                                                              boolean detachFirstPartitionReporting,
                                                                                              Executor executor) throws ExecutionException {
+        buildOnceCopyAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
+                parameterProvider, presolver, contingencyRunner, rootReportNode, reportMerger, detachFirstPartitionReporting,
+                executor, null);
+    }
+
+    /**
+     * Same as the overload without {@code queueMode},
+     * with an optional shared-queue mode request (see {@link QueueMode}): when {@code queueMode} is not null
+     * and applicable to the built networks, the contingencies are run with a shared work queue drained by
+     * {@code queueMode.queueRunner()} instead of the static {@code contingenciesPartitions} (which are then
+     * only used to size the worker pool). Because the networks are built before the applicability is known,
+     * and because building them reports under {@code rootReportNode}, the build is shared by both modes: the
+     * fallback to the static partitions reuses the very same networks.
+     */
+    public static <P extends AbstractLoadFlowParameters<P>> void buildOnceCopyAndRunAnalysis(Network network,
+                                                                                             String workingVariantId,
+                                                                                             List<List<Contingency>> contingenciesPartitions,
+                                                                                             PropagatedContingencyCreationParameters creationParameters,
+                                                                                             LfTopoConfig topoConfig,
+                                                                                             ParameterProvider<P> parameterProvider,
+                                                                                             NetworksPresolver<P> presolver,
+                                                                                             ContingencyRunner<P> contingencyRunner,
+                                                                                             ReportNode rootReportNode,
+                                                                                             ReportMerger reportMerger,
+                                                                                             boolean detachFirstPartitionReporting,
+                                                                                             Executor executor,
+                                                                                             QueueMode<P> queueMode) throws ExecutionException {
         int partitionCount = contingenciesPartitions.size();
         List<ReportNode> reportNodes = Collections.synchronizedList(new ArrayList<>(Collections.nCopies(partitionCount, ReportNode.NO_OP)));
         // COPY mode only accesses the IIDM network from the calling thread (contingency propagation,
@@ -206,6 +249,8 @@ public final class ContingencyMultiThreadHelper {
         // can later give each partition's network only its own single-side openable branches. The
         // networks themselves are built once with the union topo config below, so the topology (and
         // therefore the results) is identical to a single threaded analysis whatever the thread count.
+        // In shared-queue mode the partitions are only used to size the worker pool and to accumulate
+        // the union topo config: the contingencies are then all pulled from a single shared queue.
         Stopwatch phaseStopwatch = Stopwatch.createStarted();
         var unionTopoConfig = new LfTopoConfig(topoConfig);
         List<List<PropagatedContingency>> propagatedPartitions = new ArrayList<>(partitionCount);
@@ -260,98 +305,60 @@ public final class ContingencyMultiThreadHelper {
                 }
                 presolved = true;
             }
-            LOGGER.info("COPY mode setup phases: contingency propagation {} ms, parameters {} ms, networks build {} ms, presolve {} ms (presolved={})",
-                    propagationMs, parametersMs, buildMs, presolveMs, presolved);
-            runOnCopies(network, workingVariantId, lfNetworks, propagatedPartitions, partitionParameters,
-                    partitionOpenableSide1, partitionOpenableSide2, contingencyRunner, rootReportNode, reportNodes,
-                    executor, presolved, detachFirstPartitionReporting);
+            // the shared-queue mode reuses one context/LU per worker across the contingencies it pulls, which
+            // needs a single simulated component: this is only known now that the networks are built, and
+            // rebuilding them for the fallback would report their build twice under the root report node
+            boolean queueApplicable = queueMode != null && queueMode.singleComponentEligible().test(lfNetworks);
+            if (queueMode != null && !queueApplicable) {
+                LOGGER.info("SHARED_QUEUE mode not applicable (more than one simulated component): falling back to the static contingency partitions");
+            }
+            LOGGER.info("{} mode setup phases: contingency propagation {} ms, parameters {} ms, networks build {} ms, presolve {} ms (presolved={})",
+                    queueApplicable ? "SHARED_QUEUE" : "COPY", propagationMs, parametersMs, buildMs, presolveMs, presolved);
+            if (queueApplicable) {
+                runQueue(network, workingVariantId, lfNetworks, orderedPropagatedContingencies(queueMode.contingencies(), propagatedPartitions),
+                        partitionParameters, queueMode.queueRunner(), rootReportNode, reportNodes, executor, presolved);
+            } else {
+                runOnCopies(network, workingVariantId, lfNetworks, propagatedPartitions, partitionParameters,
+                        partitionOpenableSide1, partitionOpenableSide2, contingencyRunner, rootReportNode, reportNodes,
+                        executor, presolved, detachFirstPartitionReporting);
+            }
         }
 
         reportMerger.mergeReportThreadResults(rootReportNode, collectThreadReportNodes(reportNodes, rootReportNode));
     }
 
     /**
-     * Build the LF networks once (union topo config, like a single-threaded analysis), then run the
-     * contingencies with a shared work queue: {@code threadCount} workers each own a deep copy and pull
-     * their next contingency from a shared thread-safe queue (dynamic load balancing). Each worker reuses
-     * one load flow context (equation system + Jacobian + LU factorization) across the contingencies it
-     * pulls; the copies keep the union of {@code disconnectionAllowed} terms (never trimmed by
-     * {@code restrictDisconnectionAllowed}), so applying any queued contingency reuses the LU analyze.
-     *
-     * <p>Applicable to AC single simulated component analyses only. Returns {@code false} without running
-     * anything (the caller then falls back to {@link #buildOnceCopyAndRunAnalysis}) when more than one
-     * component would be simulated ({@code singleComponentEligible}); throws when the network cannot be
-     * deep copied. Like COPY mode, the IIDM network is only accessed from the calling thread and workers
-     * read their copies on a single working variant, so multi thread variant access is not required.
+     * Flatten the propagated contingencies of all the partitions back into the input contingency order, as
+     * expected by the shared queue (which is drained in list order).
      */
-    public static <P extends AbstractLoadFlowParameters<P>> boolean buildOnceCopyAndRunQueue(Network network,
-                                                                                             String workingVariantId,
-                                                                                             List<Contingency> contingencies,
-                                                                                             int threadCount,
-                                                                                             PropagatedContingencyCreationParameters creationParameters,
-                                                                                             LfTopoConfig topoConfig,
-                                                                                             ParameterProvider<P> parameterProvider,
-                                                                                             NetworksPresolver<P> presolver,
-                                                                                             QueueContingencyRunner<P> queueRunner,
-                                                                                             ReportNode rootReportNode,
-                                                                                             ReportMerger reportMerger,
-                                                                                             Executor executor,
-                                                                                             Predicate<LfNetworkList> singleComponentEligible) throws ExecutionException {
-        List<ReportNode> reportNodes = Collections.synchronizedList(new ArrayList<>(Collections.nCopies(threadCount, ReportNode.NO_OP)));
-        network.getVariantManager().setWorkingVariant(workingVariantId);
-
-        Stopwatch phaseStopwatch = Stopwatch.createStarted();
-        // union topo config over all the contingencies: every worker copy is built with it and keeps the
-        // union of disconnectionAllowed terms, so any queued contingency can be applied without an LU re-analyze
-        var unionTopoConfig = new LfTopoConfig(topoConfig);
-        List<PropagatedContingency> allPropagatedContingencies =
-                PropagatedContingency.createList(network, contingencies, unionTopoConfig, creationParameters, 0);
-
-        List<P> workerParameters = new ArrayList<>(threadCount);
-        for (int i = 0; i < threadCount; i++) {
-            workerParameters.add(parameterProvider.createParameters(unionTopoConfig));
+    private static List<PropagatedContingency> orderedPropagatedContingencies(List<Contingency> contingencies,
+                                                                    List<List<PropagatedContingency>> propagatedPartitions) {
+        Map<String, Integer> positions = new HashMap<>();
+        for (int i = 0; i < contingencies.size(); i++) {
+            positions.putIfAbsent(contingencies.get(i).getId(), i);
         }
-
-        try (LfNetworkList lfNetworks = Networks.loadWithReconnectableElements(network, unionTopoConfig,
-                workerParameters.get(0).getNetworkParameters(), rootReportNode)) {
-            if (!lfNetworks.getList().stream().allMatch(LfNetworkCopier::canCopy)) {
-                throw new PowsyblException("Multi-threaded analysis requires an LF network supporting deep copy "
-                        + "(see LfNetworkCopier#canCopy): this network uses element implementations that cannot be copied. "
-                        + "Run the analysis single-threaded (threadCount = 1) to simulate it.");
-            }
-            if (!singleComponentEligible.test(lfNetworks)) {
-                // the shared-queue mode reuses one context/LU per worker across the contingencies it pulls,
-                // which needs a single simulated component; let the caller fall back to round-robin partitions
-                LOGGER.info("SHARED_QUEUE mode not applicable (more than one simulated component): falling back to ROUND_ROBIN");
-                return false;
-            }
-            boolean presolved = false;
-            if (presolver != null) {
-                presolver.presolve(lfNetworks, workerParameters.get(0));
-                if (!lfNetworks.getList().stream().allMatch(LfNetworkCopier::canCopy)) {
-                    throw new PowsyblException("The pre-contingency simulation changed the topology and the LF network "
-                            + "is not copyable anymore: multi-threaded analysis cannot proceed. "
-                            + "Run the analysis single-threaded (threadCount = 1) to simulate it.");
-                }
-                presolved = true;
-            }
-            LOGGER.info("SHARED_QUEUE mode setup completed in {} ms (presolved={})",
-                    phaseStopwatch.elapsed(TimeUnit.MILLISECONDS), presolved);
-            runQueue(network, workingVariantId, lfNetworks, allPropagatedContingencies, workerParameters, threadCount,
-                    queueRunner, rootReportNode, reportNodes, executor, presolved);
-        }
-
-        reportMerger.mergeReportThreadResults(rootReportNode, collectThreadReportNodes(reportNodes, rootReportNode));
-        return true;
+        return propagatedPartitions.stream()
+                .flatMap(List::stream)
+                .sorted(Comparator.comparingInt(c -> positions.getOrDefault(c.getContingency().getId(), Integer.MAX_VALUE)))
+                .toList();
     }
 
+    /**
+     * Run the contingencies with a shared work queue: one worker per partition, each owning a deep copy of
+     * the built networks and pulling its next contingency from a shared thread-safe queue (dynamic load
+     * balancing). Each worker reuses one load flow context (equation system + Jacobian + LU factorization)
+     * across the contingencies it pulls; the copies keep the union of {@code disconnectionAllowed} terms
+     * (never trimmed by {@code restrictDisconnectionAllowed}), so applying any queued contingency reuses the
+     * LU analyze.
+     */
     private static <P extends AbstractLoadFlowParameters<P>> void runQueue(Network network, String workingVariantId,
                                                                            LfNetworkList lfNetworks,
                                                                            List<PropagatedContingency> allPropagatedContingencies,
-                                                                           List<P> workerParameters, int threadCount,
+                                                                           List<P> workerParameters,
                                                                            QueueContingencyRunner<P> queueRunner, ReportNode rootReportNode,
                                                                            List<ReportNode> reportNodes, Executor executor,
                                                                            boolean presolved) throws ExecutionException {
+        int threadCount = workerParameters.size();
         // select the built variant once, on the calling thread, for the whole parallel region (see runOnCopies)
         String builtVariantId = lfNetworks.getVariantCleaner() != null ? lfNetworks.getVariantCleaner().getTmpVariantId() : workingVariantId;
         network.getVariantManager().setWorkingVariant(builtVariantId);

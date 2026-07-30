@@ -248,22 +248,21 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             ContingencyMultiThreadHelper.ReportMerger reportMerger = roundRobinPartitioning
                     ? (rootNode, threadNodes) -> ContingencyMultiThreadHelper.mergeReportThreadResultsOrdered(rootNode, threadNodes, contingencyPositions)
                     : ContingencyMultiThreadHelper::mergeReportThreadResults;
-            boolean queueRan = false;
+            // when the shared-queue mode is requested but turns out not to be applicable (more than one
+            // simulated component, only known once the networks are built), the helper transparently falls
+            // back to the round-robin partitions on the already built networks
+            ContingencyMultiThreadHelper.QueueMode<P> queueModeRequest = null;
             if (queueMode) {
                 ContingencyMultiThreadHelper.QueueContingencyRunner<P> queueRunner =
                         (workerNum, lfNetworks, allPropagated, sharedQueue, parameters, presolved) ->
                                 partitionResults.set(workerNum, runSimulationsOnAllComponentsFromQueue(lfNetworks, allPropagated, sharedQueue,
                                         parameters, securityAnalysisParameters, operatorStrategies, actions, limitReductions, lfParameters,
                                         presolved ? presolvedResults : null));
-                queueRan = ContingencyMultiThreadHelper.buildOnceCopyAndRunQueue(network, workingVariantId, contingencies,
-                        securityAnalysisParametersExt.getThreadCount(), creationParameters, topoConfig, parameterProvider, presolver,
-                        queueRunner, saReportNode, reportMerger, executor,
+                queueModeRequest = new ContingencyMultiThreadHelper.QueueMode<>(contingencies, queueRunner,
                         builtNetworks -> getNetworksToSimulate(builtNetworks, lfParameters.getComponentMode()).size() == 1);
             }
-            if (!queueRan) {
-                ContingencyMultiThreadHelper.buildOnceCopyAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
-                        parameterProvider, presolver, contingencyRunner, saReportNode, reportMerger, roundRobinPartitioning, executor);
-            }
+            ContingencyMultiThreadHelper.buildOnceCopyAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
+                    parameterProvider, presolver, contingencyRunner, saReportNode, reportMerger, roundRobinPartitioning, executor, queueModeRequest);
 
             // we just need to merge post contingency and operator strategy results, all pre contingency are the same
             List<PostContingencyResult> postContingencyResults = new ArrayList<>();
