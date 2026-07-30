@@ -28,6 +28,7 @@ import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
+import com.powsybl.openloadflow.equations.EquationSystemImbalance;
 import com.powsybl.openloadflow.equations.EquationSystemNotSquareException;
 import com.powsybl.openloadflow.equations.Quantity;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
@@ -993,6 +994,27 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
      * otherwise fail on the very first solve; the imbalance is visible on the equation system index, so it is detected
      * here rather than paid as a failed solve.
      */
+    /**
+     * Name the network elements whose variables are not all determined by an active equation, so that the log points at
+     * the actual bus or branch: the counts per equation and variable type tell which kind of control is involved, but
+     * not which element, which is what is needed to investigate on a large network.
+     */
+    private String describeImbalancedElementIds(LfNetwork lfNetwork, C context) {
+        List<EquationSystemImbalance.ImbalancedElement> imbalancedElements =
+                EquationSystemImbalance.findImbalancedElements(context.getEquationSystem());
+        if (imbalancedElements.isEmpty()) {
+            return "";
+        }
+        return imbalancedElements.stream()
+                .limit(5)
+                .<String>map(imbalancedElement -> {
+                    LfElement element = lfNetwork.getElement(imbalancedElement.elementType(), imbalancedElement.elementNum());
+                    return imbalancedElement.elementType() + " '" + (element != null ? element.getId() : imbalancedElement.elementNum())
+                            + "' (" + imbalancedElement.variableCount() + " variables, " + imbalancedElement.equationCount() + " active equations)";
+                })
+                .collect(Collectors.joining(", ", ", imbalanced element ids=", imbalancedElements.size() > 5 ? ", ..." : ""));
+    }
+
     private C createSquareLoadFlowContext(LfNetwork lfNetwork, P parameters) {
         C context = createLoadFlowContext(lfNetwork, parameters);
         int rowCount = context.getEquationSystem().getIndex().getRowCount();
@@ -1007,7 +1029,10 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             return context;
         }
         LOGGER.warn("Network {}: the equation system of the base network is not square ({} equations for {} variables), "
-                + "falling back to the legacy modeling for the whole analysis", lfNetwork, columnCount, rowCount);
+                + "falling back to the legacy modeling for the whole analysis. {}{}",
+                lfNetwork, columnCount, rowCount,
+                EquationSystemImbalance.describeTypes(context.getEquationSystem()),
+                describeImbalancedElementIds(lfNetwork, context));
         context.close();
         return fallbackContext.get();
     }
@@ -1109,8 +1134,11 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             // control whose controller set the contingency reconfigures). Rather than failing the whole analysis,
             // re-run this single contingency on a degraded modeling that does not have the problem.
             fallbackContext = createFallbackModelingContext(lfNetwork, p).orElseThrow(() -> e);
-            LOGGER.warn("Contingency '{}' cannot be simulated on the current modeling, falling back to the legacy modeling for it: {}",
-                    lfContingency.getId(), e.getMessage());
+            LOGGER.warn("Contingency '{}' (disabling {} buses and {} branches) cannot be simulated on the current modeling, "
+                    + "falling back to the legacy modeling for it: {}{}",
+                    lfContingency.getId(), lfContingency.getDisabledNetwork().getBuses().size(),
+                    lfContingency.getDisabledNetwork().getBranches().size(), e.getMessage(),
+                    describeImbalancedElementIds(lfNetwork, context));
             postContingencyResult = runPostContingencySimulation(lfNetwork, fallbackContext, propagatedContingency.getContingency(),
                 lfContingency, preContingencyLimitViolationManager,
                 securityAnalysisParameters,
