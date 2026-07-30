@@ -205,6 +205,35 @@ analysis builds the LF networks once and deep-copies them, it does not clone one
 thread. The clone is not cheap on network-store though — 1.7–3.5 s on the node-breaker 13k, a
 server-side copy — but it is the same single cost single- and multi-threaded.
 
+**Worker-side IIDM reads** — what actually makes the multi-threaded path behave badly on the store.
+`probe.sh` is `run.sh` plus the network-store REST client logger and thread names, so you can see
+which thread issues which REST call and window on the parallel run phase:
+
+```bash
+./probe.sh run http://localhost:8080/ <uuid> COLLECTION 4 1 20 5 false
+```
+
+Node-breaker 13k, 20 contingencies, `COLLECTION` preloading, only the OLF build differing. "Attrs"
+counts operational-limit-group attributes fetched over REST:
+
+| OLF build | threads | limit-load calls | attrs | REST ms | issued from | run phase | SA |
+|---|--:|--:|--:|--:|---|--:|--:|
+| without the IIDM-free commits | 4 | 8 | 155,796 | 16,994 | 4 worker threads | 10.9 s | 33.1 s |
+| with them | 4 | 2 | 38,949 | 1,511 | calling thread | 7.7 s | 31.6 s |
+| without | 8 | 12 | 268,504 | 71,495 | 8 worker threads | 21.5 s | 44.5 s |
+| with | 8 | 2 | 38,949 | 1,526 | calling thread | 7.8 s | 32.2 s |
+
+Without the limits materialization, every partition independently REST-loads *the same* limit
+attributes from its worker thread (`Loading operational limits group attributes` on
+`ForkJoinPool.commonPool-worker-N`), because `AbstractLfBranch` leaves the limits caches to be
+recomputed per copy. The cost scales with the thread count — more threads make the run *slower* —
+and with an async HTTP client sharing the ForkJoinPool it can deadlock outright. With the
+materialization, the parallel run phase issues **zero** REST calls.
+
+This only shows up on a network with real operational-limit groups. The MATPOWER bus/breaker Pégase
+does not have the named groups that trigger the separate lazy endpoint, and on it the two builds are
+within noise of each other. Use the node-breaker fixture.
+
 **Wall clock**, node-breaker 13k, 100 contingencies, busbar contingencies, propagation off:
 
 | threads | SA | of which LF network build | run phase |
