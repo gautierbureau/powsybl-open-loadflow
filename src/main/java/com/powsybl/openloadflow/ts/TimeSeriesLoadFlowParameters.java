@@ -38,6 +38,8 @@ public class TimeSeriesLoadFlowParameters {
 
     private boolean keepLoadPowerFactorConstant = false;
 
+    private boolean dcBatchedSolve = false;
+
     /**
      * Whether a load series moves the load's reactive power along with its active power, keeping the power factor the
      * load was built with. Off by default: a plan series describes active power, and q0 is left where the grid model
@@ -105,6 +107,33 @@ public class TimeSeriesLoadFlowParameters {
 
     public TimeSeriesLoadFlowParameters setStreamGeneratorResults(boolean streamGeneratorResults) {
         this.streamGeneratorResults = streamGeneratorResults;
+        return this;
+    }
+
+    /**
+     * Whether, in DC, the steps of a partition are solved in one batch: each step's right hand side is assembled and
+     * they are solved together on the single shared factorization, instead of one linear solve per step. It streams
+     * byte-identical results to the per-step path -- {@code TimeSeriesLoadFlowTest} asserts this by running a plan both
+     * ways -- and falls back to the per-step path wherever the batch would not be equivalent: an AC plan, or a DC
+     * network with an active outer loop (phase control, area interchange, HVDC AC emulation limits) whose per-step
+     * re-solves cannot be pre-batched, or any chunk with a slack distribution failure or a singular system.
+     *
+     * <p><b>Off by default.</b> Measured against the per-step path it is faster where the linear solve is a real part
+     * of the step -- ~1.6-1.7x on IEEE 118 / 300 with DC slack distribution off -- and neutral where it is not: with
+     * DC slack distribution on, the per-step distribution dominates the step (roughly ten times the rest) and is run
+     * per step in both paths, so batching the solve neither gains nor costs (~1.0x). The gain, when it comes, is the
+     * blocked {@code solveTransposed(DenseMatrix)} amortizing the per-call solve overhead a single-column solve pays
+     * every step -- worth ~2-5x on the solve alone -- not a change in the linear algebra. It stays off by default while
+     * it earns broader coverage (it falls back to the per-step path for a zero-impedance subnetwork, among other
+     * cases), but it is a win to turn on for a DC plan whose steps are dominated by the solve rather than by slack
+     * distribution.
+     */
+    public boolean isDcBatchedSolve() {
+        return dcBatchedSolve;
+    }
+
+    public TimeSeriesLoadFlowParameters setDcBatchedSolve(boolean dcBatchedSolve) {
+        this.dcBatchedSolve = dcBatchedSolve;
         return this;
     }
 }

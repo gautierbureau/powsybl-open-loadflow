@@ -187,35 +187,27 @@ public class DcLoadFlowEngine implements LoadFlowEngine<DcVariableType, DcEquati
         }
     }
 
-    public DcLoadFlowResult run() {
-        if (context.getParameters().getNetworkParameters().isAcDcNetwork()) {
-            throw new PowsyblException("DC load flow does not support detailed AC-DC networks");
-        }
+    /**
+     * The per-step work that precedes the linear solve, on a target array a caller can then solve: initialize the
+     * state vector, distribute the slack when asked, and read the resulting target vector. Extracted so the batched
+     * time-series path can assemble one right hand side per step through the very same code that {@link #run()} uses,
+     * then solve a whole batch of them together on the one shared factorization -- instead of duplicating the slack
+     * logic and risking drift. On a slack distribution failure it records the failure on {@code runningContext} and
+     * returns a result whose target array is null and carries the failure message, leaving the caller to report it
+     * and stop, exactly as run() did.
+     */
+    public PreparedTargets prepareTargets(boolean isAreaInterchangeControl) {
         LfNetwork network = context.getNetwork();
         ReportNode reportNode = network.getReportNode();
-        EquationSystem<DcVariableType, DcEquationType> equationSystem = context.getEquationSystem();
         DcLoadFlowParameters parameters = context.getParameters();
+        EquationSystem<DcVariableType, DcEquationType> equationSystem = context.getEquationSystem();
         TargetVector<DcVariableType, DcEquationType> targetVector = context.getTargetVector();
-        RunningContext runningContext = new RunningContext();
-        List<DcOuterLoop> outerLoops = parameters.getOuterLoops().stream().filter(o -> o.isNeeded(context)).toList();
-
-        List<Pair<DcOuterLoop, DcOuterLoopContext>> outerLoopsAndContexts = outerLoops.stream()
-                .map(outerLoop -> Pair.of(outerLoop, new DcOuterLoopContext(network)))
-                .toList();
-
-        // outer loops initialization
-        for (var outerLoopAndContext : outerLoopsAndContexts) {
-            var outerLoop = outerLoopAndContext.getLeft();
-            var outerLoopContext = outerLoopAndContext.getRight();
-            outerLoop.initialize(outerLoopContext);
-        }
 
         initStateVector(network, equationSystem, new UniformValueVoltageInitializer());
 
         double initialSlackBusActivePowerMismatch = getActivePowerMismatch(network.getBuses());
         double distributedActivePower = 0.0;
 
-        boolean isAreaInterchangeControl = outerLoops.stream().anyMatch(DcAreaInterchangeControlOuterLoop.class::isInstance);
         // In DC LoadFlow slack mismatch is distributed when mismatch is above epsilon (P_RESIDUE_EPS 1e-3 MW).
         // This is different from AC LoadFlow distributing slack when mismatch is above OLF parameter slackBusPMaxMismatch (default 1 MW).
         // The reason of the difference is that in DC we can eliminate completely (within epsilon) the slack mismatch
@@ -257,17 +249,62 @@ public class DcLoadFlowEngine implements LoadFlowEngine<DcVariableType, DcEquati
             }
             if (resultWbh.failed()) {
                 distributedActivePower -= resultWbh.failedDistributedActivePower();
-                runningContext.lastSolverSuccess = false;
-                runningContext.lastOuterLoopResult = new OuterLoopResult("DistributedSlack", OuterLoopStatus.FAILED, resultWbh.failedMessage());
-                Reports.reportDcLfComplete(reportNode, runningContext.lastSolverSuccess, runningContext.lastOuterLoopResult.status().name());
-                return buildDcLoadFlowResult(network, runningContext, initialSlackBusActivePowerMismatch, distributedActivePower);
+                return new PreparedTargets(null, initialSlackBusActivePowerMismatch, distributedActivePower, resultWbh.failedMessage());
             }
         }
 
         // we need to copy the target array because JacobianMatrix.solveTransposed take as an input the second member
         // and reuse the array to fill with the solution
         // so we need to copy to later the target as it is and reusable for next run
-        var targetVectorArray = targetVector.getArray().clone();
+        return new PreparedTargets(targetVector.getArray().clone(), initialSlackBusActivePowerMismatch, distributedActivePower, null);
+    }
+
+    /**
+     * The target array and pre-solve accounting {@link #prepareTargets} produced. A null {@code targetVectorArray}
+     * means slack distribution failed, {@code slackFailureMessage} says why, and there is nothing to solve.
+     */
+    public record PreparedTargets(double[] targetVectorArray, double initialSlackBusActivePowerMismatch,
+                                  double distributedActivePower, String slackFailureMessage) {
+        public boolean slackDistributionFailed() {
+            return targetVectorArray == null;
+        }
+    }
+
+    public DcLoadFlowResult run() {
+        if (context.getParameters().getNetworkParameters().isAcDcNetwork()) {
+            throw new PowsyblException("DC load flow does not support detailed AC-DC networks");
+        }
+        LfNetwork network = context.getNetwork();
+        ReportNode reportNode = network.getReportNode();
+        EquationSystem<DcVariableType, DcEquationType> equationSystem = context.getEquationSystem();
+        DcLoadFlowParameters parameters = context.getParameters();
+        RunningContext runningContext = new RunningContext();
+        List<DcOuterLoop> outerLoops = parameters.getOuterLoops().stream().filter(o -> o.isNeeded(context)).toList();
+
+        List<Pair<DcOuterLoop, DcOuterLoopContext>> outerLoopsAndContexts = outerLoops.stream()
+                .map(outerLoop -> Pair.of(outerLoop, new DcOuterLoopContext(network)))
+                .toList();
+
+        // outer loops initialization
+        for (var outerLoopAndContext : outerLoopsAndContexts) {
+            var outerLoop = outerLoopAndContext.getLeft();
+            var outerLoopContext = outerLoopAndContext.getRight();
+            outerLoop.initialize(outerLoopContext);
+        }
+
+        boolean isAreaInterchangeControl = outerLoops.stream().anyMatch(DcAreaInterchangeControlOuterLoop.class::isInstance);
+        PreparedTargets prepared = prepareTargets(isAreaInterchangeControl);
+        double initialSlackBusActivePowerMismatch = prepared.initialSlackBusActivePowerMismatch();
+        double distributedActivePower = prepared.distributedActivePower();
+
+        if (prepared.slackDistributionFailed()) {
+            runningContext.lastSolverSuccess = false;
+            runningContext.lastOuterLoopResult = new OuterLoopResult("DistributedSlack", OuterLoopStatus.FAILED, prepared.slackFailureMessage());
+            Reports.reportDcLfComplete(reportNode, runningContext.lastSolverSuccess, runningContext.lastOuterLoopResult.status().name());
+            return buildDcLoadFlowResult(network, runningContext, initialSlackBusActivePowerMismatch, distributedActivePower);
+        }
+
+        double[] targetVectorArray = prepared.targetVectorArray();
 
         // First linear system solution
         runningContext.lastSolverSuccess = solve(targetVectorArray, context.getJacobianMatrix(), reportNode);

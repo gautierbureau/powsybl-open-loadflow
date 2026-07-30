@@ -10,11 +10,17 @@ package com.powsybl.openloadflow.ts;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.iidm.network.Branch;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.PhaseTapChanger;
+import com.powsybl.iidm.network.Substation;
+import com.powsybl.iidm.network.TopologyKind;
+import com.powsybl.iidm.network.TwoWindingsTransformer;
+import com.powsybl.iidm.network.VoltageLevel;
 import com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControl;
 import com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder;
 import com.powsybl.iidm.network.extensions.LoadDetailAdder;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
 import com.powsybl.iidm.network.test.FourSubstationsNodeBreakerFactory;
+import com.powsybl.iidm.network.test.PhaseShifterTestCaseFactory;
 import com.powsybl.loadflow.LoadFlow;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
@@ -22,6 +28,7 @@ import com.powsybl.loadflow.resultswriter.CsvNetworkResultWriter;
 import com.powsybl.loadflow.resultswriter.CsvNetworkResultWriterFactory;
 import com.powsybl.loadflow.resultswriter.NetworkResultWriterFactory;
 import com.powsybl.math.matrix.DenseMatrixFactory;
+import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.OpenLoadFlowProvider;
 import com.powsybl.openloadflow.network.HvdcNetworkFactory;
 import com.powsybl.timeseries.DoubleTimeSeries;
@@ -482,6 +489,279 @@ class TimeSeriesLoadFlowTest {
                         "DC p1 mismatch on " + branch.getId() + " at step " + step);
             }
         }
+    }
+
+    private static TimeSeriesLoadFlowParameters dcParameters(boolean batched) {
+        return dcParameters(batched, true);
+    }
+
+    private static TimeSeriesLoadFlowParameters dcParameters(boolean batched, boolean distributedSlack) {
+        TimeSeriesLoadFlowParameters parameters = new TimeSeriesLoadFlowParameters().setDcBatchedSolve(batched);
+        parameters.getLoadFlowParameters().setDc(true).setDistributedSlack(distributedSlack)
+                .setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD);
+        return parameters;
+    }
+
+    private static Map<String, String> runCapturingCsv(Network network, List<DoubleTimeSeries> plan,
+                                                       TimeSeriesLoadFlowParameters parameters) {
+        Map<String, StringWriter> csv = new HashMap<>();
+        TimeSeriesLoadFlow.run(network, plan, parameters, partitionIndex -> new CsvNetworkResultWriter(csvSink(csv)));
+        return csv.entrySet().stream().collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().toString()));
+    }
+
+    /**
+     * The batched DC path is an optimization: solving a partition's steps together on the shared factorization must
+     * stream exactly what the per-step path streams. Same plan, run both ways, every dataset byte-identical.
+     */
+    @Test
+    void batchedDcMatchesPerStepDc() {
+        double[] p0s = {600.0, 1200.0, 300.0};
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", index, p0s));
+
+        // both slack settings: with distribution on (the dispatch the batched path captures moves) and off (where its
+        // step accounting comes from the pre-solve mismatch instead of a distributed one)
+        for (boolean distributedSlack : new boolean[] {true, false}) {
+            Map<String, String> perStep = runCapturingCsv(networkWithTwoLoadBuses(), loadPlan, dcParameters(false, distributedSlack));
+            Map<String, String> batched = runCapturingCsv(networkWithTwoLoadBuses(), loadPlan, dcParameters(true, distributedSlack));
+
+            assertEquals(perStep.keySet(), batched.keySet());
+            assertEquals(perStep.get("branches"), batched.get("branches"), "branches, distributedSlack=" + distributedSlack);
+            assertEquals(perStep.get("buses"), batched.get("buses"), "buses, distributedSlack=" + distributedSlack);
+            assertEquals(perStep.get("generators"), batched.get("generators"), "generators, distributedSlack=" + distributedSlack);
+        }
+    }
+
+    /**
+     * A plan longer than {@code DC_BATCH_SIZE} forces the batched path to chunk: still byte-identical to the per-step
+     * path, so nothing is lost at a chunk boundary.
+     */
+    @Test
+    void batchedDcSpansMultipleChunksIdenticallyToPerStep() {
+        int steps = 600; // > DC_BATCH_SIZE (256), so at least three chunks
+        RegularTimeSeriesIndex bigIndex = RegularTimeSeriesIndex.create(Instant.parse("2025-01-01T00:00:00Z"),
+                Instant.parse("2025-01-01T00:00:00Z").plus(Duration.ofHours(steps - 1L)), Duration.ofHours(1));
+        double[] p0s = new double[steps];
+        for (int i = 0; i < steps; i++) {
+            p0s[i] = 400.0 + (i % 40) * 20.0; // varies per step, all converging in DC
+        }
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", bigIndex, p0s));
+
+        Map<String, String> perStep = runCapturingCsv(networkWithTwoLoadBuses(), loadPlan, dcParameters(false));
+        Map<String, String> batched = runCapturingCsv(networkWithTwoLoadBuses(), loadPlan, dcParameters(true));
+
+        assertEquals(perStep.get("branches"), batched.get("branches"));
+        assertEquals(perStep.get("buses"), batched.get("buses"));
+        assertEquals(perStep.get("generators"), batched.get("generators"));
+    }
+
+    /**
+     * The direct check the transitive chain (batched equals per-step, per-step equals an independent load flow) leaves
+     * implicit: the batched path, which solves a chunk of steps together, must equal a classical
+     * {@link com.powsybl.loadflow.LoadFlow} run on the network carrying each step's values <b>one step at a time</b> --
+     * an oracle that shares none of the batched path's machinery and never solves two steps together. Both slack
+     * settings, since distribution shapes the right hand side the batch stacks.
+     */
+    @Test
+    void batchedDcMatchesIndependentDcLoadFlow() {
+        double[] p0s = {600.0, 1200.0, 300.0};
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", index, p0s));
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+
+        for (boolean distributedSlack : new boolean[] {true, false}) {
+            Map<String, String> batched = runCapturingCsv(networkWithTwoLoadBuses(), loadPlan, dcParameters(true, distributedSlack));
+            Map<String, Double> streamedP1 = new HashMap<>();
+            batched.get("branches").strip().lines().skip(1).forEach(line -> {
+                String[] c = line.split(";");
+                streamedP1.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+            });
+
+            for (int step = 0; step < p0s.length; step++) {
+                Network ref = networkWithTwoLoadBuses();
+                ref.getLoad("LOAD").setP0(p0s[step]);
+                assertTrue(runner.run(ref, new LoadFlowParameters().setDc(true).setDistributedSlack(distributedSlack)
+                        .setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD)).isFullyConverged());
+                String ts = index.getInstantAt(step).toString();
+                for (Branch<?> branch : ref.getBranches()) {
+                    assertEquals(branch.getTerminal1().getP(), streamedP1.get(ts + "|" + branch.getId()), 1e-2,
+                            "batched DC p1 on " + branch.getId() + " at step " + step + ", distributedSlack=" + distributedSlack);
+                }
+            }
+        }
+    }
+
+    /**
+     * The plan drives a generator, not a load: the batched path builds its right hand side from the generation target
+     * the plan set and the slack distribution over it, so a generator-driven plan is a distinct case from a
+     * load-driven one. Validated against an independent one-step-at-a-time load flow, both slack settings.
+     */
+    @Test
+    void batchedDcGeneratorPlanMatchesIndependentDcLoadFlow() {
+        double[] targetPs = {700.0, 500.0, 607.0};
+        List<DoubleTimeSeries> genPlan = List.of(TimeSeries.createDouble("GEN", index, targetPs));
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+
+        for (boolean distributedSlack : new boolean[] {true, false}) {
+            Map<String, String> batched = runCapturingCsv(EurostagTutorialExample1Factory.create(), genPlan, dcParameters(true, distributedSlack));
+            Map<String, Double> streamedP1 = new HashMap<>();
+            batched.get("branches").strip().lines().skip(1).forEach(line -> {
+                String[] c = line.split(";");
+                streamedP1.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+            });
+
+            for (int step = 0; step < targetPs.length; step++) {
+                Network ref = EurostagTutorialExample1Factory.create();
+                ref.getGenerator("GEN").setTargetP(targetPs[step]);
+                assertTrue(runner.run(ref, new LoadFlowParameters().setDc(true).setDistributedSlack(distributedSlack)
+                        .setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD)).isFullyConverged());
+                String ts = index.getInstantAt(step).toString();
+                for (Branch<?> branch : ref.getBranches()) {
+                    assertEquals(branch.getTerminal1().getP(), streamedP1.get(ts + "|" + branch.getId()), 1e-2,
+                            "batched DC gen-plan p1 on " + branch.getId() + " at step " + step + ", distributedSlack=" + distributedSlack);
+                }
+            }
+        }
+    }
+
+    /**
+     * A network of two connected components: the batched path solves each as its own run, and their rows and per-step
+     * accounting must aggregate exactly as an independent load flow on the whole two-component network does. Exercises
+     * the per-run loop a single-component network never does.
+     */
+    @Test
+    void batchedDcTwoComponentsMatchIndependentDcLoadFlow() {
+        double[] loadAs = {90.0, 130.0, 60.0};
+        double[] loadBs = {110.0, 70.0, 140.0};
+        List<DoubleTimeSeries> twoComponentPlan = List.of(
+                TimeSeries.createDouble("LOADA", index, loadAs),
+                TimeSeries.createDouble("LOADB", index, loadBs));
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+
+        // simulate every component, not just the main one, so the batched path actually has more than one run
+        TimeSeriesLoadFlowParameters parameters = dcParameters(true, false);
+        parameters.getLoadFlowParameters().setComponentMode(LoadFlowParameters.ComponentMode.ALL_CONNECTED);
+        Map<String, String> batched = runCapturingCsv(twoComponentNetwork(), twoComponentPlan, parameters);
+        Map<String, Double> streamedP1 = new HashMap<>();
+        batched.get("branches").strip().lines().skip(1).forEach(line -> {
+            String[] c = line.split(";");
+            streamedP1.put(c[0] + "|" + c[3], Double.parseDouble(c[4]));
+        });
+
+        for (int step = 0; step < loadAs.length; step++) {
+            Network ref = twoComponentNetwork();
+            ref.getLoad("LOADA").setP0(loadAs[step]);
+            ref.getLoad("LOADB").setP0(loadBs[step]);
+            assertTrue(runner.run(ref, new LoadFlowParameters().setDc(true).setDistributedSlack(false)
+                    .setComponentMode(LoadFlowParameters.ComponentMode.ALL_CONNECTED)).isFullyConverged());
+            String ts = index.getInstantAt(step).toString();
+            for (Branch<?> branch : ref.getBranches()) {
+                assertEquals(branch.getTerminal1().getP(), streamedP1.get(ts + "|" + branch.getId()), 1e-2,
+                        "batched DC two-component p1 on " + branch.getId() + " at step " + step);
+            }
+        }
+    }
+
+    /**
+     * A DC network with a zero-impedance subnetwork: the batched path cannot serve it (its second pass has no per-step
+     * injections to recompute the zero-impedance flows from), so it must fall back to the per-step path and stream the
+     * same rows. Same network run with the flag off is the reference; identical output means the fall-back fired.
+     */
+    @Test
+    void batchedDcFallsBackForZeroImpedanceNetwork() {
+        double[] p0s = {600.0, 1200.0, 300.0};
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LOAD", index, p0s));
+
+        Map<String, String> perStep = runCapturingCsv(zeroImpedanceNetwork(), loadPlan, zeroImpedanceDcParameters(false));
+        Map<String, String> batched = runCapturingCsv(zeroImpedanceNetwork(), loadPlan, zeroImpedanceDcParameters(true));
+
+        assertEquals(perStep.get("branches"), batched.get("branches"));
+        assertEquals(perStep.get("buses"), batched.get("buses"));
+        assertEquals(perStep.get("generators"), batched.get("generators"));
+    }
+
+    /**
+     * A DC network with an active phase-control outer loop: its per-step re-solves cannot be pre-batched, so the
+     * batched path must fall back to the per-step path. Identical output with the flag on and off shows it did.
+     */
+    @Test
+    void batchedDcFallsBackForActiveOuterLoop() {
+        double[] loads = {80.0, 120.0, 60.0};
+        List<DoubleTimeSeries> loadPlan = List.of(TimeSeries.createDouble("LD2", index, loads));
+
+        Map<String, String> perStep = runCapturingCsv(phaseControlNetwork(), loadPlan, phaseControlDcParameters(false));
+        Map<String, String> batched = runCapturingCsv(phaseControlNetwork(), loadPlan, phaseControlDcParameters(true));
+
+        assertEquals(perStep.get("branches"), batched.get("branches"));
+        assertEquals(perStep.get("buses"), batched.get("buses"));
+        assertEquals(perStep.get("generators"), batched.get("generators"));
+    }
+
+    /** Two independent single-line islands, each a generator bus feeding a load bus; two DC connected components. */
+    private static Network twoComponentNetwork() {
+        Network network = Network.create("two-components", "test");
+        for (String island : List.of("A", "B")) {
+            Substation s = network.newSubstation().setId("S" + island).add();
+            VoltageLevel vl1 = s.newVoltageLevel().setId("VL1" + island).setNominalV(400)
+                    .setTopologyKind(TopologyKind.BUS_BREAKER).add();
+            vl1.getBusBreakerView().newBus().setId("B1" + island).add();
+            VoltageLevel vl2 = s.newVoltageLevel().setId("VL2" + island).setNominalV(400)
+                    .setTopologyKind(TopologyKind.BUS_BREAKER).add();
+            vl2.getBusBreakerView().newBus().setId("B2" + island).add();
+            vl1.newGenerator().setId("GEN" + island).setBus("B1" + island).setConnectableBus("B1" + island)
+                    .setTargetP(100).setMinP(0).setMaxP(300).setTargetV(400).setVoltageRegulatorOn(true).add();
+            vl2.newLoad().setId("LOAD" + island).setBus("B2" + island).setConnectableBus("B2" + island)
+                    .setP0(100).setQ0(10).add();
+            network.newLine().setId("L" + island).setVoltageLevel1("VL1" + island).setBus1("B1" + island)
+                    .setConnectableBus1("B1" + island).setVoltageLevel2("VL2" + island).setBus2("B2" + island)
+                    .setConnectableBus2("B2" + island).setR(0.1).setX(3).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        }
+        return network;
+    }
+
+    /** Two load buses with one line made zero-impedance, so the DC network has a zero-impedance subnetwork. */
+    private static Network zeroImpedanceNetwork() {
+        Network network = networkWithTwoLoadBuses();
+        network.getLine("NHV1_NHV2_2").setR(0).setX(0);
+        return network;
+    }
+
+    private static TimeSeriesLoadFlowParameters zeroImpedanceDcParameters(boolean batched) {
+        TimeSeriesLoadFlowParameters parameters = dcParameters(batched);
+        OpenLoadFlowParameters.create(parameters.getLoadFlowParameters())
+                .setLowImpedanceBranchMode(OpenLoadFlowParameters.LowImpedanceBranchMode.REPLACE_BY_ZERO_IMPEDANCE_LINE);
+        return parameters;
+    }
+
+    /** The phase-shifter network with its transformer set to regulate active power, so a DC phase-control outer loop runs. */
+    private static Network phaseControlNetwork() {
+        Network network = PhaseShifterTestCaseFactory.create();
+        TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
+        ps1.getPhaseTapChanger().getStep(0).setAlpha(-5);
+        ps1.getPhaseTapChanger().getStep(2).setAlpha(5);
+        ps1.getPhaseTapChanger().setTargetDeadband(10).setRegulationValue(-80)
+                .setRegulationMode(PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL).setRegulating(true);
+        return network;
+    }
+
+    private static TimeSeriesLoadFlowParameters phaseControlDcParameters(boolean batched) {
+        TimeSeriesLoadFlowParameters parameters = new TimeSeriesLoadFlowParameters().setDcBatchedSolve(batched);
+        parameters.getLoadFlowParameters().setDc(true).setPhaseShifterRegulationOn(true);
+        return parameters;
+    }
+
+    /**
+     * Asking for the batched solve on an AC plan is a no-op, not an error: the DC-only optimization does not apply, so
+     * the engine keeps the per-step path and streams the same rows as with the flag off.
+     */
+    @Test
+    void batchedFlagOnAcFallsBackToPerStep() {
+        Map<String, String> off = runCapturingCsv(EurostagTutorialExample1Factory.create(), plan,
+                new TimeSeriesLoadFlowParameters());
+        Map<String, String> on = runCapturingCsv(EurostagTutorialExample1Factory.create(), plan,
+                new TimeSeriesLoadFlowParameters().setDcBatchedSolve(true));
+
+        assertEquals(off.get("branches"), on.get("branches"));
+        assertEquals(off.get("buses"), on.get("buses"));
+        assertEquals(off.get("generators"), on.get("generators"));
     }
 
     /**
