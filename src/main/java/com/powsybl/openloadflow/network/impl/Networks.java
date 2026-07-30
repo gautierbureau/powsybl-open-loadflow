@@ -7,19 +7,25 @@
  */
 package com.powsybl.openloadflow.network.impl;
 
+import com.google.common.base.Stopwatch;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.iidm.network.*;
 import com.powsybl.iidm.network.extensions.VoltageRegulation;
 import com.powsybl.openloadflow.graph.GraphConnectivity;
 import com.powsybl.openloadflow.network.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 
 /**
  * @author Geoffroy Jamgotchian {@literal <geoffroy.jamgotchian at rte-france.com>}
  */
 public final class Networks {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(Networks.class);
 
     private static final String PROPERTY_V = "v";
     private static final String PROPERTY_ANGLE = "angle";
@@ -243,17 +249,26 @@ public final class Networks {
                 throw new PowsyblException("LF networks have to be built from bus/breaker view");
             }
 
-            // create a temporary working variant to build LF networks
+            // create a temporary working variant to build LF networks. This IIDM variant clone is done
+            // once per analysis (the multi-threaded analyses build the LF networks once on the calling
+            // thread and deep copy them, so they do not clone one variant per thread); it can be a
+            // significant cost on IIDM implementations where cloning is not a cheap in memory copy
+            // (e.g. powsybl-network-store), hence the timing below
+            Stopwatch stopwatch = Stopwatch.createStarted();
             String tmpVariantId = "olf-tmp-" + UUID.randomUUID();
             String workingVariantId = network.getVariantManager().getWorkingVariantId();
             network.getVariantManager().cloneVariant(network.getVariantManager().getWorkingVariantId(), tmpVariantId);
             network.getVariantManager().setWorkingVariant(tmpVariantId);
+            long variantCloneMs = stopwatch.elapsed(TimeUnit.MILLISECONDS);
 
             // retain in topology all switches that could be open or close
             // and close switches that could be closed during the simulation
             Set<String> closedBranchesOrSwitches = retainAndCloseNecessarySwitches(network, modifiedTopoConfig);
+            long retainSwitchesMs = stopwatch.elapsed(TimeUnit.MILLISECONDS) - variantCloneMs;
 
             List<LfNetwork> lfNetworks = load(network, modifiedTopoConfig, networkParameters, reportNode);
+            LOGGER.info("LF networks built with reconnectable elements in {} ms (IIDM variant clone {} ms, switch retaining {} ms)",
+                    stopwatch.elapsed(TimeUnit.MILLISECONDS), variantCloneMs, retainSwitchesMs);
 
             if (!closedBranchesOrSwitches.isEmpty()) {
                 for (LfNetwork lfNetwork : lfNetworks) {

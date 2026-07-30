@@ -84,8 +84,7 @@ class AcSensitivityAnalysisMtCopyTest extends AbstractSensitivityAnalysisTest {
 
         RefThreadGuardTestUtil.arm();
         try {
-            SensitivityAnalysisResult result = run(network, factors, contingencies, 2,
-                    OpenSensitivityAnalysisParameters.NetworkPerThreadMode.COPY);
+            SensitivityAnalysisResult result = run(network, factors, contingencies, 2);
             assertFalse(result.getValues().isEmpty());
         } finally {
             RefThreadGuardTestUtil.disarm();
