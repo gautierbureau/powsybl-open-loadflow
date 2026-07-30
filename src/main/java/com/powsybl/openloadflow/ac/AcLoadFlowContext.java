@@ -18,6 +18,7 @@ import com.powsybl.openloadflow.equations.JacobianMatrix;
 import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.lf.AbstractLoadFlowContext;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.LoadFlowModel;
 
 /**
  * @author Geoffroy Jamgotchian {@literal <geoffroy.jamgotchian at rte-france.com>}
@@ -41,7 +42,12 @@ public class AcLoadFlowContext extends AbstractLoadFlowContext<AcVariableType, A
             // the partial (restore-and-patch) Jacobian value update only preserves the matrix structure, and thus
             // only pays off, when alternative equations are used (structure-preserving PV/PQ and disabling switches);
             // keep it off otherwise so the plain load flow does not pay the per-update state-vector equality check
-            jacobianMatrix.setPartialValueUpdateEnabled(parameters.getEquationSystemCreationParameters().isAlternativeEquations());
+            // and not when the network carries zero impedance branches: a contingency changing their spanning tree
+            // toggles their ZERO_PHI / ZERO_V constraints against their DUMMY_TARGET_P / Q ones, an event the
+            // restore-and-patch update does not record as touching those columns, so it restores stale derivatives
+            // there and the solve converges to a wrong flow (silently: the system stays square and converges)
+            jacobianMatrix.setPartialValueUpdateEnabled(parameters.getEquationSystemCreationParameters().isAlternativeEquations()
+                    && network.getBranches().stream().noneMatch(branch -> branch.isZeroImpedance(LoadFlowModel.AC)));
             // note: incremental LU updates on alternative switches (setAllowIncrementalUpdateOnZeroChanges) were
             // benchmarked on Pegase security analyses and are NOT enabled here: PV/PQ switches change the pivot
             // structure of the switched columns so often that the failed incremental attempts plus their full

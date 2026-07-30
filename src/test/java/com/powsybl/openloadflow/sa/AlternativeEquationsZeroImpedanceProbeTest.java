@@ -27,7 +27,6 @@ import com.powsybl.security.results.BranchResult;
 import com.powsybl.security.results.NetworkResult;
 import com.powsybl.security.results.OperatorStrategyResult;
 import com.powsybl.security.results.PostContingencyResult;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -88,14 +87,6 @@ class AlternativeEquationsZeroImpedanceProbeTest extends AbstractOpenSecurityAna
     }
 
     @Test
-    @Disabled("reproduces an open bug of the alternative equations on the zero impedance path: on a node-breaker "
-            + "network whose couplers are retained (so modelled as zero impedance branches), a plain branch "
-            + "contingency gives a post-contingency flow of 299.9997 MW on L2 against 301.8633 MW on the legacy "
-            + "modeling. No remedial action and no operator strategy are needed, and the result is wrong silently: it "
-            + "converges and the equation system stays square, so neither the non-square fallback nor any other check "
-            + "detects it. Reproduced identically on the alternative equations branch alone, so it predates the "
-            + "security analysis performance and fallback work. Enable once the zero impedance path is either "
-            + "supported by the alternative modeling or excluded from it.")
     void zeroImpedanceContingencyGivesLegacyResultsTest() {
         SecurityAnalysisResult legacyResult = run(false);
         SecurityAnalysisResult result = run(true);
