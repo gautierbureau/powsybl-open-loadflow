@@ -42,10 +42,13 @@ public class AcLoadFlowContext extends AbstractLoadFlowContext<AcVariableType, A
             // the partial (restore-and-patch) Jacobian value update only preserves the matrix structure, and thus
             // only pays off, when alternative equations are used (structure-preserving PV/PQ and disabling switches);
             // keep it off otherwise so the plain load flow does not pay the per-update state-vector equality check
-            // and not when the network carries zero impedance branches: a contingency changing their spanning tree
-            // toggles their ZERO_PHI / ZERO_V constraints against their DUMMY_TARGET_P / Q ones, an event the
-            // restore-and-patch update does not record as touching those columns, so it restores stale derivatives
-            // there and the solve converges to a wrong flow (silently: the system stays square and converges)
+            // and not when the network carries zero impedance branches: enabling it there makes a post-contingency
+            // solve converge to a wrong flow (silently: the system stays square and converges), see
+            // AlternativeEquationsZeroImpedanceProbeTest. Note the cause is NOT a stale patched column: on that
+            // reproducer no partial update is ever performed (every contingency does a full structure build, since the
+            // zero impedance equation toggles invalidate the structure), so it is the bookkeeping the flag switches on
+            // - the value snapshot and the touched element tracking - that changes what gets re-derived. Root cause
+            // not yet pinned, hence the conservative gate rather than a targeted fix.
             jacobianMatrix.setPartialValueUpdateEnabled(parameters.getEquationSystemCreationParameters().isAlternativeEquations()
                     && network.getBranches().stream().noneMatch(branch -> branch.isZeroImpedance(LoadFlowModel.AC)));
             // note: incremental LU updates on alternative switches (setAllowIncrementalUpdateOnZeroChanges) were
