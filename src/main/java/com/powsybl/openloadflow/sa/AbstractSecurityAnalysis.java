@@ -28,6 +28,8 @@ import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
+import com.powsybl.openloadflow.equations.EquationSystemImbalance;
+import com.powsybl.openloadflow.equations.EquationSystemNotSquareException;
 import com.powsybl.openloadflow.equations.Quantity;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.lf.AbstractLoadFlowParameters;
@@ -694,7 +696,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         P p = copyParameters(acParameters);
         adaptParameters(p, lfNetwork, propagatedContingencies);
 
-        try (C context = createLoadFlowContext(lfNetwork, p)) {
+        try (C context = createSquareLoadFlowContext(lfNetwork, p)) {
             ReportNode networkReportNode = lfNetwork.getReportNode();
 
             R preContingencyLoadFlowResult;
@@ -741,6 +743,13 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 // save base state for later restoration after each contingency
                 NetworkState networkState = NetworkState.save(lfNetwork);
 
+                // when the alternative equations partial value update is on, simulate structure-preserving
+                // contingencies first and fallback ones last so the base structure construction is paid once
+                List<PropagatedContingency> orderedContingencies = context.getJacobianMatrix().isPartialValueUpdateEnabled()
+                        ? orderContingenciesForStructureReuse(lfNetwork, context, networkState, propagatedContingencies)
+                        : propagatedContingencies;
+                boolean contingenciesReordered = orderedContingencies != propagatedContingencies;
+
                 // collect the elements modified by each contingency (and its operator strategy actions) so that only
                 // those are restored afterwards, instead of the whole network
                 ModifiedElementsCollector modifiedElementsCollector = new ModifiedElementsCollector();
@@ -754,13 +763,6 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
                 // Reset parameters between contingencies
                 Consumer<P> contingencyParametersResetter = createParametersResetter(p);
-
-                // when the alternative equations partial value update is on, simulate structure-preserving
-                // contingencies first and fallback ones last so the base structure construction is paid once
-                List<PropagatedContingency> orderedContingencies = context.getJacobianMatrix().isPartialValueUpdateEnabled()
-                        ? orderContingenciesForStructureReuse(lfNetwork, context, propagatedContingencies)
-                        : propagatedContingencies;
-                boolean contingenciesReordered = orderedContingencies != propagatedContingencies;
 
                 // start a simulation for each of the contingency
                 int[] fallbackContingencyCount = {0};
@@ -977,6 +979,67 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
     }
 
     /**
+     * Create a load flow context that models the network without the features whose equations a contingency can leave
+     * inconsistent, to re-run a contingency whose simulation failed on the invariant that the equation system is
+     * square (see {@link EquationSystemNotSquareException}). Returns an empty optional when this analysis has no such
+     * degraded modeling to fall back on, in which case the failure is propagated.
+     */
+    protected Optional<C> createFallbackModelingContext(LfNetwork lfNetwork, P parameters) {
+        return Optional.empty();
+    }
+
+    /**
+     * Create the load flow context of the analysis, falling back to the degraded modeling when the equation system of
+     * the base network is not square, i.e. when a variable has no equation determining it. The whole analysis would
+     * otherwise fail on the very first solve; the imbalance is visible on the equation system index, so it is detected
+     * here rather than paid as a failed solve.
+     */
+    /**
+     * Name the network elements whose variables are not all determined by an active equation, so that the log points at
+     * the actual bus or branch: the counts per equation and variable type tell which kind of control is involved, but
+     * not which element, which is what is needed to investigate on a large network.
+     */
+    private String describeImbalancedElementIds(LfNetwork lfNetwork, C context) {
+        List<EquationSystemImbalance.ImbalancedElement> imbalancedElements =
+                EquationSystemImbalance.findImbalancedElements(context.getEquationSystem());
+        if (imbalancedElements.isEmpty()) {
+            return "";
+        }
+        return imbalancedElements.stream()
+                .limit(5)
+                .<String>map(imbalancedElement -> {
+                    LfElement element = lfNetwork.getElement(imbalancedElement.elementType(), imbalancedElement.elementNum());
+                    return imbalancedElement.elementType() + " '" + (element != null ? element.getId() : imbalancedElement.elementNum())
+                            + "' (" + imbalancedElement.variableCount() + " variables, " + imbalancedElement.equationCount()
+                            + " active equations, equations=" + EquationSystemImbalance.describeElementEquations(
+                                    context.getEquationSystem(), imbalancedElement.elementType(), imbalancedElement.elementNum()) + ")";
+                })
+                .collect(Collectors.joining(", ", ", imbalanced element ids=", imbalancedElements.size() > 5 ? ", ..." : ""));
+    }
+
+    private C createSquareLoadFlowContext(LfNetwork lfNetwork, P parameters) {
+        C context = createLoadFlowContext(lfNetwork, parameters);
+        int rowCount = context.getEquationSystem().getIndex().getRowCount();
+        int columnCount = context.getEquationSystem().getIndex().getColumnCount();
+        if (rowCount == columnCount) {
+            return context;
+        }
+        Optional<C> fallbackContext = createFallbackModelingContext(lfNetwork, parameters);
+        if (fallbackContext.isEmpty()) {
+            // no degraded modeling to fall back on: keep this context, so that the solve fails with the detailed
+            // description of the imbalance
+            return context;
+        }
+        LOGGER.warn("Network {}: the equation system of the base network is not square ({} equations for {} variables), "
+                + "falling back to the legacy modeling for the whole analysis. {}{}",
+                lfNetwork, columnCount, rowCount,
+                EquationSystemImbalance.describeTypes(context.getEquationSystem()),
+                describeImbalancedElementIds(lfNetwork, context));
+        context.close();
+        return fallbackContext.get();
+    }
+
+    /**
      * Whether the given contingency preserves the equation system matrix structure, i.e. can be simulated without a
      * full symbolic refactorization (a "construction"). Only meaningful when the alternative equations partial value
      * update is enabled; defaults to {@code false} so subclasses without that support keep the input contingency order.
@@ -991,18 +1054,33 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
      * the base structure construction is paid once (see {@link com.powsybl.openloadflow.equations.JacobianMatrix}
      * partial value update). This is purely an execution-order optimization: each contingency is simulated from the
      * same restored base state, so results are identical and are reordered back to the input order by the caller.
+     *
+     * <p>Building a {@link LfContingency} is not free of side effects on the network: a contingency that isolates the
+     * slack bus relocates it, which excludes the buses of the isolated component from the slack bus selection
+     * ({@code LfSynchronousNetwork.setExcludedSlackBuses}) and moves the connectivity main component vertex. Both
+     * outlive the call. In the simulation loop each contingency undoes the exclusion when restoring the base state,
+     * but this pass builds every contingency up front, so the relocation would leak into the first contingency
+     * simulated and change its result. As this pass only inspects contingencies, it builds them without relocating
+     * the slack bus, which is also the only way to leave the connectivity untouched: a state restoration would not
+     * undo the main component vertex move.
      */
-    private List<PropagatedContingency> orderContingenciesForStructureReuse(LfNetwork lfNetwork, C context,
+    private List<PropagatedContingency> orderContingenciesForStructureReuse(LfNetwork lfNetwork, C context, NetworkState networkState,
                                                                             List<PropagatedContingency> propagatedContingencies) {
         List<PropagatedContingency> structurePreserving = new ArrayList<>();
         List<PropagatedContingency> structureRebuilding = new ArrayList<>();
-        for (PropagatedContingency propagatedContingency : propagatedContingencies) {
-            Optional<LfContingency> lfContingency = propagatedContingency.toLfContingency(lfNetwork);
-            if (lfContingency.isPresent() && contingencyPreservesMatrixStructure(context, lfContingency.get())) {
-                structurePreserving.add(propagatedContingency);
-            } else {
-                structureRebuilding.add(propagatedContingency);
+        try {
+            for (PropagatedContingency propagatedContingency : propagatedContingencies) {
+                Optional<LfContingency> lfContingency = propagatedContingency.toLfContingency(lfNetwork, false);
+                if (lfContingency.isPresent() && contingencyPreservesMatrixStructure(context, lfContingency.get())) {
+                    structurePreserving.add(propagatedContingency);
+                } else {
+                    structureRebuilding.add(propagatedContingency);
+                }
             }
+        } finally {
+            // safety net: whatever element state the inspection above may have touched, the simulation loop starts
+            // from the very same base state as if this pass had not run
+            networkState.restore();
         }
         if (structurePreserving.isEmpty() || structureRebuilding.isEmpty()) {
             // all contingencies fall in the same group: keep the input order untouched
@@ -1058,70 +1136,98 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         var jacobianMatrix = context.getJacobianMatrix();
         int structureBuildsBeforeContingency = jacobianMatrix.getStructureBuildCount();
 
-        var postContingencyResult = runPostContingencySimulation(lfNetwork, context, propagatedContingency.getContingency(),
-            lfContingency, preContingencyLimitViolationManager,
-            securityAnalysisParameters,
-            preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
-        postContingencyResults.add(postContingencyResult);
-
-        if (jacobianMatrix.isPartialValueUpdateEnabled()
-                && jacobianMatrix.getStructureBuildCount() > structureBuildsBeforeContingency) {
-            fallbackContingencyCount[0]++;
-            LOGGER.info("Contingency '{}' does not preserve the alternative equations matrix structure and fell back to a full Jacobian structure rebuild",
-                    lfContingency.getId());
+        // the context this contingency is simulated on: the shared one, unless it has to fall back (see below).
+        // A fallback context is local to this contingency and closed once it is done with.
+        C fallbackContext = null;
+        PostContingencyResult postContingencyResult;
+        try {
+            postContingencyResult = runPostContingencySimulation(lfNetwork, context, propagatedContingency.getContingency(),
+                lfContingency, preContingencyLimitViolationManager,
+                securityAnalysisParameters,
+                preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
+        } catch (EquationSystemNotSquareException e) {
+            // this contingency left a variable without its equation: some part of the modeling activates and
+            // deactivates equations in a way the shared equation system does not track for this network (typically a
+            // control whose controller set the contingency reconfigures). Rather than failing the whole analysis,
+            // re-run this single contingency on a degraded modeling that does not have the problem.
+            fallbackContext = createFallbackModelingContext(lfNetwork, p).orElseThrow(() -> e);
+            LOGGER.warn("Contingency '{}' (disabling {} buses and {} branches) cannot be simulated on the current modeling, "
+                    + "falling back to the legacy modeling for it: {}{}",
+                    lfContingency.getId(), lfContingency.getDisabledNetwork().getBuses().size(),
+                    lfContingency.getDisabledNetwork().getBranches().size(), e.getMessage(),
+                    describeImbalancedElementIds(lfNetwork, context));
+            postContingencyResult = runPostContingencySimulation(lfNetwork, fallbackContext, propagatedContingency.getContingency(),
+                lfContingency, preContingencyLimitViolationManager,
+                securityAnalysisParameters,
+                preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
         }
+        // the operator strategies of this contingency run on the same context as the contingency itself
+        C contingencyContext = fallbackContext != null ? fallbackContext : context;
+        try {
+            postContingencyResults.add(postContingencyResult);
 
-        if (contingencyLoadFlowParameters != null &&
-            Objects.equals(ContingencyLoadFlowParameters.Scope.CONTINGENCY_ONLY, contingencyLoadFlowParameters.getScope())) {
-            // reset parameters
-            contingencyParametersResetter.accept(context.getParameters());
-        }
+            if (jacobianMatrix.isPartialValueUpdateEnabled()
+                    && jacobianMatrix.getStructureBuildCount() > structureBuildsBeforeContingency) {
+                fallbackContingencyCount[0]++;
+                LOGGER.info("Contingency '{}' does not preserve the alternative equations matrix structure and fell back to a full Jacobian structure rebuild",
+                        lfContingency.getId());
+            }
 
-        List<Indexed<OperatorStrategy>> operatorStrategiesForThisContingency = operatorStrategiesByContingencyId.get(lfContingency.getId());
-        if (operatorStrategiesForThisContingency != null) {
-            // we have at least one operator strategy for this contingency.
-            if (operatorStrategiesForThisContingency.size() == 1) {
-                // only one operator strategy, no need to do a complete save of network state,
-                // but need to set generators initialTargetP positions to the current (=postContingency) targetP
-                lfNetwork.setGeneratorsInitialTargetPToTargetP();
-                OperatorStrategy operatorStrategy = operatorStrategiesForThisContingency.get(0).value();
-                ReportNode osSimReportNode = Reports.createOperatorStrategySimulation(postContSimReportNode, operatorStrategy.getId());
-                lfNetwork.setReportNode(osSimReportNode);
-                runActionSimulation(lfNetwork, context,
-                    operatorStrategy, preContingencyLimitViolationManager,
-                    securityAnalysisParameters, lfActionById,
-                    createResultExtension, lfContingency, propagatedContingency.getContingency(),
-                    preContingencyNetworkResult, postContingencyResult.getLimitViolationsResult(),
-                    p.getNetworkParameters(), limitReductions)
-                    .ifPresent(operatorStrategyResults::add);
-            } else {
-                // multiple operator strategies, save post contingency state for later restoration after action
-                NetworkState postContingencyNetworkState = NetworkState.save(lfNetwork);
-                for (Indexed<OperatorStrategy> operatorStrategy : operatorStrategiesForThisContingency) {
-                    ReportNode osSimReportNode = Reports.createOperatorStrategySimulation(postContSimReportNode, operatorStrategy.value().getId());
+            if (contingencyLoadFlowParameters != null &&
+                Objects.equals(ContingencyLoadFlowParameters.Scope.CONTINGENCY_ONLY, contingencyLoadFlowParameters.getScope())) {
+                // reset parameters
+                contingencyParametersResetter.accept(context.getParameters());
+            }
+
+            List<Indexed<OperatorStrategy>> operatorStrategiesForThisContingency = operatorStrategiesByContingencyId.get(lfContingency.getId());
+            if (operatorStrategiesForThisContingency != null) {
+                // we have at least one operator strategy for this contingency.
+                if (operatorStrategiesForThisContingency.size() == 1) {
+                    // only one operator strategy, no need to do a complete save of network state,
+                    // but need to set generators initialTargetP positions to the current (=postContingency) targetP
+                    lfNetwork.setGeneratorsInitialTargetPToTargetP();
+                    OperatorStrategy operatorStrategy = operatorStrategiesForThisContingency.get(0).value();
+                    ReportNode osSimReportNode = Reports.createOperatorStrategySimulation(postContSimReportNode, operatorStrategy.getId());
                     lfNetwork.setReportNode(osSimReportNode);
-                    runActionSimulation(lfNetwork, context,
-                        operatorStrategy.value(), preContingencyLimitViolationManager,
+                    runActionSimulation(lfNetwork, contingencyContext,
+                        operatorStrategy, preContingencyLimitViolationManager,
                         securityAnalysisParameters, lfActionById,
                         createResultExtension, lfContingency, propagatedContingency.getContingency(),
                         preContingencyNetworkResult, postContingencyResult.getLimitViolationsResult(),
                         p.getNetworkParameters(), limitReductions)
-                        .ifPresent(result -> {
-                            operatorStrategyResults.add(result);
-                            postContingencyNetworkState.restore();
-                        });
+                        .ifPresent(operatorStrategyResults::add);
+                } else {
+                    // multiple operator strategies, save post contingency state for later restoration after action
+                    NetworkState postContingencyNetworkState = NetworkState.save(lfNetwork);
+                    for (Indexed<OperatorStrategy> operatorStrategy : operatorStrategiesForThisContingency) {
+                        ReportNode osSimReportNode = Reports.createOperatorStrategySimulation(postContSimReportNode, operatorStrategy.value().getId());
+                        lfNetwork.setReportNode(osSimReportNode);
+                        runActionSimulation(lfNetwork, contingencyContext,
+                            operatorStrategy.value(), preContingencyLimitViolationManager,
+                            securityAnalysisParameters, lfActionById,
+                            createResultExtension, lfContingency, propagatedContingency.getContingency(),
+                            preContingencyNetworkResult, postContingencyResult.getLimitViolationsResult(),
+                            p.getNetworkParameters(), limitReductions)
+                            .ifPresent(result -> {
+                                operatorStrategyResults.add(result);
+                                postContingencyNetworkState.restore();
+                            });
+                    }
                 }
             }
-        }
-        if (contingencyIt.hasNext()) {
-            // restore base state of the elements modified by the contingency (and its operator strategies) only
-            restoreModifiedNetworkElements(networkState, modifiedElementsCollector);
-            if (contingencyLoadFlowParameters != null &&
-                Objects.equals(ContingencyLoadFlowParameters.Scope.CONTINGENCY_AND_OPERATOR_STRATEGY, contingencyLoadFlowParameters.getScope())) {
-                // reset parameters
-                contingencyParametersResetter.accept(context.getParameters());
+            if (contingencyIt.hasNext()) {
+                // restore base state of the elements modified by the contingency (and its operator strategies) only
+                restoreModifiedNetworkElements(networkState, modifiedElementsCollector);
+                if (contingencyLoadFlowParameters != null &&
+                    Objects.equals(ContingencyLoadFlowParameters.Scope.CONTINGENCY_AND_OPERATOR_STRATEGY, contingencyLoadFlowParameters.getScope())) {
+                    // reset parameters
+                    contingencyParametersResetter.accept(context.getParameters());
+                }
+            }
+        } finally {
+            if (fallbackContext != null) {
+                fallbackContext.close();
             }
         }
-
     }
 }

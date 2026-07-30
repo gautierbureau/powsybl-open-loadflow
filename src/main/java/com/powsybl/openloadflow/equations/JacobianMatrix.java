@@ -8,7 +8,6 @@
 package com.powsybl.openloadflow.equations;
 
 import com.google.common.base.Stopwatch;
-import com.powsybl.commons.PowsyblException;
 import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.math.matrix.LUDecomposition;
 import com.powsybl.math.matrix.Matrix;
@@ -209,34 +208,13 @@ public class JacobianMatrix<V extends Enum<V> & Quantity, E extends Enum<E> & Qu
         updateStatus(Status.VALUES_INVALID);
     }
 
-    /**
-     * When the equation system is not square (a bug leaves a variable without its determining equation, typically a
-     * single control variable orphaned by a contingency), report the count of variables and of active equations
-     * grouped by type, so the offending control type stands out even on a large network (e.g. more BRANCH_RHO1
-     * variables than BRANCH_TARGET_RHO1 + DISTR_RHO equations points at a transformer voltage control).
-     */
-    private String describeEquationVariableImbalance() {
-        Map<String, Integer> variablesByType = new java.util.TreeMap<>();
-        for (Variable<V> variable : equationSystem.getIndex().getSortedVariablesToFind()) {
-            variablesByType.merge(variable.getType().toString(), 1, Integer::sum);
-        }
-        Map<String, Integer> equationsByType = new java.util.TreeMap<>();
-        for (var equation : equationSystem.getIndex().getSortedSingleEquationsToSolve()) {
-            equationsByType.merge(equation.getType().toString(), 1, Integer::sum);
-        }
-        for (var equationArray : equationSystem.getIndex().getSortedEquationArraysToSolve()) {
-            equationsByType.merge(equationArray.getType().toString(), equationArray.getLength(), Integer::sum);
-        }
-        return "variables by type=" + variablesByType + ", active equations by type=" + equationsByType;
-    }
-
     protected void initDer() {
         Stopwatch stopwatch = Stopwatch.createStarted();
         int rowCount = equationSystem.getIndex().getRowCount();
         int columnCount = equationSystem.getIndex().getColumnCount();
         if (rowCount != columnCount) {
-            throw new PowsyblException("Expected to have same number of equations (" + columnCount
-                    + ") and variables (" + rowCount + "). " + describeEquationVariableImbalance());
+            throw new EquationSystemNotSquareException("Expected to have same number of equations (" + columnCount
+                    + ") and variables (" + rowCount + "). " + EquationSystemImbalance.describe(equationSystem));
         }
 
         int estimatedNonZeroValueCount = rowCount * 3;
