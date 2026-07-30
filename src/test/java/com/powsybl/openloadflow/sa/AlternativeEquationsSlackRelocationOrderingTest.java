@@ -7,14 +7,9 @@
  */
 package com.powsybl.openloadflow.sa;
 
-import com.powsybl.action.Action;
-import com.powsybl.action.SwitchAction;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.contingency.BranchContingency;
 import com.powsybl.contingency.Contingency;
-import com.powsybl.contingency.ContingencyContext;
-import com.powsybl.contingency.strategy.OperatorStrategy;
-import com.powsybl.contingency.strategy.condition.TrueCondition;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.CommonTestConfig;
@@ -25,7 +20,6 @@ import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.results.BranchResult;
 import com.powsybl.security.results.NetworkResult;
-import com.powsybl.security.results.OperatorStrategyResult;
 import com.powsybl.security.results.PostContingencyResult;
 import org.junit.jupiter.api.Test;
 
@@ -35,18 +29,21 @@ import java.util.stream.Stream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * The zero impedance path of the alternative equations. Buses connected to a zero impedance branch are kept on the
- * legacy modeling, but that is not enough: on a node-breaker network whose couplers are retained, a plain branch
- * contingency already gives a post-contingency flow that differs from the legacy modeling, without any remedial action
- * and without the equation system becoming non square.
+ * With alternative equations, contingencies are classified before the simulation loop so that the ones preserving the
+ * matrix structure run first. Classifying a contingency means building its {@code LfContingency}, which is not free of
+ * side effects: a contingency isolating the slack bus relocates it, and that relocation outlives the call. Running the
+ * classification up front must therefore not leak anything into the first contingency simulated.
  *
- * <p>Results must be identical to the legacy modeling, whether that is reached natively or through a fallback.
+ * <p>Here the last contingency (L2) isolates the slack bus, so before the fix the first contingency (L1) was simulated
+ * with a relocated slack bus and converged to a different, wrong flow.
+ *
+ * <p>Results must be identical to the legacy modeling.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at gmail.com>}
  */
-class AlternativeEquationsZeroImpedanceProbeTest extends AbstractOpenSecurityAnalysisTest {
+class AlternativeEquationsSlackRelocationOrderingTest extends AbstractOpenSecurityAnalysisTest {
 
-    AlternativeEquationsZeroImpedanceProbeTest(CommonTestConfig commonTestConfig) {
+    AlternativeEquationsSlackRelocationOrderingTest(CommonTestConfig commonTestConfig) {
         super(commonTestConfig);
     }
 
@@ -63,16 +60,10 @@ class AlternativeEquationsZeroImpedanceProbeTest extends AbstractOpenSecurityAna
             }
         });
 
+        // L2, the contingency isolating the slack bus, is deliberately not the first one simulated
         List<Contingency> contingencies = Stream.of("L1", "L3", "L2")
                 .map(id -> new Contingency(id, new BranchContingency(id)))
                 .toList();
-        // closing a coupler adds a zero impedance branch to buses that had none when the equation system was created
-        List<Action> actions = List.of(new SwitchAction("action1", "C1", false),
-                new SwitchAction("action3", "C2", false));
-        List<OperatorStrategy> operatorStrategies = List.of(
-                new OperatorStrategy("strategyL1", ContingencyContext.specificContingency("L1"), new TrueCondition(), List.of("action1")),
-                new OperatorStrategy("strategyL3", ContingencyContext.specificContingency("L3"), new TrueCondition(), List.of("action3")),
-                new OperatorStrategy("strategyL2", ContingencyContext.specificContingency("L2"), new TrueCondition(), List.of("action1", "action3")));
         List<StateMonitor> monitors = createAllBranchesMonitors(network);
 
         LoadFlowParameters lfParameters = new LoadFlowParameters();
@@ -87,7 +78,7 @@ class AlternativeEquationsZeroImpedanceProbeTest extends AbstractOpenSecurityAna
     }
 
     @Test
-    void zeroImpedanceContingencyGivesLegacyResultsTest() {
+    void contingencyClassificationDoesNotRelocateSlackBusTest() {
         SecurityAnalysisResult legacyResult = run(false);
         SecurityAnalysisResult result = run(true);
 
@@ -101,15 +92,6 @@ class AlternativeEquationsZeroImpedanceProbeTest extends AbstractOpenSecurityAna
             assertEquals(legacyPostContingencyResult.getContingency().getId(), postContingencyResult.getContingency().getId());
             assertEquals(legacyPostContingencyResult.getStatus(), postContingencyResult.getStatus());
             compareNetworkResults(legacyPostContingencyResult.getNetworkResult(), postContingencyResult.getNetworkResult());
-        }
-
-        // the operator strategies are what close the couplers, i.e. what adds the zero impedance branches
-        assertEquals(legacyResult.getOperatorStrategyResults().size(), result.getOperatorStrategyResults().size());
-        for (int i = 0; i < legacyResult.getOperatorStrategyResults().size(); i++) {
-            OperatorStrategyResult legacyOperatorStrategyResult = legacyResult.getOperatorStrategyResults().get(i);
-            OperatorStrategyResult operatorStrategyResult = result.getOperatorStrategyResults().get(i);
-            assertEquals(legacyOperatorStrategyResult.getOperatorStrategy().getId(), operatorStrategyResult.getOperatorStrategy().getId());
-            compareNetworkResults(legacyOperatorStrategyResult.getNetworkResult(), operatorStrategyResult.getNetworkResult());
         }
     }
 

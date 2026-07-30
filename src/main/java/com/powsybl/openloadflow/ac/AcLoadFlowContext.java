@@ -18,7 +18,6 @@ import com.powsybl.openloadflow.equations.JacobianMatrix;
 import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.lf.AbstractLoadFlowContext;
 import com.powsybl.openloadflow.network.LfNetwork;
-import com.powsybl.openloadflow.network.LoadFlowModel;
 
 /**
  * @author Geoffroy Jamgotchian {@literal <geoffroy.jamgotchian at rte-france.com>}
@@ -42,15 +41,7 @@ public class AcLoadFlowContext extends AbstractLoadFlowContext<AcVariableType, A
             // the partial (restore-and-patch) Jacobian value update only preserves the matrix structure, and thus
             // only pays off, when alternative equations are used (structure-preserving PV/PQ and disabling switches);
             // keep it off otherwise so the plain load flow does not pay the per-update state-vector equality check
-            // and not when the network carries zero impedance branches: enabling it there makes a post-contingency
-            // solve converge to a wrong flow (silently: the system stays square and converges), see
-            // AlternativeEquationsZeroImpedanceProbeTest. Note the cause is NOT a stale patched column: on that
-            // reproducer no partial update is ever performed (every contingency does a full structure build, since the
-            // zero impedance equation toggles invalidate the structure), so it is the bookkeeping the flag switches on
-            // - the value snapshot and the touched element tracking - that changes what gets re-derived. Root cause
-            // not yet pinned, hence the conservative gate rather than a targeted fix.
-            jacobianMatrix.setPartialValueUpdateEnabled(parameters.getEquationSystemCreationParameters().isAlternativeEquations()
-                    && network.getBranches().stream().noneMatch(branch -> branch.isZeroImpedance(LoadFlowModel.AC)));
+            jacobianMatrix.setPartialValueUpdateEnabled(parameters.getEquationSystemCreationParameters().isAlternativeEquations());
             // note: incremental LU updates on alternative switches (setAllowIncrementalUpdateOnZeroChanges) were
             // benchmarked on Pegase security analyses and are NOT enabled here: PV/PQ switches change the pivot
             // structure of the switched columns so often that the failed incremental attempts plus their full

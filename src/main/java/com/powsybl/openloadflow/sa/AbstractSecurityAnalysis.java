@@ -743,6 +743,13 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 // save base state for later restoration after each contingency
                 NetworkState networkState = NetworkState.save(lfNetwork);
 
+                // when the alternative equations partial value update is on, simulate structure-preserving
+                // contingencies first and fallback ones last so the base structure construction is paid once
+                List<PropagatedContingency> orderedContingencies = context.getJacobianMatrix().isPartialValueUpdateEnabled()
+                        ? orderContingenciesForStructureReuse(lfNetwork, context, networkState, propagatedContingencies)
+                        : propagatedContingencies;
+                boolean contingenciesReordered = orderedContingencies != propagatedContingencies;
+
                 // collect the elements modified by each contingency (and its operator strategy actions) so that only
                 // those are restored afterwards, instead of the whole network
                 ModifiedElementsCollector modifiedElementsCollector = new ModifiedElementsCollector();
@@ -756,13 +763,6 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
                 // Reset parameters between contingencies
                 Consumer<P> contingencyParametersResetter = createParametersResetter(p);
-
-                // when the alternative equations partial value update is on, simulate structure-preserving
-                // contingencies first and fallback ones last so the base structure construction is paid once
-                List<PropagatedContingency> orderedContingencies = context.getJacobianMatrix().isPartialValueUpdateEnabled()
-                        ? orderContingenciesForStructureReuse(lfNetwork, context, propagatedContingencies)
-                        : propagatedContingencies;
-                boolean contingenciesReordered = orderedContingencies != propagatedContingencies;
 
                 // start a simulation for each of the contingency
                 int[] fallbackContingencyCount = {0};
@@ -1054,18 +1054,31 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
      * the base structure construction is paid once (see {@link com.powsybl.openloadflow.equations.JacobianMatrix}
      * partial value update). This is purely an execution-order optimization: each contingency is simulated from the
      * same restored base state, so results are identical and are reordered back to the input order by the caller.
+     *
+     * <p>Building a {@link LfContingency} is not free of side effects on the network: a contingency that isolates the
+     * slack bus relocates it, by excluding the buses of the isolated component from the slack bus selection
+     * ({@code LfSynchronousNetwork.setExcludedSlackBuses}), and that exclusion outlives the call. In the simulation
+     * loop each contingency undoes it when restoring the base state, but this classification pass builds every
+     * contingency up front, so its side effects would otherwise leak into the first contingency simulated and change
+     * its result. Hence the base state restoration below.
      */
-    private List<PropagatedContingency> orderContingenciesForStructureReuse(LfNetwork lfNetwork, C context,
+    private List<PropagatedContingency> orderContingenciesForStructureReuse(LfNetwork lfNetwork, C context, NetworkState networkState,
                                                                             List<PropagatedContingency> propagatedContingencies) {
         List<PropagatedContingency> structurePreserving = new ArrayList<>();
         List<PropagatedContingency> structureRebuilding = new ArrayList<>();
-        for (PropagatedContingency propagatedContingency : propagatedContingencies) {
-            Optional<LfContingency> lfContingency = propagatedContingency.toLfContingency(lfNetwork);
-            if (lfContingency.isPresent() && contingencyPreservesMatrixStructure(context, lfContingency.get())) {
-                structurePreserving.add(propagatedContingency);
-            } else {
-                structureRebuilding.add(propagatedContingency);
+        try {
+            for (PropagatedContingency propagatedContingency : propagatedContingencies) {
+                Optional<LfContingency> lfContingency = propagatedContingency.toLfContingency(lfNetwork);
+                if (lfContingency.isPresent() && contingencyPreservesMatrixStructure(context, lfContingency.get())) {
+                    structurePreserving.add(propagatedContingency);
+                } else {
+                    structureRebuilding.add(propagatedContingency);
+                }
             }
+        } finally {
+            // discard the side effects of the contingencies built above, so that the first contingency of the
+            // simulation loop starts from the very same base state as if this pass had not run
+            networkState.restore();
         }
         if (structurePreserving.isEmpty() || structureRebuilding.isEmpty()) {
             // all contingencies fall in the same group: keep the input order untouched
