@@ -8,8 +8,11 @@
 package com.powsybl.openloadflow.sa;
 
 import com.powsybl.contingency.Contingency;
+import com.powsybl.iidm.network.HvdcConverterStation;
+import com.powsybl.iidm.network.HvdcLine;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.Substation;
+import com.powsybl.iidm.network.Terminal;
 import com.powsybl.iidm.network.TopologyKind;
 import com.powsybl.iidm.network.VoltageLevel;
 import com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder;
@@ -226,5 +229,22 @@ class AlternativeEquationsSecurityAnalysisTest extends AbstractOpenSecurityAnaly
                 .noneMatch(busResult -> busResult.getVoltageLevelId().equals("VLGEN2")
                         && !Double.isNaN(busResult.getV()) && Math.abs(busResult.getV() - 24.0) < 1e-3),
                 "the trivial solution of the islanded bus must not be reported as a result");
+    }
+
+    private static Network createHvdcNetworkDisconnectedInBaseCase() {
+        Network network = HvdcNetworkFactory.createHvdcLinkedByTwoLinesAndSwitch(HvdcConverterStation.HvdcType.VSC);
+        network.getHvdcLine("hvdc23").setConvertersMode(HvdcLine.ConvertersMode.SIDE_1_RECTIFIER_SIDE_2_INVERTER);
+        network.getLine("l12").getTerminals().forEach(Terminal::disconnect);
+        return network;
+    }
+
+    @Test
+    void notSquareEquationSystemFallsBackToLegacyModelingTest() {
+        // this network cannot be modeled with alternative equations: the open line and the HVDC disconnected in the
+        // base case leave a bus angle variable without the equation determining it, so the equation system is not
+        // square from the pre-contingency simulation on. Rather than failing the whole analysis, it must fall back to
+        // the legacy modeling and give exactly the legacy results.
+        checkSameResultsAsLegacyModeling(AlternativeEquationsSecurityAnalysisTest::createHvdcNetworkDisconnectedInBaseCase,
+                List.of(Contingency.line("l14")));
     }
 }

@@ -36,6 +36,7 @@ import com.powsybl.security.PostContingencyComputationStatus;
 import com.powsybl.security.monitor.StateMonitor;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.function.Consumer;
 
 /**
@@ -130,6 +131,22 @@ public class AcSecurityAnalysis extends AbstractSecurityAnalysis<AcVariableType,
                     new AcEquationSystemCreationParameters(creationParameters.isForceA1Var(), true)
                             .setAlternativeBusesCanBeDisabled(true));
         }
+    }
+
+    @Override
+    protected Optional<AcLoadFlowContext> createFallbackModelingContext(LfNetwork lfNetwork, AcLoadFlowParameters parameters) {
+        AcEquationSystemCreationParameters creationParameters = parameters.getEquationSystemCreationParameters();
+        if (!creationParameters.isAlternativeEquations()) {
+            // already on the legacy modeling: there is nothing to fall back on
+            return Optional.empty();
+        }
+        // the alternative equations keep the matrix structure by carrying several alternatives on a single equation,
+        // which cannot follow a control whose controller set a contingency reconfigures. Rebuild the equation system of
+        // the (already applied) contingency on the legacy modeling, where each control equation is added and removed
+        // individually, at the price of a full build for this contingency only.
+        AcLoadFlowParameters fallbackParameters = new AcLoadFlowParameters(parameters)
+                .setEquationSystemCreationParameters(new AcEquationSystemCreationParameters(creationParameters.isForceA1Var(), false));
+        return Optional.of(new AcLoadFlowContext(lfNetwork, fallbackParameters));
     }
 
     @Override

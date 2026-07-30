@@ -8,7 +8,6 @@
 package com.powsybl.openloadflow.equations;
 
 import com.google.common.base.Stopwatch;
-import com.powsybl.commons.PowsyblException;
 import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.math.matrix.LUDecomposition;
 import com.powsybl.math.matrix.Matrix;
@@ -235,7 +234,7 @@ public class JacobianMatrix<V extends Enum<V> & Quantity, E extends Enum<E> & Qu
         int rowCount = equationSystem.getIndex().getRowCount();
         int columnCount = equationSystem.getIndex().getColumnCount();
         if (rowCount != columnCount) {
-            throw new PowsyblException("Expected to have same number of equations (" + columnCount
+            throw new EquationSystemNotSquareException("Expected to have same number of equations (" + columnCount
                     + ") and variables (" + rowCount + "). " + describeEquationVariableImbalance());
         }
 
