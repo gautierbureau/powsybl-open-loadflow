@@ -34,9 +34,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * Combines the two opt-in features: alternative equations
  * ({@link OpenLoadFlowParameters#setAlternativeEquations(boolean)}) run inside a multi-threaded security analysis
  * that gives every contingency partition its own deep {@code LfNetworkCopier} copy of the network
- * ({@link OpenSecurityAnalysisParameters.NetworkPerThreadMode#COPY}, the default), for both contingency
- * partitioning modes: {@link OpenSecurityAnalysisParameters.ContingencyPartitioningMode#SLICE} (contiguous) and
- * {@link OpenSecurityAnalysisParameters.ContingencyPartitioningMode#ROUND_ROBIN} (interleaved).
+ * ({@link OpenSecurityAnalysisParameters.NetworkPerThreadMode#COPY}, the default), for every contingency
+ * partitioning mode: {@link OpenSecurityAnalysisParameters.ContingencyPartitioningMode#SLICE} (contiguous),
+ * {@link OpenSecurityAnalysisParameters.ContingencyPartitioningMode#ROUND_ROBIN} (interleaved) and
+ * {@link OpenSecurityAnalysisParameters.ContingencyPartitioningMode#SHARED_QUEUE} (no static partition at all,
+ * each worker pulls its next contingency from a shared queue).
  *
  * <p>This exercises the two SA hooks that both features add to {@code AbstractSecurityAnalysis}, on the copied
  * (and, when supported, presolved) networks of each partition: {@code adaptParameters} (which computes the
@@ -190,7 +192,7 @@ class AlternativeEquationsMtCopyTest extends AbstractOpenSecurityAnalysisTest {
     }
 
     @ParameterizedTest(name = "threads={0} partitioning={1}")
-    @CsvSource({"2, SLICE", "3, SLICE", "2, ROUND_ROBIN", "3, ROUND_ROBIN"})
+    @CsvSource({"2, SLICE", "3, SLICE", "2, ROUND_ROBIN", "3, ROUND_ROBIN", "2, SHARED_QUEUE", "3, SHARED_QUEUE"})
     void alternativeEquationsCopyModeIdenticalToSingleThread(int threadCount, OpenSecurityAnalysisParameters.ContingencyPartitioningMode partitioningMode) {
         // multi-threaded copy-mode SA with alternative equations must be bit-identical to the single-threaded one,
         // for both partitioning modes: the deep copy of each partition carries the same network, and the
@@ -203,7 +205,7 @@ class AlternativeEquationsMtCopyTest extends AbstractOpenSecurityAnalysisTest {
     }
 
     @ParameterizedTest(name = "threads={0} partitioning={1}")
-    @CsvSource({"2, SLICE", "3, SLICE", "2, ROUND_ROBIN", "3, ROUND_ROBIN"})
+    @CsvSource({"2, SLICE", "3, SLICE", "2, ROUND_ROBIN", "3, ROUND_ROBIN", "2, SHARED_QUEUE", "3, SHARED_QUEUE"})
     void alternativeEquationsCopyModeIdenticalToLegacy(int threadCount, OpenSecurityAnalysisParameters.ContingencyPartitioningMode partitioningMode) {
         // end-to-end correctness of the combined stack: alternative equations, multi-threaded, copy mode, with the
         // given partitioning, must give the same result as the legacy modeling run single-threaded
