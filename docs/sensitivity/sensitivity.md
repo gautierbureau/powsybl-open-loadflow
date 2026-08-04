@@ -399,6 +399,18 @@ $
 S_{\eta,p}^c = S_{\eta,p} - \sum_{g \in U} r^c_g S_{\eta,g}.
 $$
 
+Contrary to the DC sensitivity analysis, the AC model has active power losses, and those losses depend on the parameter
+$p$. When $p$ is the phase shift of a phase tap changer, it is even the only active power imbalance the parameter
+creates: shifting a phase injects no active power anywhere, but it does change the losses of the network. As the active
+power balance equation of the slack buses is not part of the equation system, that loss variation would be entirely
+absorbed by the slack buses, whereas the load flow run after modifying the same phase tap changer setpoint spreads it
+over the participating elements.
+
+Writing $D$ the total active power the slack distribution has to spread, and $b$ the state variation obtained from a
+right-hand side made of the participation factors $(r^c_g)$, the state variation for the parameter $p$ is
+$S_{\eta,p} + D \cdot b$. $D$ is obtained by writing that the active power injection variation at the slack buses is
+their own share of the distribution.
+
 ### Contingency management
 
 Contrary to [DC sensitivity analysis](#contingency-management), computations of sensitivities in case of contingencies are performed by restarting the sequence of computations based on the equation system of the post-contingency network and not more on the equation system of the pre-contingency network.

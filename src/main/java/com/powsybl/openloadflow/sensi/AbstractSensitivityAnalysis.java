@@ -426,6 +426,8 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
 
         void addFactor(LfSensitivityFactor<V, E> factor);
 
+        SensitivityVariableType getVariableType();
+
         void fillRhs(Matrix rhs, Map<LfBus, Double> participationByBus);
     }
 
@@ -444,6 +446,11 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
         @Override
         public List<LfSensitivityFactor<V, E>> getFactors() {
             return factors;
+        }
+
+        @Override
+        public SensitivityVariableType getVariableType() {
+            return variableType;
         }
 
         @Override
@@ -772,16 +779,28 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
     static <V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> DenseMatrix initFactorsRhs(EquationSystem<V, E> equationSystem,
                                                                                                    SensitivityFactorGroupList<V, E> factorsGroups,
                                                                                                    Map<LfBus, Double> participationByBus) {
+        return initFactorsRhs(equationSystem, factorsGroups, participationByBus, 0);
+    }
+
+    /**
+     * Same as {@link #initFactorsRhs(EquationSystem, SensitivityFactorGroupList, Map)} but reserving
+     * {@code extraColumnCount} additional columns after the factor group ones. Those extra columns are left to zero,
+     * the caller is responsible for filling them.
+     */
+    static <V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> DenseMatrix initFactorsRhs(EquationSystem<V, E> equationSystem,
+                                                                                                   SensitivityFactorGroupList<V, E> factorsGroups,
+                                                                                                   Map<LfBus, Double> participationByBus,
+                                                                                                   int extraColumnCount) {
         // otherwise, defining the rhs matrix will result in integer overflow
         int equationCount = equationSystem.getIndex().getColumnCount();
         int factorsGroupCount = factorsGroups.getList().size();
         int maxFactorsGroups = Integer.MAX_VALUE / (equationCount * Double.BYTES);
-        if (factorsGroupCount > maxFactorsGroups) {
+        if (factorsGroupCount + extraColumnCount > maxFactorsGroups) {
             throw new PowsyblException("Too many factors groups " + factorsGroupCount
                     + ", maximum is " + maxFactorsGroups + " for a system with " + equationCount + " equations");
         }
 
-        DenseMatrix rhs = new DenseMatrix(equationCount, factorsGroupCount);
+        DenseMatrix rhs = new DenseMatrix(equationCount, factorsGroupCount + extraColumnCount);
         fillRhsSensitivityVariable(factorsGroups, rhs, participationByBus);
         return rhs;
     }
