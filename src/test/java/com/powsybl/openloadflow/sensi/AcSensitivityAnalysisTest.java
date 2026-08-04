@@ -22,6 +22,7 @@ import com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder
 import com.powsybl.iidm.network.extensions.VoltageRegulation;
 import com.powsybl.iidm.network.extensions.VoltageRegulationAdder;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
+import com.powsybl.iidm.serde.test.MetrixTutorialSixBusesFactory;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.CommonTestConfig;
@@ -525,6 +526,99 @@ class AcSensitivityAnalysisTest extends AbstractSensitivityAnalysisTest {
         assertEquals(0.0217d, result.getBranchFlow1SensitivityValue("l23", "l34", SensitivityVariableType.TRANSFORMER_PHASE), LoadFlowAssert.DELTA_POWER);
         assertEquals(-0.0429d, result.getBranchFlow1SensitivityValue("l23", "l13", SensitivityVariableType.TRANSFORMER_PHASE), LoadFlowAssert.DELTA_POWER);
         assertEquals(0.0647d, result.getBranchFlow1SensitivityValue("l23", "l23", SensitivityVariableType.TRANSFORMER_PHASE), LoadFlowAssert.DELTA_POWER);
+    }
+
+    /**
+     * A phase shift injects no active power, but it does change the active losses of the network. When the slack is
+     * distributed, that loss variation is spread over the participating elements, and the sensitivity value must be
+     * consistent with the load flow a user would run after modifying the phase tap changer setpoint by hand.
+     */
+    @Test
+    void testPhaseShiftSensitivityConsistentWithLoadFlowWhenSlackIsDistributed() {
+        String pstId = "NE_NO_1";
+        List<String> monitoredBranchIds = List.of("S_SO_1", "SO_NO_1", "SE_NE_1", "NE_N_1", "NE_NO_1");
+
+        SensitivityAnalysisParameters sensiParameters = createParameters(false);
+        LoadFlowParameters lfParameters = sensiParameters.getLoadFlowParameters();
+        lfParameters.setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P_MAX);
+        // the finite difference below has to exercise the slack distribution: with the default mismatch threshold the
+        // outer loop stops before spreading a variation as small as the one created by the phase shift below
+        OpenLoadFlowParameters.create(lfParameters).setSlackBusPMaxMismatch(1e-5);
+
+        Network network = MetrixTutorialSixBusesFactory.create();
+        List<SensitivityFactor> factors = monitoredBranchIds.stream()
+                .map(branchId -> createBranchFlowPerPSTAngle(branchId, pstId))
+                .toList();
+        SensitivityAnalysisResult result = sensiRunner.run(network, factors, new SensitivityAnalysisRunParameters()
+                .setParameters(sensiParameters));
+
+        // centered finite difference on the phase shifter angle
+        double dAlpha = 0.01;
+        Network fdNetwork = MetrixTutorialSixBusesFactory.create();
+        PhaseTapChanger ptc = fdNetwork.getTwoWindingsTransformer(pstId).getPhaseTapChanger();
+        PhaseTapChangerStep step = ptc.getStep(ptc.getTapPosition());
+        double alpha = step.getAlpha();
+        step.setAlpha(alpha + dAlpha);
+        double[] flowsAbove = runLfAndGetFlows(fdNetwork, monitoredBranchIds, lfParameters);
+        step.setAlpha(alpha - dAlpha);
+        double[] flowsBelow = runLfAndGetFlows(fdNetwork, monitoredBranchIds, lfParameters);
+
+        for (int i = 0; i < monitoredBranchIds.size(); i++) {
+            String branchId = monitoredBranchIds.get(i);
+            double finiteDifference = (flowsAbove[i] - flowsBelow[i]) / (2 * dAlpha);
+            double sensitivity = result.getBranchFlow1SensitivityValue(pstId, branchId, SensitivityVariableType.TRANSFORMER_PHASE);
+            assertEquals(finiteDifference, sensitivity, 1e-3 * Math.abs(finiteDifference),
+                    "Sensitivity of " + branchId + " to the phase of " + pstId + " does not match the load flow");
+        }
+
+        assertEquals(-2.1279d, result.getBranchFlow1SensitivityValue(pstId, "S_SO_1", SensitivityVariableType.TRANSFORMER_PHASE), LoadFlowAssert.DELTA_POWER);
+        assertEquals(-2.1388d, result.getBranchFlow1SensitivityValue(pstId, "SO_NO_1", SensitivityVariableType.TRANSFORMER_PHASE), LoadFlowAssert.DELTA_POWER);
+        assertEquals(1.6537d, result.getBranchFlow1SensitivityValue(pstId, "SE_NE_1", SensitivityVariableType.TRANSFORMER_PHASE), LoadFlowAssert.DELTA_POWER);
+        assertEquals(-7.4986d, result.getBranchFlow1SensitivityValue(pstId, "NE_N_1", SensitivityVariableType.TRANSFORMER_PHASE), LoadFlowAssert.DELTA_POWER);
+        assertEquals(16.6739d, result.getBranchFlow1SensitivityValue(pstId, "NE_NO_1", SensitivityVariableType.TRANSFORMER_PHASE), LoadFlowAssert.DELTA_POWER);
+    }
+
+    /**
+     * Same phase shift sensitivities, with the slack kept at the slack bus: the loss variation is absorbed there, so
+     * there is nothing to distribute and the values must stay what they are.
+     */
+    @Test
+    void testPhaseShiftSensitivityConsistentWithLoadFlowWhenSlackIsNotDistributed() {
+        String pstId = "NE_NO_1";
+        List<String> monitoredBranchIds = List.of("S_SO_1", "SO_NO_1", "SE_NE_1", "NE_N_1", "NE_NO_1");
+
+        SensitivityAnalysisParameters sensiParameters = createParameters(false);
+        LoadFlowParameters lfParameters = sensiParameters.getLoadFlowParameters().setDistributedSlack(false);
+
+        Network network = MetrixTutorialSixBusesFactory.create();
+        List<SensitivityFactor> factors = monitoredBranchIds.stream()
+                .map(branchId -> createBranchFlowPerPSTAngle(branchId, pstId))
+                .toList();
+        SensitivityAnalysisResult result = sensiRunner.run(network, factors, new SensitivityAnalysisRunParameters()
+                .setParameters(sensiParameters));
+
+        double dAlpha = 0.01;
+        Network fdNetwork = MetrixTutorialSixBusesFactory.create();
+        PhaseTapChanger ptc = fdNetwork.getTwoWindingsTransformer(pstId).getPhaseTapChanger();
+        PhaseTapChangerStep step = ptc.getStep(ptc.getTapPosition());
+        double alpha = step.getAlpha();
+        step.setAlpha(alpha + dAlpha);
+        double[] flowsAbove = runLfAndGetFlows(fdNetwork, monitoredBranchIds, lfParameters);
+        step.setAlpha(alpha - dAlpha);
+        double[] flowsBelow = runLfAndGetFlows(fdNetwork, monitoredBranchIds, lfParameters);
+
+        for (int i = 0; i < monitoredBranchIds.size(); i++) {
+            String branchId = monitoredBranchIds.get(i);
+            double finiteDifference = (flowsAbove[i] - flowsBelow[i]) / (2 * dAlpha);
+            double sensitivity = result.getBranchFlow1SensitivityValue(pstId, branchId, SensitivityVariableType.TRANSFORMER_PHASE);
+            assertEquals(finiteDifference, sensitivity, 1e-3 * Math.abs(finiteDifference),
+                    "Sensitivity of " + branchId + " to the phase of " + pstId + " does not match the load flow");
+        }
+    }
+
+    private double[] runLfAndGetFlows(Network network, List<String> branchIds, LoadFlowParameters lfParameters) {
+        runLf(network, lfParameters);
+        return branchIds.stream().mapToDouble(branchId -> network.getBranch(branchId).getTerminal1().getP()).toArray();
     }
 
     @Test

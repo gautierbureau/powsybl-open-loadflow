@@ -24,6 +24,9 @@ import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.ac.equations.*;
 import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
+import com.powsybl.openloadflow.equations.Equation;
+import com.powsybl.openloadflow.equations.EquationTerm;
+import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
 import com.powsybl.openloadflow.network.*;
@@ -53,6 +56,12 @@ import java.util.stream.Collectors;
  * @author Gael Macherel {@literal <gael.macherel at artelys.com>}
  */
 public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariableType, AcEquationType> {
+
+    /**
+     * Below this value the participating elements are considered unable to absorb the active power imbalance created
+     * by a variable, and the slack distribution correction is skipped.
+     */
+    private static final double EPS_SLACK_DISTRIBUTION = 1e-8;
 
     public AcSensitivityAnalysis(MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory, SensitivityAnalysisParameters parameters) {
         super(matrixFactory, connectivityFactory, parameters);
@@ -232,13 +241,154 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         // we make the assumption that we ran a loadflow before, and thus this jacobian is the right one
 
         // solve system
-        DenseMatrix factorsStates = initFactorsRhs(context.getEquationSystem(), factorGroups, participationByBus); // this is the rhs for the moment
-        fillSvcPilotFactorsRhs(factorGroups, factorsStates, context);
-        context.getJacobianMatrix().solveTransposed(factorsStates);
+        DenseMatrix factorsStates = calculateFactorsStates(context, factorGroups, participationByBus, lfParameters.isDistributedSlack());
         setFunctionReferences(lfFactors);
 
         // calculate sensitivity values
         calculateSensitivityValues(lfFactors, factorGroups, factorsStates, contingencyIndex, resultWriter);
+    }
+
+    /**
+     * Builds the right hand side from the factor groups, solves it against the current Jacobian and returns the
+     * resulting states, one column per factor group.
+     * <p>
+     * When the slack is distributed, an extra column carrying the slack distribution response is appended to the
+     * right hand side so that {@link #applySlackDistributionCorrection} can correct the factor group states, see
+     * that method for details.
+     */
+    private static DenseMatrix calculateFactorsStates(AcLoadFlowContext context,
+                                                      SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups,
+                                                      Map<LfBus, Double> slackParticipationByBus,
+                                                      boolean distributedSlack) {
+        int distributionColumn = factorGroups.getList().size();
+        boolean correctSlackDistribution = distributedSlack
+                && factorGroups.getList().stream().anyMatch(group -> isTransformerPhaseVariable(group.getVariableType()));
+        DenseMatrix factorsStates = initFactorsRhs(context.getEquationSystem(), factorGroups, slackParticipationByBus,
+                correctSlackDistribution ? 1 : 0);
+        fillSvcPilotFactorsRhs(factorGroups, factorsStates, context);
+        if (correctSlackDistribution) {
+            fillSlackDistributionRhs(factorsStates, distributionColumn, slackParticipationByBus);
+        }
+        context.getJacobianMatrix().solveTransposed(factorsStates);
+        if (correctSlackDistribution) {
+            applySlackDistributionCorrection(context.getNetwork(), factorGroups, factorsStates, distributionColumn,
+                    slackParticipationByBus);
+        }
+        return factorsStates;
+    }
+
+    /**
+     * Fills a right hand side column with the active power injections that the slack distribution adds to the network
+     * when one unit of active power has to be balanced: {@code +participationFactor} on each participating bus.
+     * Slack buses are skipped, exactly as in the injection factor groups, because their active power balance equation
+     * is not part of the equation system.
+     */
+    private static void fillSlackDistributionRhs(DenseMatrix rhs, int column, Map<LfBus, Double> slackParticipationByBus) {
+        for (Map.Entry<LfBus, Double> busAndParticipationFactor : slackParticipationByBus.entrySet()) {
+            LfBus bus = busAndParticipationFactor.getKey();
+            Equation<AcVariableType, AcEquationType> p = (Equation<AcVariableType, AcEquationType>) bus.getP();
+            if (bus.isSlack() || !p.isActive()) {
+                continue;
+            }
+            // values of the participation map are stored negated (they are used to compensate an injection increase)
+            rhs.add(p.getColumn(), column, -busAndParticipationFactor.getValue());
+        }
+    }
+
+    /**
+     * Corrects the states of the phase shift factor groups so that they account for the slack distribution.
+     * <p>
+     * Shifting the phase of a transformer does not inject active power anywhere, but it does change the active losses
+     * of the network. The active power balance equation of the slack buses is not part of the equation system, so
+     * without correction that loss variation is entirely absorbed by the slack buses, while the load flow the user
+     * runs after modifying the same phase tap changer setpoint spreads it over the participating elements. The two
+     * are then inconsistent, and since the loss variation is the only active power imbalance a phase shift creates,
+     * the whole slack distribution response is missing from the sensitivity value.
+     * <p>
+     * Writing {@code D} the total active power the slack distribution has to spread, the state derivative is
+     * {@code dx = a + D.b} where {@code a} is the state computed from the factor group right hand side alone and
+     * {@code b} the state computed from the slack distribution right hand side. {@code D} is determined by the
+     * condition that the injection variation at the slack buses is their own share of the distribution:
+     * {@code S(a) + D.S(b) = participationOfSlackBuses.D}, where {@code S} is the injection variation at the slack
+     * buses. Hence {@code D = S(a) / (participationOfSlackBuses - S(b))}.
+     * <p>
+     * Only phase shift variables are corrected here. An active power injection variable already carries the slack
+     * distribution response to the injection increase itself in its right hand side, which is the usual definition of
+     * such a sensitivity. The other variable types that create an active power imbalance (a voltage target, a
+     * susceptance, a branch impedance) would need the same correction, plus, for those that appear explicitly in the
+     * equations rather than through a state variable, the derivative of the slack buses injection with respect to the
+     * variable itself, which {@link #slackBusesInjectionSensi} does not compute.
+     */
+    private static void applySlackDistributionCorrection(LfNetwork lfNetwork,
+                                                         SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups,
+                                                         DenseMatrix factorsStates, int distributionColumn,
+                                                         Map<LfBus, Double> slackParticipationByBus) {
+        List<LfBus> slackBuses = lfNetwork.getSynchronousNetworks().stream()
+                .flatMap(synchronousNetwork -> synchronousNetwork.getSlackBuses().stream())
+                .toList();
+        double slackBusesParticipation = slackBuses.stream()
+                .mapToDouble(slackBus -> -slackParticipationByBus.getOrDefault(slackBus, 0d))
+                .sum();
+        double denominator = slackBusesParticipation - slackBusesInjectionSensi(slackBuses, factorsStates, distributionColumn);
+        if (Math.abs(denominator) < EPS_SLACK_DISTRIBUTION) {
+            // the participating elements are unable to absorb the imbalance, nothing better to do than leaving it
+            // at the slack buses
+            LOGGER.warn("Slack distribution response is degenerate, sensitivity values are computed with the whole "
+                    + "active power imbalance absorbed by the slack buses");
+            return;
+        }
+        int rowCount = factorsStates.getRowCount();
+        for (SensitivityFactorGroup<AcVariableType, AcEquationType> factorGroup : factorGroups.getList()) {
+            if (!isTransformerPhaseVariable(factorGroup.getVariableType())) {
+                continue;
+            }
+            int column = factorGroup.getIndex();
+            double distributedPower = slackBusesInjectionSensi(slackBuses, factorsStates, column) / denominator;
+            if (distributedPower != 0) {
+                for (int row = 0; row < rowCount; row++) {
+                    factorsStates.add(row, column, distributedPower * factorsStates.get(row, distributionColumn));
+                }
+            }
+        }
+    }
+
+    /**
+     * Variation of the active power injected at the slack buses, for a given column of the solved states. The active
+     * power balance equation of a slack bus is inactive but its terms are still valid: their sum is the active power
+     * injection at that bus, so the variation is the equation derivatives times the state variations.
+     * <p>
+     * The derivatives are read term by term rather than through {@code EquationTerm#calculateSensi}, which is not
+     * implemented by all the terms that can end up in a bus active power balance equation (an open branch, a load
+     * model or an HVDC AC emulation term for instance).
+     */
+    private static double slackBusesInjectionSensi(List<LfBus> slackBuses, DenseMatrix factorsStates, int column) {
+        double sensi = 0;
+        for (LfBus slackBus : slackBuses) {
+            Equation<AcVariableType, AcEquationType> p = (Equation<AcVariableType, AcEquationType>) slackBus.getP();
+            for (Map.Entry<Variable<AcVariableType>, List<EquationTerm<AcVariableType, AcEquationType>>> e
+                    : p.<EquationTerm<AcVariableType, AcEquationType>>getTermsByVariable().entrySet()) {
+                Variable<AcVariableType> variable = e.getKey();
+                int row = variable.getRow();
+                if (row == -1) {
+                    continue; // variable not part of the solved system
+                }
+                double der = 0;
+                for (EquationTerm<AcVariableType, AcEquationType> term : e.getValue()) {
+                    if (term.isActive()) {
+                        der += term.der(variable);
+                    }
+                }
+                sensi += der * factorsStates.get(row, column);
+            }
+        }
+        return sensi;
+    }
+
+    private static boolean isTransformerPhaseVariable(SensitivityVariableType variableType) {
+        return switch (variableType) {
+            case TRANSFORMER_PHASE, TRANSFORMER_PHASE_1, TRANSFORMER_PHASE_2, TRANSFORMER_PHASE_3 -> true;
+            default -> false;
+        };
     }
 
     /**
@@ -505,12 +655,8 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
 
             // we make the assumption that we ran a loadflow before, and thus this jacobian is the right one
 
-            // initialize right hand side from valid factors
-            DenseMatrix factorsStates = initFactorsRhs(context.getEquationSystem(), factorGroups, slackParticipationByBus); // this is the rhs for the moment
-            fillSvcPilotFactorsRhs(factorGroups, factorsStates, context);
-
-            // solve system
-            context.getJacobianMatrix().solveTransposed(factorsStates);
+            // initialize right hand side from valid factors and solve system
+            DenseMatrix factorsStates = calculateFactorsStates(context, factorGroups, slackParticipationByBus, lfParameters.isDistributedSlack());
 
             // calculate sensitivity values
             setFunctionReferences(validLfFactors);
