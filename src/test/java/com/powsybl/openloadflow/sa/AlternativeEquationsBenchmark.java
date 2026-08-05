@@ -472,9 +472,11 @@ class AlternativeEquationsBenchmark extends AbstractOpenSecurityAnalysisTest {
         parameters.addExtension(OpenSecurityAnalysisParameters.class, new OpenSecurityAnalysisParameters().setThreadCount(1));
 
         long[] best = {Long.MAX_VALUE, Long.MAX_VALUE};
-        List<List<String>> violations = List.of(new ArrayList<>(), new ArrayList<>());
+        List<List<String>> violations = new ArrayList<>(List.of(new ArrayList<>(), new ArrayList<>()));
         try {
-            for (int i = 0; i < 4; i++) {
+            // interleaved, three measured pairs after one warmup pair: the difference between the two paths is a
+            // few percent, so a single pair per mode would not separate it from run-to-run drift
+            for (int i = 0; i < 8; i++) {
                 int mode = i % 2; // 0: evaluable walk, 1: bulk arrays
                 LimitViolationManager.bulkFlowScreen = mode == 1;
                 long t0 = System.nanoTime();
