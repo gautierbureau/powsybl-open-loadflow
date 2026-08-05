@@ -158,6 +158,10 @@ public final class LfLegBranch extends AbstractImpedantLfBranch {
 
     @Override
     public List<LfLimitsGroup> getLimits1(final LimitType type, LimitReductionManager limitReductionManager) {
+        List<LfLimitsGroup> cached = getCachedLimits1(type);
+        if (cached != null) {
+            return cached;
+        }
         switch (type) {
             case ACTIVE_POWER:
                 return getLimits1(type, toMapIndexedByOperationalLimitsGroupId(OperationalLimitsGroup::getActivePowerLimits), limitReductionManager);
