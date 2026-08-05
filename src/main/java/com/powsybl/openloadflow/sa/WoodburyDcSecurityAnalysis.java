@@ -57,9 +57,39 @@ import static com.powsybl.openloadflow.network.impl.PropagatedContingency.cleanC
  */
 public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
+    /**
+     * When true, the per-contingency {@code updateNetwork} that writes every bus angle back to the network model is
+     * skipped when no output needs those angles (no monitored voltage level, no voltage angle limit). Branch flows used
+     * for violation and branch-result computation are read from the state vector, not from the model bus angles, so
+     * skipping this network-wide write is transparent in that case. Kept as a toggle to compare with the full update.
+     */
+    static boolean restrictBusStateUpdate = true;
+
     private record WoodburyContext(DcLoadFlowContext dcLoadFlowContext, Map<String, List<Indexed<OperatorStrategy>>> operatorStrategiesByContingencyId, Map<String, LfAction> lfActionById,
                                    boolean createResultExtension, SecurityAnalysisParameters.IncreasedViolationsParameters violationsParameters,
-                                   List<LimitReduction> limitReductions, SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modifiedMonitoredElementsParameters) {
+                                   List<LimitReduction> limitReductions, SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modifiedMonitoredElementsParameters,
+                                   boolean updateBusStates) {
+    }
+
+    /**
+     * Whether the post-contingency bus angles must be written back to the network model, i.e. whether any output reads
+     * them: a monitored voltage level (producing bus results) or a voltage angle limit (checked on bus angles). Branch
+     * flows and branch results are computed from the state vector and never need this write.
+     */
+    private static boolean isBusStateUpdateNeeded(LfNetwork lfNetwork, StateMonitorIndex monitorIndex, StateMonitorIndex zeroImpedanceMonitorIndex) {
+        return !lfNetwork.getVoltageAngleLimits().isEmpty()
+                || monitorsVoltageLevel(monitorIndex) || monitorsVoltageLevel(zeroImpedanceMonitorIndex);
+    }
+
+    private static boolean monitorsVoltageLevel(StateMonitorIndex monitorIndex) {
+        if (monitorIndex == null) {
+            return false;
+        }
+        if (monitorIndex.getAllStateMonitor() != null && !monitorIndex.getAllStateMonitor().getVoltageLevelIds().isEmpty()) {
+            return true;
+        }
+        return monitorIndex.getSpecificStateMonitors().values().stream()
+                .anyMatch(monitor -> !monitor.getVoltageLevelIds().isEmpty());
     }
 
     private record ToFastDcResults(Function<ConnectivityAnalysisResult, double[]> toPostContingencyStates,
@@ -196,7 +226,9 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
         // update network state with post contingency states
         loadFlowContext.getEquationSystem().getStateVector().set(postContingencyStates);
-        updateNetwork(lfNetwork, loadFlowContext.getEquationSystem(), postContingencyStates);
+        if (woodburyContext.updateBusStates()) {
+            updateNetwork(lfNetwork, loadFlowContext.getEquationSystem(), postContingencyStates);
+        }
 
         lfContingency.apply(loadFlowContext.getParameters().getBalanceType());
 
@@ -249,7 +281,9 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
         // update network state with post contingency and post operator strategy states
         loadFlowContext.getEquationSystem().getStateVector().set(postContingencyAndOperatorStrategyStates);
-        updateNetwork(lfNetwork, loadFlowContext.getEquationSystem(), postContingencyAndOperatorStrategyStates);
+        if (woodburyContext.updateBusStates()) {
+            updateNetwork(lfNetwork, loadFlowContext.getEquationSystem(), postContingencyAndOperatorStrategyStates);
+        }
 
         // apply modifications to compute results
         lfContingency.apply(loadFlowContext.getParameters().getBalanceType());
@@ -451,9 +485,12 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
             // detect violations
             var preContingencyLimitViolationManager = new LimitViolationManager(limitReductions);
             preContingencyLimitViolationManager.detectViolations(lfNetwork);
+            // the per-contingency updateNetwork writes every bus angle back to the model; skip it when no output reads
+            // those angles (branch flows come from the state vector), keeping it when it is disabled by the toggle
+            boolean updateBusStates = !restrictBusStateUpdate || isBusStateUpdateNeeded(lfNetwork, monitorIndex, zeroImpedanceMonitoredIndex);
             WoodburyContext woodburyContext = new WoodburyContext(context, operatorStrategiesByContingencyId, lfActionById, createResultExtension,
                     securityAnalysisParameters.getIncreasedViolationsParameters(), limitReductions,
-                    securityAnalysisParameters.getModifiedMonitoredElementsParameters());
+                    securityAnalysisParameters.getModifiedMonitoredElementsParameters(), updateBusStates);
 
             // compute states with +1 -1 to model the contingencies and run connectivity analysis
             ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivityBreakAnalysisResults = ConnectivityBreakAnalysis.run(context, propagatedContingencies);
