@@ -100,6 +100,9 @@ class LfNetworkCopyReflectionGuardTest {
             "AbstractImpedantLfBranch#additionalOpenQ2", "AbstractImpedantLfBranch#additionalClosedQ2",
             // reporting and listeners are per-instance by design
             "LfNetwork#reportNode", "LfNetwork#listeners",
+            // published by the equation system built on the network, and the copy gets its own equation system,
+            // which publishes its own arrays (null until it does)
+            "LfNetwork#branchFlowArrays",
             // equivalent shunts are accumulated by the asymmetrical equation system creator, redone
             // by the copy's own equation system (not build state)
             "LfAsymBus#bzEquiv", "LfAsymBus#gzEquiv", "LfAsymBus#bnEquiv", "LfAsymBus#gnEquiv",

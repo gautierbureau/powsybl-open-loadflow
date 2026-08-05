@@ -125,7 +125,9 @@ class LfNetworkCopyFieldGuardTest {
         expected.put(LfNetwork.class, Set.of("numCC", "synchronousNetworks", "slackBusSelector", "referenceBusSelector", "maxSlackBusCount", "busesById", "busesByIndex", "branches", "branchesById",
                 "branchesByOriginalId", "shuntCount", "shuntsByIndex", "shuntsById", "generatorsById", "loadsById", "areasById", "areas", "hvdcs", "hvdcsById", "dcBusByIndex", "dcBusById",
                 "dcLinesByIndex", "voltageSourceConvertersByIndex", "listeners", "validity", "connectivityFactory", "connectivity", "zeroImpedanceNetworksByModel", "reportNode",
-                "secondaryVoltageControls", "voltageAngleLimits", "overloadManagementSystems", "connectivityRemovedBranches"));
+                "secondaryVoltageControls", "voltageAngleLimits", "overloadManagementSystems", "connectivityRemovedBranches",
+                // published by the equation system of this network, not copied: a copy gets its own equation system
+                "branchFlowArrays"));
         expected.put(LfSynchronousNetworkImpl.class, Set.of("lfNetwork", "numSC", "slackBusSelector", "referenceBusSelector", "maxSlackBusCount", "referenceBus", "slackBuses", "excludedSlackBuses",
                 "referenceGenerator"));
 

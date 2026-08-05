@@ -139,6 +139,16 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
 
     private final List<LfVoltageAngleLimit> voltageAngleLimits = new ArrayList<>();
 
+    /**
+     * The branch flows held as flat arrays, published by the equation system when it maintains them that way (see
+     * {@link LfBranchFlowArrays}), null otherwise. Belongs to the equation system built on this network, not to the
+     * network state: a copy of this network gets its own equation system, which publishes its own arrays, so this is
+     * deliberately not carried over by the copy constructors. Same lifecycle as the network listeners the publisher
+     * registers alongside it - it lives as long as the network, and a later equation system built on this network
+     * replaces it.
+     */
+    private LfBranchFlowArrays branchFlowArrays;
+
     public enum Validity {
         VALID("Valid"),
         INVALID_NO_GENERATOR("Network has no generator"),
@@ -230,6 +240,19 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
 
     public LfSynchronousNetwork getSynchronousNetwork(int numSC) {
         return synchronousNetworks.stream().filter(n -> n.getNumSC() == numSC).findFirst().orElseThrow();
+    }
+
+    /**
+     * The branch flows of this network as flat arrays indexed by branch num, when the equation system built on it
+     * maintains them that way, otherwise null. A consumer that reads a flow per branch of the whole network can use
+     * them instead of walking the branch evaluables; see {@link LfBranchFlowArrays} for what they guarantee.
+     */
+    public LfBranchFlowArrays getBranchFlowArrays() {
+        return branchFlowArrays;
+    }
+
+    public void setBranchFlowArrays(LfBranchFlowArrays branchFlowArrays) {
+        this.branchFlowArrays = branchFlowArrays;
     }
 
     public ReportNode getReportNode() {

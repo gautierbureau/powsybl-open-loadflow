@@ -56,6 +56,10 @@ public class AcNetworkVector extends AbstractLfNetworkListener
     }
 
     public void startListening() {
+        // publish the branch flow arrays, so that a bulk consumer (the security analysis violation detection) can read
+        // the flows without walking the branch evaluables
+        network.setBranchFlowArrays(branchVector);
+
         // listen for branch disabling status update
         network.addListener(this);
 

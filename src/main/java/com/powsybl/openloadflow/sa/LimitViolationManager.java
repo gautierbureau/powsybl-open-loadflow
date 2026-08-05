@@ -12,6 +12,7 @@ import com.powsybl.contingency.violations.LimitViolationBuilder;
 import com.powsybl.contingency.violations.LimitViolationType;
 import com.powsybl.iidm.network.*;
 import com.powsybl.openloadflow.network.LfBranch;
+import com.powsybl.openloadflow.network.LfBranchFlowArrays;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfElement;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -19,6 +20,7 @@ import com.powsybl.openloadflow.util.Evaluable;
 import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.security.*;
 import com.powsybl.security.limitreduction.LimitReduction;
+import net.jafama.FastMath;
 import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.*;
@@ -41,6 +43,22 @@ public class LimitViolationManager {
     private SecurityAnalysisParameters.IncreasedViolationsParameters parameters;
 
     private final Map<Pair<Object, String>, LimitViolation> violations = new LinkedHashMap<>(); // All limit violations indexed by network element and OperationalLimitsGroup (if it exists)
+
+    /**
+     * When true (the default), the branch limit screen reads the flows from the branch-num indexed arrays of the
+     * equation system when it publishes them, instead of walking the branch evaluables. Package-private and mutable so
+     * that a benchmark can measure the two screening paths against each other; both report the same violations.
+     */
+    static boolean bulkFlowScreen = true;
+
+    /** A checked branch the bulk screen must ignore, because the walk ignores it too: it is disabled. */
+    private static final byte SCREEN_SKIP = 0;
+
+    /** A checked branch whose flows the arrays hold: enabled, described by them, and connected on both sides. */
+    private static final byte SCREEN_BULK = 1;
+
+    /** A checked branch the arrays do not describe (open on a side, or modelled outside the vectorised terms). */
+    private static final byte SCREEN_EVALUABLE = 2;
 
     // branch limit checks laid out as parallel arrays, built once per network and cached on the pre-contingency manager
     private BranchLimitScreen branchLimitScreen;
@@ -122,6 +140,37 @@ public class LimitViolationManager {
         // are not in the state vector. A flow that does not exceed the lowest limit of the check cannot violate any of
         // its groups; an undefined (NaN) flow fails the comparison, as it failed the scan of the limits.
         ExceededChecks exceeded = new ExceededChecks();
+        LfBranchFlowArrays flows = bulkFlowScreen ? network.getBranchFlowArrays() : null;
+        if (flows != null) {
+            screenFromFlowArrays(screen, isBranchDisabled, flows, exceeded);
+        } else {
+            screenFromEvaluables(screen, isBranchDisabled, exceeded);
+        }
+
+        // second pass: report the exceeded checks in the order the original detection visited them, so that the
+        // violations keep their insertion order. Exceeded checks are rare, so this sorts a handful of elements
+        int exceededCount = exceeded.size();
+        if (exceededCount > 0) {
+            long[] sorted = exceeded.sorted();
+            LfBranch[] branches = screen.getBranches();
+            LfBus[] buses = screen.getBuses();
+            int[] ranks = screen.getRanks();
+            List<LfBranch.LfLimitsGroup>[] groups = screen.getGroups();
+            for (int i = 0; i < exceededCount; i++) {
+                int k = (int) sorted[i];
+                reportCheckViolations(branches[k], buses[k], groups[k], ranks[k] % BranchLimitScreen.KIND_COUNT);
+            }
+        }
+
+        detectBusAndVoltageAngleViolations(network);
+    }
+
+    /**
+     * Screen the checks reading the flows one branch evaluable at a time. Used when the equation system does not
+     * publish its flows as arrays - the DC security analysis, and the AC one when the equation system is not the
+     * vectorised one.
+     */
+    private static void screenFromEvaluables(BranchLimitScreen screen, Predicate<LfBranch> isBranchDisabled, ExceededChecks exceeded) {
         LfBranch[] branches = screen.getBranches();
         double[] thresholds = screen.getThresholds();
         int[] ranks = screen.getRanks();
@@ -162,21 +211,113 @@ public class LimitViolationManager {
                 exceeded.add(ranks[k], k);
             }
         }
+    }
 
-        // second pass: report the exceeded checks in the order the original detection visited them, so that the
-        // violations keep their insertion order. Exceeded checks are rare, so this sorts a handful of elements
-        int exceededCount = exceeded.size();
-        if (exceededCount > 0) {
-            long[] sorted = exceeded.sorted();
-            LfBus[] buses = screen.getBuses();
-            List<LfBranch.LfLimitsGroup>[] groups = screen.getGroups();
-            for (int i = 0; i < exceededCount; i++) {
-                int k = (int) sorted[i];
-                reportCheckViolations(branches[k], buses[k], groups[k], ranks[k] % BranchLimitScreen.KIND_COUNT);
+    /**
+     * Screen the checks reading the flows straight from the branch-num indexed arrays the equation system maintains.
+     * Each loop is then a pure array pass - {@code p1[branchNum[k]] > threshold[k]} - with no branch, no evaluable and
+     * no virtual call in it, which is what {@link BranchLimitScreen}'s layout was for: laying the thresholds out flat
+     * while the compared value still came through the branch object graph left the cost of a structure of arrays
+     * without its benefit.
+     *
+     * <p>Checks are ordered by ascending branch num within a kind, so each pass sweeps the flow array forwards.
+     *
+     * <p>Which branches the arrays actually describe is resolved first, once per checked branch rather than once per
+     * check, into a num indexed buffer - it is the only thing the pass needs that is not already in an array. Three
+     * cases, and neither of the last two can be dropped:
+     * <ul>
+     *     <li>disabled: skipped entirely, as the walk skips it. Its array entries are stale, and reporting it would
+     *     evaluate an evaluable whose variables are no longer in the state vector.</li>
+     *     <li>enabled but not described by the arrays - either because the equation system models it outside the
+     *     vectorised terms ({@link LfBranchFlowArrays#describedBranches()}), or because it is open on a side, in
+     *     which case the arrays are left stale and the branch evaluates through its open-branch terms. Screened
+     *     through its evaluables instead.</li>
+     *     <li>enabled, closed and described: screened from the arrays.</li>
+     * </ul>
+     * The last case is the overwhelming majority, so the branch is predictable and the cold cases cost nothing.
+     */
+    private static void screenFromFlowArrays(BranchLimitScreen screen, Predicate<LfBranch> isBranchDisabled,
+                                             LfBranchFlowArrays flows, ExceededChecks exceeded) {
+        boolean[] described = flows.describedBranches();
+        byte[] mode = new byte[screen.getBranchNumBound()];
+        for (LfBranch branch : screen.getCheckedBranches()) {
+            int num = branch.getNum();
+            byte branchMode;
+            if (isBranchDisabled.test(branch)) {
+                branchMode = SCREEN_SKIP;
+            } else if (num < described.length && described[num] && branch.isConnectedSide1() && branch.isConnectedSide2()) {
+                branchMode = SCREEN_BULK;
+            } else {
+                branchMode = SCREEN_EVALUABLE;
             }
+            mode[num] = branchMode;
         }
 
-        detectBusAndVoltageAngleViolations(network);
+        LfBranch[] branches = screen.getBranches();
+        double[] thresholds = screen.getThresholds();
+        int[] ranks = screen.getRanks();
+        int[] kindStart = screen.getKindStart();
+        int[] branchNums = screen.getBranchNums();
+        double[] p1 = flows.p1();
+        double[] q1 = flows.q1();
+        double[] i1 = flows.i1();
+        double[] p2 = flows.p2();
+        double[] q2 = flows.q2();
+        double[] i2 = flows.i2();
+
+        for (int k = kindStart[BranchLimitScreen.SIDE_1_CURRENT]; k < kindStart[BranchLimitScreen.SIDE_1_CURRENT + 1]; k++) {
+            int branchNum = branchNums[k];
+            byte branchMode = mode[branchNum];
+            if (branchMode == SCREEN_BULK ? i1[branchNum] > thresholds[k]
+                    : branchMode == SCREEN_EVALUABLE && branches[k].getI1().eval() > thresholds[k]) {
+                exceeded.add(ranks[k], k);
+            }
+        }
+        for (int k = kindStart[BranchLimitScreen.SIDE_1_ACTIVE_POWER]; k < kindStart[BranchLimitScreen.SIDE_1_ACTIVE_POWER + 1]; k++) {
+            int branchNum = branchNums[k];
+            byte branchMode = mode[branchNum];
+            if (branchMode == SCREEN_BULK ? Math.abs(p1[branchNum]) > thresholds[k]
+                    : branchMode == SCREEN_EVALUABLE && Math.abs(branches[k].getP1().eval()) > thresholds[k]) {
+                exceeded.add(ranks[k], k);
+            }
+        }
+        for (int k = kindStart[BranchLimitScreen.SIDE_1_APPARENT_POWER]; k < kindStart[BranchLimitScreen.SIDE_1_APPARENT_POWER + 1]; k++) {
+            int branchNum = branchNums[k];
+            byte branchMode = mode[branchNum];
+            // same expression as LfBranch#computeApparentPower1, so the same double
+            double p = p1[branchNum];
+            double q = q1[branchNum];
+            if (branchMode == SCREEN_BULK ? FastMath.sqrt(p * p + q * q) > thresholds[k]
+                    : branchMode == SCREEN_EVALUABLE && branches[k].computeApparentPower1() > thresholds[k]) {
+                exceeded.add(ranks[k], k);
+            }
+        }
+        for (int k = kindStart[BranchLimitScreen.SIDE_2_CURRENT]; k < kindStart[BranchLimitScreen.SIDE_2_CURRENT + 1]; k++) {
+            int branchNum = branchNums[k];
+            byte branchMode = mode[branchNum];
+            if (branchMode == SCREEN_BULK ? i2[branchNum] > thresholds[k]
+                    : branchMode == SCREEN_EVALUABLE && branches[k].getI2().eval() > thresholds[k]) {
+                exceeded.add(ranks[k], k);
+            }
+        }
+        for (int k = kindStart[BranchLimitScreen.SIDE_2_ACTIVE_POWER]; k < kindStart[BranchLimitScreen.SIDE_2_ACTIVE_POWER + 1]; k++) {
+            int branchNum = branchNums[k];
+            byte branchMode = mode[branchNum];
+            if (branchMode == SCREEN_BULK ? Math.abs(p2[branchNum]) > thresholds[k]
+                    : branchMode == SCREEN_EVALUABLE && Math.abs(branches[k].getP2().eval()) > thresholds[k]) {
+                exceeded.add(ranks[k], k);
+            }
+        }
+        for (int k = kindStart[BranchLimitScreen.SIDE_2_APPARENT_POWER]; k < kindStart[BranchLimitScreen.SIDE_2_APPARENT_POWER + 1]; k++) {
+            int branchNum = branchNums[k];
+            byte branchMode = mode[branchNum];
+            double p = p2[branchNum];
+            double q = q2[branchNum];
+            if (branchMode == SCREEN_BULK ? FastMath.sqrt(p * p + q * q) > thresholds[k]
+                    : branchMode == SCREEN_EVALUABLE && branches[k].computeApparentPower2() > thresholds[k]) {
+                exceeded.add(ranks[k], k);
+            }
+        }
     }
 
     /**
