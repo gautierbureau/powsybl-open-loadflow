@@ -508,6 +508,36 @@ class AlternativeEquationsBenchmark extends AbstractOpenSecurityAnalysisTest {
         return described;
     }
 
+    /**
+     * What a Pegase case actually carries in the way of operational limits, and how much of it the branch limit screen
+     * therefore has to check. Worth having explicitly: the fast DC security analysis measurements were taken on these
+     * cases with a limit added to every branch, so their figures and the ones taken on the case as loaded are not the
+     * same benchmark and must not be compared to each other.
+     */
+    private void reportLimits(String caseName) {
+        Network network = loadPegaseNetwork(caseName);
+        long ratedBranches = network.getBranchStream()
+                .filter(branch -> branch.getOperationalLimitsGroups1().stream().anyMatch(hasAnyLimit)
+                        || branch.getOperationalLimitsGroups2().stream().anyMatch(hasAnyLimit))
+                .count();
+        LfNetwork lfNetwork = Networks.load(network, new MostMeshedSlackBusSelector()).get(0);
+        BranchLimitScreen screen = BranchLimitScreen.build(lfNetwork, LimitReductionManager.create(Collections.emptyList()));
+        System.out.printf("LIMITS %-16s iidm branches=%d rated=%d (%.1f%%) | lf branches=%d screened checks=%d%n",
+                caseName, network.getBranchCount(), ratedBranches, 100d * ratedBranches / network.getBranchCount(),
+                lfNetwork.getBranches().size(), screen.size());
+    }
+
+    private static final java.util.function.Predicate<com.powsybl.iidm.network.OperationalLimitsGroup> hasAnyLimit =
+            group -> group.getCurrentLimits().isPresent() || group.getActivePowerLimits().isPresent() || group.getApparentPowerLimits().isPresent();
+
+    @Test
+    void reportCaseLimits() {
+        reportLimits("case1354pegase");
+        reportLimits("case2869pegase");
+        reportLimits("case9241pegase");
+        reportLimits("case13659pegase");
+    }
+
     @Test
     void benchmarkLimitScreens() {
         benchmarkLimitScreen("case9241pegase", 1500, false);
