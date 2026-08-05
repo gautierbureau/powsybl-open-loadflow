@@ -68,7 +68,9 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
     private record WoodburyContext(DcLoadFlowContext dcLoadFlowContext, Map<String, List<Indexed<OperatorStrategy>>> operatorStrategiesByContingencyId, Map<String, LfAction> lfActionById,
                                    boolean createResultExtension, SecurityAnalysisParameters.IncreasedViolationsParameters violationsParameters,
                                    List<LimitReduction> limitReductions, SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modifiedMonitoredElementsParameters,
-                                   boolean updateBusStates) {
+                                   boolean updateBusStates,
+                                   List<LimitViolationManager.BranchLimitsToCheck> branchLimitsToCheck,
+                                   OpenSecurityAnalysisParameters.LimitViolationReporting limitViolationReporting) {
     }
 
     /**
@@ -239,11 +241,12 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 woodburyContext.modifiedMonitoredElementsParameters());
         postContingencyNetworkResult.update(isBranchDisabledDueToContingency);
 
-        // detect violations; in DC the bus voltages are left undefined (set to NaN), so bus voltage violations
-        // cannot occur and the network-wide bus scan is skipped
+        // detect violations, reusing the limit groups resolved once for the analysis; in DC the bus voltages are left
+        // undefined (set to NaN), so bus voltage violations cannot occur and the network-wide bus scan is skipped
         boolean detectBusVoltageViolations = !loadFlowContext.getParameters().isSetVToNan();
-        var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, woodburyContext.limitReductions, woodburyContext.violationsParameters);
-        postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency, detectBusVoltageViolations);
+        var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager,
+                woodburyContext.limitReductions, woodburyContext.violationsParameters, woodburyContext.limitViolationReporting());
+        postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency, woodburyContext.branchLimitsToCheck(), detectBusVoltageViolations);
 
         // connectivity result due to the contingency
         var connectivityResult = new ConnectivityResult(
@@ -300,8 +303,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         // cannot occur and the network-wide bus scan is skipped
         boolean detectBusVoltageViolations = !loadFlowContext.getParameters().isSetVToNan();
         var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager,
-                woodburyContext.limitReductions, woodburyContext.violationsParameters);
-        postActionsViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency, detectBusVoltageViolations);
+                woodburyContext.limitReductions, woodburyContext.violationsParameters, woodburyContext.limitViolationReporting());
+        postActionsViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency, woodburyContext.branchLimitsToCheck(), detectBusVoltageViolations);
 
         return new OperatorStrategyResult(operatorStrategy,
             List.of(
@@ -483,14 +486,21 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
             preContingencyNetworkResult.update();
 
             // detect violations
-            var preContingencyLimitViolationManager = new LimitViolationManager(limitReductions);
+            OpenSecurityAnalysisParameters.LimitViolationReporting limitViolationReporting =
+                    OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters).getLimitViolationReporting();
+            var preContingencyLimitViolationManager = new LimitViolationManager(limitReductions, limitViolationReporting);
             preContingencyLimitViolationManager.detectViolations(lfNetwork);
             // the per-contingency updateNetwork writes every bus angle back to the model; skip it when no output reads
             // those angles (branch flows come from the state vector), keeping it when it is disabled by the toggle
             boolean updateBusStates = !restrictBusStateUpdate || isBusStateUpdateNeeded(lfNetwork, monitorIndex, zeroImpedanceMonitoredIndex);
+            // branch limits do not change between contingencies: resolve once the limit groups of the branches carrying
+            // limits (reduced to the most restrictive one per side/type when requested) so that the post contingency
+            // violation detection reuses them instead of looking up the limits of every branch of the network on each contingency
+            List<LimitViolationManager.BranchLimitsToCheck> branchLimitsToCheck =
+                    LimitViolationManager.getBranchLimitsToCheck(lfNetwork, preContingencyLimitViolationManager.getLimitReductionManager(), limitViolationReporting);
             WoodburyContext woodburyContext = new WoodburyContext(context, operatorStrategiesByContingencyId, lfActionById, createResultExtension,
                     securityAnalysisParameters.getIncreasedViolationsParameters(), limitReductions,
-                    securityAnalysisParameters.getModifiedMonitoredElementsParameters(), updateBusStates);
+                    securityAnalysisParameters.getModifiedMonitoredElementsParameters(), updateBusStates, branchLimitsToCheck, limitViolationReporting);
 
             // compute states with +1 -1 to model the contingencies and run connectivity analysis
             ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivityBreakAnalysisResults = ConnectivityBreakAnalysis.run(context, propagatedContingencies);
