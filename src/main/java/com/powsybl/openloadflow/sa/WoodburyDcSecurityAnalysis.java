@@ -21,15 +21,20 @@ import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.dc.DcLoadFlowContext;
 import com.powsybl.openloadflow.dc.DcLoadFlowParameters;
+import com.powsybl.openloadflow.dc.equations.AbstractClosedBranchDcFlowEquationTerm;
+import com.powsybl.openloadflow.dc.equations.DcApproximationType;
+import com.powsybl.openloadflow.dc.equations.DcVariableType;
 import com.powsybl.openloadflow.dc.fastdc.ComputedContingencyElement;
 import com.powsybl.openloadflow.dc.fastdc.ComputedElement;
 import com.powsybl.openloadflow.dc.fastdc.ConnectivityBreakAnalysis;
 import com.powsybl.openloadflow.dc.fastdc.ConnectivityBreakAnalysis.ConnectivityAnalysisResult;
 import com.powsybl.openloadflow.dc.fastdc.WoodburyEngine;
+import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.*;
 import com.powsybl.openloadflow.network.action.*;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
+import com.powsybl.openloadflow.util.Evaluable;
 import com.powsybl.openloadflow.util.Indexed;
 import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.openloadflow.util.Reports;
@@ -57,9 +62,124 @@ import static com.powsybl.openloadflow.network.impl.PropagatedContingency.cleanC
  */
 public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
+    /**
+     * When true, the per-contingency {@code updateNetwork} that writes every bus angle back to the network model is
+     * skipped when no output needs those angles (no monitored voltage level, no voltage angle limit). Branch flows used
+     * for violation and branch-result computation are read from the state vector, not from the model bus angles, so
+     * skipping this network-wide write is transparent in that case. Kept as a toggle to compare with the full update.
+     */
+    static boolean restrictBusStateUpdate = true;
+
+    /**
+     * When true, the post-contingency branch violation detection only checks the branches whose flow can possibly
+     * exceed a limit given the contingency's bus-angle change (see {@link BranchLimitScreen}), instead of every branch
+     * carrying a limit. Kept as a toggle so the screened and full-scan detections can be compared for equivalence.
+     */
+    static boolean incrementalViolationDetection = true;
+
+    // a branch phase shift is considered unchanged (so the screening bound holds) below this absolute delta in radians
+    private static final double PHASE_SHIFT_DELTA_TOLERANCE = 1e-9;
+
     private record WoodburyContext(DcLoadFlowContext dcLoadFlowContext, Map<String, List<Indexed<OperatorStrategy>>> operatorStrategiesByContingencyId, Map<String, LfAction> lfActionById,
                                    boolean createResultExtension, SecurityAnalysisParameters.IncreasedViolationsParameters violationsParameters,
-                                   List<LimitReduction> limitReductions, SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modifiedMonitoredElementsParameters) {
+                                   List<LimitReduction> limitReductions, SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modifiedMonitoredElementsParameters,
+                                   boolean updateBusStates,
+                                   List<LimitViolationManager.BranchLimitsToCheck> branchLimitsToCheck,
+                                   OpenSecurityAnalysisParameters.LimitViolationReporting limitViolationReporting,
+                                   BranchLimitScreen branchLimitScreen) {
+    }
+
+    /**
+     * Whether the post-contingency bus angles must be written back to the network model, i.e. whether any output reads
+     * them: a monitored voltage level (producing bus results) or a voltage angle limit (checked on bus angles). Branch
+     * flows and branch results are computed from the state vector and never need this write.
+     */
+    private static boolean isBusStateUpdateNeeded(LfNetwork lfNetwork, StateMonitorIndex monitorIndex, StateMonitorIndex zeroImpedanceMonitorIndex) {
+        return !lfNetwork.getVoltageAngleLimits().isEmpty()
+                || monitorsVoltageLevel(monitorIndex) || monitorsVoltageLevel(zeroImpedanceMonitorIndex);
+    }
+
+    private static boolean monitorsVoltageLevel(StateMonitorIndex monitorIndex) {
+        if (monitorIndex == null) {
+            return false;
+        }
+        if (monitorIndex.getAllStateMonitor() != null && !monitorIndex.getAllStateMonitor().getVoltageLevelIds().isEmpty()) {
+            return true;
+        }
+        return monitorIndex.getSpecificStateMonitors().values().stream()
+                .anyMatch(monitor -> !monitor.getVoltageLevelIds().isEmpty());
+    }
+
+    /**
+     * Screening data letting the post-contingency violation detection skip branches that provably cannot violate.
+     *
+     * <p>In DC a branch active power is {@code p = -power * (phi1 - phi2 - alpha)}, so between the base case and a
+     * contingency {@code |dp| <= |power| * |dphi1 - dphi2| <= |power| * spread}, where {@code spread} is the max minus
+     * min of the per-bus angle change. A branch is therefore safe when {@code |power| * spread <= L - |p_base|}, i.e.
+     * when {@code spread < tau} with {@code tau = (L - |p_base|) / |power|} (L being the branch's smallest limit,
+     * expressed as an active power; current limits are converted with the DC power factor, apparent power limits are
+     * undefined in DC and ignored). Branches are sorted by ascending {@code tau} so that, for a given contingency
+     * spread, only a prefix of the list needs checking.</p>
+     */
+    private record BranchLimitScreen(List<LimitViolationManager.BranchLimitsToCheck> sortedBranches, double[] sortedThresholds,
+                                     int[] busPhiRows, double[] baseBusAngles,
+                                     int[] phaseShiftRows, double[] basePhaseShifts, LimitViolationManager.BranchLimitsToCheck[] phaseShiftBranches) {
+
+        /**
+         * Number of branches (a prefix of {@link #sortedBranches}) that may violate for the given angle spread, i.e.
+         * whose threshold is at most the spread. The others provably cannot violate and are skipped.
+         */
+        int checkCount(double angleDeltaSpread) {
+            int lo = 0;
+            int hi = sortedThresholds.length;
+            while (lo < hi) {
+                int mid = (lo + hi) >>> 1;
+                if (sortedThresholds[mid] <= angleDeltaSpread) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            return lo;
+        }
+
+        /**
+         * The max minus min of the per-bus angle change between the base case and the given post-contingency state,
+         * or NaN if any angle is not finite (e.g. a disconnected island), in which case the caller falls back to a
+         * full scan.
+         */
+        double angleDeltaSpread(double[] postContingencyStates) {
+            double min = Double.POSITIVE_INFINITY;
+            double max = Double.NEGATIVE_INFINITY;
+            for (int k = 0; k < busPhiRows.length; k++) {
+                double delta = postContingencyStates[busPhiRows[k]] - baseBusAngles[k];
+                if (!Double.isFinite(delta)) {
+                    return Double.NaN;
+                }
+                min = Math.min(min, delta);
+                max = Math.max(max, delta);
+            }
+            return max - min;
+        }
+
+        /**
+         * The limit-carrying branches whose own phase shift changed versus the base case (e.g. a phase tap changer
+         * action), or null if none. The angle-spread bound does not cover the extra phase shift term of these branches,
+         * so they are always checked; the angle change they induce on the other branches is already captured by the
+         * spread. Checking a branch that is also in the screened prefix is harmless (violations are de-duplicated).
+         */
+        List<LimitViolationManager.BranchLimitsToCheck> phaseShiftedBranchesToCheck(double[] postContingencyStates) {
+            List<LimitViolationManager.BranchLimitsToCheck> branches = null;
+            for (int k = 0; k < phaseShiftRows.length; k++) {
+                if (Math.abs(postContingencyStates[phaseShiftRows[k]] - basePhaseShifts[k]) > PHASE_SHIFT_DELTA_TOLERANCE) {
+                    if (branches == null) {
+                        branches = new ArrayList<>();
+                    }
+                    branches.add(phaseShiftBranches[k]);
+                }
+            }
+            return branches;
+        }
     }
 
     private record ToFastDcResults(Function<ConnectivityAnalysisResult, double[]> toPostContingencyStates,
@@ -196,7 +316,9 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
         // update network state with post contingency states
         loadFlowContext.getEquationSystem().getStateVector().set(postContingencyStates);
-        updateNetwork(lfNetwork, loadFlowContext.getEquationSystem(), postContingencyStates);
+        if (woodburyContext.updateBusStates()) {
+            updateNetwork(lfNetwork, loadFlowContext.getEquationSystem(), postContingencyStates);
+        }
 
         lfContingency.apply(loadFlowContext.getParameters().getBalanceType());
 
@@ -207,9 +329,14 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 woodburyContext.modifiedMonitoredElementsParameters());
         postContingencyNetworkResult.update(isBranchDisabledDueToContingency);
 
-        // detect violations
-        var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, woodburyContext.limitReductions, woodburyContext.violationsParameters);
-        postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency);
+        // detect violations on the branches the angle-spread screen cannot rule out, using the limit groups resolved
+        // once for the analysis; in DC the bus voltages are left undefined (set to NaN), so bus voltage violations
+        // cannot occur and the network-wide bus scan is skipped
+        boolean detectBusVoltageViolations = !loadFlowContext.getParameters().isSetVToNan();
+        var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager,
+                woodburyContext.limitReductions, woodburyContext.violationsParameters, woodburyContext.limitViolationReporting());
+        postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency,
+                branchesToCheck(woodburyContext, postContingencyStates), detectBusVoltageViolations);
 
         // connectivity result due to the contingency
         var connectivityResult = new ConnectivityResult(
@@ -247,7 +374,9 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
         // update network state with post contingency and post operator strategy states
         loadFlowContext.getEquationSystem().getStateVector().set(postContingencyAndOperatorStrategyStates);
-        updateNetwork(lfNetwork, loadFlowContext.getEquationSystem(), postContingencyAndOperatorStrategyStates);
+        if (woodburyContext.updateBusStates()) {
+            updateNetwork(lfNetwork, loadFlowContext.getEquationSystem(), postContingencyAndOperatorStrategyStates);
+        }
 
         // apply modifications to compute results
         lfContingency.apply(loadFlowContext.getParameters().getBalanceType());
@@ -260,10 +389,13 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 woodburyContext.modifiedMonitoredElementsParameters);
         postActionsNetworkResult.update(isBranchDisabledDueToContingency);
 
-        // detect violations
+        // detect violations; in DC the bus voltages are left undefined (set to NaN), so bus voltage violations
+        // cannot occur and the network-wide bus scan is skipped
+        boolean detectBusVoltageViolations = !loadFlowContext.getParameters().isSetVToNan();
         var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager,
-                woodburyContext.limitReductions, woodburyContext.violationsParameters);
-        postActionsViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency);
+                woodburyContext.limitReductions, woodburyContext.violationsParameters, woodburyContext.limitViolationReporting());
+        postActionsViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency,
+                branchesToCheck(woodburyContext, postContingencyAndOperatorStrategyStates), detectBusVoltageViolations);
 
         return new OperatorStrategyResult(operatorStrategy,
             List.of(
@@ -294,6 +426,20 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 toFastDcResults, restorePreContingencyStates, securityAnalysisSimulationResults, lfContingency));
     }
 
+    /**
+     * Restore the pre contingency state of the network elements collected by the given collector (i.e. the elements
+     * modified by the contingency and its operator strategy actions), then clear the collector for the next
+     * contingency. The collector is disabled during the restoration so that the setter calls it performs do not
+     * collect back the elements being restored.
+     */
+    private static void restoreModifiedNetworkElements(NetworkState networkState, ModifiedElementsCollector modifiedElementsCollector) {
+        modifiedElementsCollector.setEnabled(false);
+        networkState.restore(modifiedElementsCollector.getModifiedBuses(), modifiedElementsCollector.getModifiedBranches(),
+            modifiedElementsCollector.getModifiedHvdcs());
+        modifiedElementsCollector.reset();
+        modifiedElementsCollector.setEnabled(true);
+    }
+
     private void processContingency(WoodburyContext woodburyContext, ConnectivityAnalysisResult connectivityAnalysisResult,
                                     ToFastDcResults toFastDcResults, Runnable restorePreContingencyStates,
                                     SecurityAnalysisSimulationResults securityAnalysisSimulationResults,
@@ -308,7 +454,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
         // predicate to determine if a branch is disabled or not due to the contingency
         // note that branches with one side opened due to the contingency are considered as disabled
-        Predicate<LfBranch> isBranchDisabled = branch -> lfContingency.getDisabledNetwork().getBranchesStatus().containsKey(branch);
+        Map<LfBranch, DisabledBranchStatus> disabledBranchesStatus = lfContingency.getDisabledNetwork().getBranchesStatus();
+        Predicate<LfBranch> isBranchDisabled = disabledBranchesStatus::containsKey;
 
         // process post contingency result with supplier giving post contingency states
         logPostContingencyStart(lfNetwork, lfContingency);
@@ -374,6 +521,141 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         }
     }
 
+    /**
+     * The branches whose limits must be checked for the given post-contingency state: when screening is enabled and
+     * applicable, only the branches that can possibly violate given the contingency's bus-angle change (plus the
+     * limit-carrying branches whose own phase shift changed); otherwise all the branches carrying a limit. Falls back
+     * to the full list when a bus angle is not finite (disconnected island), a case the screening bound does not cover.
+     */
+    private static List<LimitViolationManager.BranchLimitsToCheck> branchesToCheck(WoodburyContext woodburyContext, double[] postContingencyStates) {
+        BranchLimitScreen screen = woodburyContext.branchLimitScreen();
+        if (screen != null) {
+            double angleDeltaSpread = screen.angleDeltaSpread(postContingencyStates);
+            if (Double.isFinite(angleDeltaSpread)) {
+                List<LimitViolationManager.BranchLimitsToCheck> screened = screen.sortedBranches().subList(0, screen.checkCount(angleDeltaSpread));
+                // branches whose own phase shift changed (e.g. a phase tap changer action) are not covered by the
+                // spread bound and must be checked in addition to the screened prefix
+                List<LimitViolationManager.BranchLimitsToCheck> phaseShifted = screen.phaseShiftedBranchesToCheck(postContingencyStates);
+                if (phaseShifted == null) {
+                    return screened;
+                }
+                List<LimitViolationManager.BranchLimitsToCheck> branches = new ArrayList<>(screened);
+                branches.addAll(phaseShifted);
+                return branches;
+            }
+        }
+        return woodburyContext.branchLimitsToCheck();
+    }
+
+    /**
+     * Build the screening data used to skip branches that provably cannot violate a limit after a contingency. Must be
+     * called with the base (pre-contingency) state loaded in the network, as it reads the base branch flows.
+     */
+    private static BranchLimitScreen buildBranchLimitScreen(DcLoadFlowContext context,
+                                                            List<LimitViolationManager.BranchLimitsToCheck> branchLimitsToCheck,
+                                                            double[] preContingencyStates) {
+        var creationParameters = context.getParameters().getEquationSystemCreationParameters();
+        boolean useTransformerRatio = creationParameters.isUseTransformerRatio();
+        DcApproximationType dcApproximationType = creationParameters.getDcApproximationType();
+        double dcPowerFactor = creationParameters.getDcPowerFactor();
+
+        // limit-carrying branches indexed by branch number, to link phase shift variables back to the branch to check
+        Map<Integer, LimitViolationManager.BranchLimitsToCheck> limitedBranchByNum = new HashMap<>();
+        for (LimitViolationManager.BranchLimitsToCheck branchToCheck : branchLimitsToCheck) {
+            limitedBranchByNum.put(branchToCheck.branch().getNum(), branchToCheck);
+        }
+
+        // collect the bus angle rows (and base values) used to bound the flow change, and the phase shift rows of the
+        // limit-carrying branches (and the branches they belong to) whose change the spread bound does not cover
+        List<Integer> busPhiRows = new ArrayList<>();
+        List<Integer> phaseShiftRows = new ArrayList<>();
+        List<LimitViolationManager.BranchLimitsToCheck> phaseShiftBranches = new ArrayList<>();
+        for (Variable<DcVariableType> variable : context.getEquationSystem().getIndex().getSortedVariablesToFind()) {
+            if (variable.getType() == DcVariableType.BUS_PHI) {
+                busPhiRows.add(variable.getRow());
+            } else if (variable.getType() == DcVariableType.BRANCH_ALPHA1) {
+                LimitViolationManager.BranchLimitsToCheck branchToCheck = limitedBranchByNum.get(variable.getElementNum());
+                if (branchToCheck != null) {
+                    phaseShiftRows.add(variable.getRow());
+                    phaseShiftBranches.add(branchToCheck);
+                }
+            }
+        }
+
+        // per-branch screening threshold, sorted ascending
+        List<LimitViolationManager.BranchLimitsToCheck> sortedBranches = new ArrayList<>(branchLimitsToCheck);
+        Map<LimitViolationManager.BranchLimitsToCheck, Double> thresholdByBranch = new IdentityHashMap<>();
+        for (LimitViolationManager.BranchLimitsToCheck branchToCheck : sortedBranches) {
+            thresholdByBranch.put(branchToCheck, screeningThreshold(branchToCheck, useTransformerRatio, dcApproximationType, dcPowerFactor));
+        }
+        sortedBranches.sort(Comparator.comparingDouble(thresholdByBranch::get));
+
+        double[] sortedThresholds = new double[sortedBranches.size()];
+        for (int i = 0; i < sortedThresholds.length; i++) {
+            sortedThresholds[i] = thresholdByBranch.get(sortedBranches.get(i));
+        }
+        return new BranchLimitScreen(sortedBranches, sortedThresholds,
+                toIntArray(busPhiRows), baseValues(busPhiRows, preContingencyStates),
+                toIntArray(phaseShiftRows), baseValues(phaseShiftRows, preContingencyStates),
+                phaseShiftBranches.toArray(new LimitViolationManager.BranchLimitsToCheck[0]));
+    }
+
+    private static double screeningThreshold(LimitViolationManager.BranchLimitsToCheck branchToCheck, boolean useTransformerRatio,
+                                             DcApproximationType dcApproximationType, double dcPowerFactor) {
+        LfBranch branch = branchToCheck.branch();
+        double power = Math.abs(AbstractClosedBranchDcFlowEquationTerm.computePower(useTransformerRatio, dcApproximationType, branch.getPiModel()));
+        if (power == 0) {
+            // a branch that does not carry flow (should not happen, zero impedance branches are excluded) cannot violate
+            return Double.POSITIVE_INFINITY;
+        }
+        double threshold1 = sideScreeningThreshold(branchToCheck.bus1(), branch.getP1(), branchToCheck.activePowerLimits1(),
+                branchToCheck.currentLimits1(), dcPowerFactor, power);
+        double threshold2 = sideScreeningThreshold(branchToCheck.bus2(), branch.getP2(), branchToCheck.activePowerLimits2(),
+                branchToCheck.currentLimits2(), dcPowerFactor, power);
+        return Math.min(threshold1, threshold2);
+    }
+
+    private static double sideScreeningThreshold(LfBus bus, Evaluable activePower, List<LfBranch.LfLimitsGroup> activePowerLimits,
+                                                 List<LfBranch.LfLimitsGroup> currentLimits, double dcPowerFactor, double power) {
+        if (bus == null) {
+            return Double.POSITIVE_INFINITY;
+        }
+        // smallest limit that can be violated on this side, as an active power: active power limits are compared to |p|
+        // directly, current limits are compared to |p| / dcPowerFactor so their active power equivalent is value * dcPowerFactor
+        double smallestActivePowerLimit = Double.POSITIVE_INFINITY;
+        for (LfBranch.LfLimitsGroup limitsGroup : activePowerLimits) {
+            for (LfBranch.LfLimit limit : limitsGroup.getSortedLimits()) {
+                smallestActivePowerLimit = Math.min(smallestActivePowerLimit, limit.getReducedValue());
+            }
+        }
+        for (LfBranch.LfLimitsGroup limitsGroup : currentLimits) {
+            for (LfBranch.LfLimit limit : limitsGroup.getSortedLimits()) {
+                smallestActivePowerLimit = Math.min(smallestActivePowerLimit, limit.getReducedValue() * dcPowerFactor);
+            }
+        }
+        if (smallestActivePowerLimit == Double.POSITIVE_INFINITY) {
+            return Double.POSITIVE_INFINITY;
+        }
+        // (L - |p_base|) / |power|; negative when the branch already violates at base, so it is always checked
+        return (smallestActivePowerLimit - Math.abs(activePower.eval())) / power;
+    }
+
+    private static int[] toIntArray(List<Integer> values) {
+        int[] array = new int[values.size()];
+        for (int i = 0; i < array.length; i++) {
+            array[i] = values.get(i);
+        }
+        return array;
+    }
+
+    private static double[] baseValues(List<Integer> rows, double[] states) {
+        double[] array = new double[rows.size()];
+        for (int i = 0; i < array.length; i++) {
+            array[i] = states[rows.get(i)];
+        }
+        return array;
+    }
+
     @Override
     protected void checkSupportedActions(List<Action> actions) {
         Actions.checkWoodburySupported(network, actions);
@@ -430,11 +712,26 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
             preContingencyNetworkResult.update();
 
             // detect violations
-            var preContingencyLimitViolationManager = new LimitViolationManager(limitReductions);
+            OpenSecurityAnalysisParameters.LimitViolationReporting limitViolationReporting =
+                    OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters).getLimitViolationReporting();
+            var preContingencyLimitViolationManager = new LimitViolationManager(limitReductions, limitViolationReporting);
             preContingencyLimitViolationManager.detectViolations(lfNetwork);
+            // the per-contingency updateNetwork writes every bus angle back to the model; skip it when no output reads
+            // those angles (branch flows come from the state vector), keeping it when it is disabled by the toggle
+            boolean updateBusStates = !restrictBusStateUpdate || isBusStateUpdateNeeded(lfNetwork, monitorIndex, zeroImpedanceMonitoredIndex);
+            // branch limits do not change between contingencies: resolve once the limit groups of the branches carrying
+            // limits (reduced to the most restrictive one per side/type when requested) so that the post contingency
+            // violation detection reuses them instead of looking up the limits of every branch of the network on each contingency
+            List<LimitViolationManager.BranchLimitsToCheck> branchLimitsToCheck =
+                    LimitViolationManager.getBranchLimitsToCheck(lfNetwork, preContingencyLimitViolationManager.getLimitReductionManager(), limitViolationReporting);
+            // optionally, precompute the per-branch screening thresholds so the post-contingency detection can skip the
+            // branches whose flow cannot reach a limit given the contingency's bus-angle change (base state is loaded here)
+            BranchLimitScreen branchLimitScreen = incrementalViolationDetection
+                    ? buildBranchLimitScreen(context, branchLimitsToCheck, preContingencyStates) : null;
             WoodburyContext woodburyContext = new WoodburyContext(context, operatorStrategiesByContingencyId, lfActionById, createResultExtension,
                     securityAnalysisParameters.getIncreasedViolationsParameters(), limitReductions,
-                    securityAnalysisParameters.getModifiedMonitoredElementsParameters());
+                    securityAnalysisParameters.getModifiedMonitoredElementsParameters(), updateBusStates, branchLimitsToCheck,
+                    limitViolationReporting, branchLimitScreen);
 
             // compute states with +1 -1 to model the contingencies and run connectivity analysis
             ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivityBreakAnalysisResults = ConnectivityBreakAnalysis.run(context, propagatedContingencies);
@@ -448,6 +745,11 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
             // save base state for later restoration after each contingency/action
             NetworkState networkState = NetworkState.save(lfNetwork);
+
+            // collect the elements modified by each contingency (and its operator strategy actions) so that only
+            // those are restored afterwards, instead of the whole network
+            ModifiedElementsCollector modifiedElementsCollector = new ModifiedElementsCollector();
+            lfNetwork.addListener(modifiedElementsCollector);
 
             List<PostContingencyResult> postContingencyResults = new ArrayList<>();
             List<OperatorStrategyResult> operatorStrategyResults = new ArrayList<>();
@@ -482,8 +784,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 Runnable restorePreContingencyStates = () -> {
                     // update workingContingencyStates as it may have been updated by post contingency states calculation
                     System.arraycopy(preContingencyStates, 0, workingContingencyStates, 0, preContingencyStates.length);
-                    // restore pre contingency state
-                    networkState.restore();
+                    // restore pre contingency state of the elements modified by the contingency
+                    restoreModifiedNetworkElements(networkState, modifiedElementsCollector);
                 };
                 addPostContingencyAndOperatorStrategyResults(woodburyContext, connectivityAnalysisResult, toFastDcResults, restorePreContingencyStates, securityAnalysisSimulationResults);
             });
@@ -492,9 +794,11 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
             connectivityBreakAnalysisResults.connectivityBreakingAnalysisResults().forEach(connectivityAnalysisResult -> {
                 // runnable to restore pre contingency states, after modifications applied to the lfNetwork
                 // no need to update workingContingencyStates as an override of flow states will be computed
-                Runnable restorePreContingencyStates = networkState::restore;
+                Runnable restorePreContingencyStates = () -> restoreModifiedNetworkElements(networkState, modifiedElementsCollector);
                 addPostContingencyAndOperatorStrategyResults(woodburyContext, connectivityAnalysisResult, toFastDcResults, restorePreContingencyStates, securityAnalysisSimulationResults);
             });
+
+            lfNetwork.removeListener(modifiedElementsCollector);
 
             return new SecurityAnalysisResult(
                     new PreContingencyResult(LoadFlowResult.ComponentResult.Status.CONVERGED,
