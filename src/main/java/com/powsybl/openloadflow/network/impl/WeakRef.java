@@ -23,6 +23,7 @@ class WeakRef<T> implements Ref<T> {
 
     @Override
     public T get() {
+        RefThreadGuard.check();
         return Objects.requireNonNull(value.get(), "Reference has been garbage collected");
     }
 }

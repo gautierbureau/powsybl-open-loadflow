@@ -31,6 +31,12 @@ public final class LfStaticVarCompensatorImpl extends AbstractLfGenerator implem
 
     private final Ref<StaticVarCompensator> svcRef;
 
+    private final String id;
+
+    private final double bMin;
+
+    private final double bMax;
+
     private final ReactiveLimits reactiveLimits;
 
     double nominalV;
@@ -54,13 +60,13 @@ public final class LfStaticVarCompensatorImpl extends AbstractLfGenerator implem
         @Override
         public double getMinQ() {
             double v = bus.getV() * nominalV;
-            return svcRef.get().getBmin() * v * v;
+            return bMin * v * v;
         }
 
         @Override
         public double getMaxQ() {
             double v = bus.getV() * nominalV;
-            return svcRef.get().getBmax() * v * v;
+            return bMax * v * v;
         }
 
         @Override
@@ -118,6 +124,9 @@ public final class LfStaticVarCompensatorImpl extends AbstractLfGenerator implem
                                        LfNetworkLoadingReport report) {
         super(network, 0, parameters);
         this.svcRef = Ref.create(svc, parameters.isCacheEnabled());
+        this.id = svc.getId();
+        this.bMin = svc.getBmin();
+        this.bMax = svc.getBmax();
         this.nominalV = svc.getTerminal().getVoltageLevel().getNominalV();
         this.reactiveLimits = new SvcReactiveLimits();
 
@@ -134,6 +143,9 @@ public final class LfStaticVarCompensatorImpl extends AbstractLfGenerator implem
     protected LfStaticVarCompensatorImpl(LfStaticVarCompensatorImpl other, LfNetwork network) {
         super(other, network);
         this.svcRef = other.svcRef;
+        this.id = other.id;
+        this.bMin = other.bMin;
+        this.bMax = other.bMax;
         this.nominalV = other.nominalV;
         this.reactiveLimits = new SvcReactiveLimits();
         this.slope = other.slope;
@@ -196,7 +208,7 @@ public final class LfStaticVarCompensatorImpl extends AbstractLfGenerator implem
 
     @Override
     public String getId() {
-        return getSvc().getId();
+        return id;
     }
 
     @Override
@@ -269,7 +281,6 @@ public final class LfStaticVarCompensatorImpl extends AbstractLfGenerator implem
         // rangeQ is used for shared voltage control reactive distribution keys.
         // Note that rangeQ of SVCs is always calculated assuming nominal voltage
         // and is not re-evaluated during calculation with solved voltage.
-        return (svcRef.get().getBmax() - svcRef.get().getBmin())
-                * nominalV * nominalV / PerUnit.SB;
+        return (bMax - bMin) * nominalV * nominalV / PerUnit.SB;
     }
 }

@@ -20,6 +20,7 @@ import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.network.NodeBreakerNetworkFactory;
+import com.powsybl.openloadflow.network.impl.RefThreadGuardTestUtil;
 import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.results.BranchResult;
@@ -176,6 +177,47 @@ class MtSharedQueueTest extends AbstractOpenSecurityAnalysisTest {
         SecurityAnalysisResult singleThread = run(network, contingencies, 1, true, SHARED_QUEUE, ReportNode.NO_OP);
         SecurityAnalysisResult multiThread = run(network, contingencies, 2, true, SHARED_QUEUE, ReportNode.NO_OP);
         assertSameResults(singleThread, multiThread);
+    }
+
+    @Test
+    void testSharedQueueWorkersNeverReadIidm() {
+        // same contract as the partitioned copy mode (see MtNetworkCopyTest): a full featured run
+        // (monitors, result extensions, operator strategy with actions) with the Ref thread guard
+        // armed, so any IIDM network dereference from a queue worker fails the
+        // analysis. The queue path materializes the IIDM derived data through the same preparer
+        // hook, before the per-worker copies are taken.
+        Network network = NodeBreakerNetworkFactory.create3Bars();
+        network.getSwitch("C1").setOpen(true);
+        network.getSwitch("C2").setOpen(true);
+
+        List<Contingency> contingencies = List.of(
+                new Contingency("L1", new BranchContingency("L1")),
+                new Contingency("L3", new BranchContingency("L3")),
+                new Contingency("L2", new BranchContingency("L2")));
+        List<Action> actions = List.of(new SwitchAction("action1", "C1", false), new SwitchAction("action3", "C2", false));
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("strategyL1", ContingencyContext.specificContingency("L1"), new TrueCondition(), List.of("action1")),
+                new OperatorStrategy("strategyL3", ContingencyContext.specificContingency("L3"), new TrueCondition(), List.of("action3")),
+                new OperatorStrategy("strategyL2", ContingencyContext.specificContingency("L2"), new TrueCondition(), List.of("action1", "action3")));
+
+        LoadFlowParameters parameters = new LoadFlowParameters();
+        setSlackBusId(parameters, "VL2_0");
+        SecurityAnalysisParameters saParameters = new SecurityAnalysisParameters();
+        saParameters.setLoadFlowParameters(parameters);
+        saParameters.addExtension(OpenSecurityAnalysisParameters.class, new OpenSecurityAnalysisParameters()
+                .setThreadCount(3)
+                .setContingencyPartitioningMode(SHARED_QUEUE)
+                .setCreateResultExtension(true));
+
+        RefThreadGuardTestUtil.arm();
+        try {
+            SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, createAllBranchesMonitors(network), saParameters,
+                    operatorStrategies, actions, ReportNode.NO_OP);
+            assertEquals(3, result.getPostContingencyResults().size());
+            assertEquals(3, result.getOperatorStrategyResults().size());
+        } finally {
+            RefThreadGuardTestUtil.disarm();
+        }
     }
 
     private SecurityAnalysisResult runStrategies(Network network, List<Contingency> contingencies, List<OperatorStrategy> operatorStrategies,

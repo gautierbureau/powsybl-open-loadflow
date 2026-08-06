@@ -32,11 +32,41 @@ public class LfTieLineBranch extends AbstractImpedantLfBranch {
 
     private final String id;
 
+    private final String half1Id;
+
+    private final String half2Id;
+
+    /**
+     * Electrical characteristics and nominal voltage of a half (boundary line) of the tie line,
+     * cached at build time so the area interchange computation never goes back to the iidm
+     * network (see the iidm free run phase of the multi thread copy mode).
+     */
+    public record HalfParams(double r, double x, double g, double b, double nominalV) {
+    }
+
+    private final HalfParams half1Params;
+
+    private final HalfParams half2Params;
+
+    // terminal nominal voltages, cached at build time so the branch results never go back to the
+    // iidm network (see the iidm free run phase of the multi thread copy mode)
+    private final double nominalV1;
+
+    private final double nominalV2;
+
     protected LfTieLineBranch(LfNetwork network, LfBus bus1, LfBus bus2, PiModel piModel, TieLine tieLine, LfNetworkParameters parameters) {
         super(network, bus1, bus2, piModel, parameters);
         this.boundaryLine1Ref = Ref.create(tieLine.getBoundaryLine1(), parameters.isCacheEnabled());
         this.boundaryLine2Ref = Ref.create(tieLine.getBoundaryLine2(), parameters.isCacheEnabled());
         this.id = tieLine.getId();
+        this.half1Id = tieLine.getBoundaryLine1().getId();
+        this.half2Id = tieLine.getBoundaryLine2().getId();
+        this.nominalV1 = tieLine.getBoundaryLine1().getTerminal().getVoltageLevel().getNominalV();
+        this.nominalV2 = tieLine.getBoundaryLine2().getTerminal().getVoltageLevel().getNominalV();
+        BoundaryLine half1 = tieLine.getBoundaryLine1();
+        BoundaryLine half2 = tieLine.getBoundaryLine2();
+        this.half1Params = new HalfParams(half1.getR(), half1.getX(), half1.getG(), half1.getB(), nominalV1);
+        this.half2Params = new HalfParams(half2.getR(), half2.getX(), half2.getG(), half2.getB(), nominalV2);
     }
 
     protected LfTieLineBranch(LfTieLineBranch other, LfNetwork network, LfBus bus1, LfBus bus2) {
@@ -44,6 +74,12 @@ public class LfTieLineBranch extends AbstractImpedantLfBranch {
         this.boundaryLine1Ref = other.boundaryLine1Ref;
         this.boundaryLine2Ref = other.boundaryLine2Ref;
         this.id = other.id;
+        this.half1Id = other.half1Id;
+        this.half2Id = other.half2Id;
+        this.half1Params = other.half1Params;
+        this.half2Params = other.half2Params;
+        this.nominalV1 = other.nominalV1;
+        this.nominalV2 = other.nominalV2;
     }
 
     public static LfTieLineBranch create(TieLine line, LfNetwork network, LfBus bus1, LfBus bus2, LfNetworkParameters parameters) {
@@ -70,7 +106,7 @@ public class LfTieLineBranch extends AbstractImpedantLfBranch {
 
     @Override
     public List<String> getOriginalIds() {
-        return List.of(id, boundaryLine1Ref.get().getId(), boundaryLine2Ref.get().getId());
+        return List.of(id, half1Id, half2Id);
     }
 
     @Override
@@ -82,6 +118,14 @@ public class LfTieLineBranch extends AbstractImpedantLfBranch {
         return boundaryLine1Ref.get();
     }
 
+    public HalfParams getHalf1Params() {
+        return half1Params;
+    }
+
+    public HalfParams getHalf2Params() {
+        return half2Params;
+    }
+
     public BoundaryLine getHalf2() {
         return boundaryLine2Ref.get();
     }
@@ -90,15 +134,13 @@ public class LfTieLineBranch extends AbstractImpedantLfBranch {
     public List<BranchResult> createBranchResult(double preContingencyBranchP1, double preContingencyBranchOfContingencyP1,
                                                  boolean createExtension, Map<String, LfBranchResults> zeroImpedanceFlows,
                                                  LoadFlowModel loadFlowModel) {
-        double nominalV1 = getHalf1().getTerminal().getVoltageLevel().getNominalV();
-        double nominalV2 = getHalf2().getTerminal().getVoltageLevel().getNominalV();
         double currentScale1 = PerUnit.ib(nominalV1);
         double currentScale2 = PerUnit.ib(nominalV2);
 
         var branchResult = buildBranchResult(loadFlowModel, zeroImpedanceFlows, currentScale1, currentScale2, preContingencyBranchP1, preContingencyBranchOfContingencyP1);
 
-        var half1Result = new BranchResult(getHalf1().getId(), branchResult.getP1(), branchResult.getQ1(), branchResult.getI1(), Double.NaN, Double.NaN, Double.NaN, branchResult.getFlowTransfer());
-        var half2Result = new BranchResult(getHalf2().getId(), branchResult.getP2(), branchResult.getQ2(), branchResult.getI2(), Double.NaN, Double.NaN, Double.NaN, branchResult.getFlowTransfer());
+        var half1Result = new BranchResult(half1Id, branchResult.getP1(), branchResult.getQ1(), branchResult.getI1(), Double.NaN, Double.NaN, Double.NaN, branchResult.getFlowTransfer());
+        var half2Result = new BranchResult(half2Id, branchResult.getP2(), branchResult.getQ2(), branchResult.getI2(), Double.NaN, Double.NaN, Double.NaN, branchResult.getFlowTransfer());
         if (createExtension) {
             branchResult.addExtension(OlfBranchResult.class, new OlfBranchResult(piModel.getR1(), piModel.getContinuousR1(),
                     getV1() * nominalV1, getV2() * nominalV2, Math.toDegrees(getAngle1()), Math.toDegrees(getAngle2())));

@@ -9,11 +9,13 @@
 package com.powsybl.openloadflow.network.action;
 
 import com.powsybl.action.*;
+import com.powsybl.iidm.network.Load;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.graph.GraphConnectivity;
 import com.powsybl.openloadflow.network.*;
 import com.powsybl.openloadflow.util.Reports;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -35,7 +37,6 @@ public final class LfActionUtils {
 
     public static LfAction createLfAction(Action action, Network network, LfNetwork lfNetwork) {
         Objects.requireNonNull(action);
-        Objects.requireNonNull(network);
         return switch (action.getType()) {
             case SwitchAction.NAME -> new LfSwitchAction((SwitchAction) action, lfNetwork);
             case TerminalsConnectionAction.NAME ->
@@ -45,7 +46,7 @@ public final class LfActionUtils {
             case RatioTapChangerTapPositionAction.NAME ->
                 new LfRatioTapChangerAction((RatioTapChangerTapPositionAction) action, lfNetwork);
             case LoadAction.NAME ->
-                new LfLoadAction((LoadAction) action, network, lfNetwork);
+                new LfLoadAction((LoadAction) action, Objects.requireNonNull(network, "the iidm network is needed to convert a load action"), lfNetwork);
             case GeneratorAction.NAME -> new LfGeneratorAction((GeneratorAction) action, lfNetwork);
             case HvdcAction.NAME -> new LfHvdcAction((HvdcAction) action, lfNetwork);
             case ShuntCompensatorPositionAction.NAME ->
@@ -59,6 +60,39 @@ public final class LfActionUtils {
     public static Map<String, LfAction> createLfActions(LfNetwork lfNetwork, Set<Action> actions, Network network) {
         return actions.stream()
                 .map(action -> LfActionUtils.createLfAction(action, network, lfNetwork))
+                .collect(Collectors.toMap(LfAction::getId, Function.identity()));
+    }
+
+    /**
+     * Precompute, from the iidm network, the data the action conversion needs: the load actions
+     * power shifts (they read the load base P0/Q0 and the load detail extension). Called on the
+     * thread that owns the network; the conversion itself
+     * ({@link #createLfActions(LfNetwork, Set, Map)}) then never reads the iidm network, so the
+     * multi thread copy mode can convert the actions on each partition copy from worker threads.
+     */
+    public static Map<String, PowerShift> precomputeLoadActionPowerShifts(List<Action> actions, Network network) {
+        Map<String, PowerShift> powerShifts = new HashMap<>();
+        for (Action action : actions) {
+            if (action instanceof LoadAction loadAction) {
+                Load load = network.getLoad(loadAction.getLoadId());
+                if (load != null) {
+                    powerShifts.put(action.getId(), LfLoadAction.createPowerShift(load, loadAction));
+                }
+            }
+        }
+        return powerShifts;
+    }
+
+    /**
+     * Same as {@link #createLfActions(LfNetwork, Set, Network)} but without any read of the iidm
+     * network: the load action power shifts have been precomputed by
+     * {@link #precomputeLoadActionPowerShifts(List, Network)}.
+     */
+    public static Map<String, LfAction> createLfActions(LfNetwork lfNetwork, Set<Action> actions, Map<String, PowerShift> loadActionPowerShifts) {
+        return actions.stream()
+                .map(action -> action instanceof LoadAction loadAction
+                    ? new LfLoadAction(loadAction, loadActionPowerShifts.get(action.getId()), lfNetwork)
+                    : LfActionUtils.createLfAction(action, null, lfNetwork))
                 .collect(Collectors.toMap(LfAction::getId, Function.identity()));
     }
 
