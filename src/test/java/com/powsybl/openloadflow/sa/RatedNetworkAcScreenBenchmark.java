@@ -132,11 +132,14 @@ class RatedNetworkAcScreenBenchmark extends AbstractOpenSecurityAnalysisTest {
             parameters.setLoadFlowParameters(loadFlowParameters);
             parameters.addExtension(OpenSecurityAnalysisParameters.class, new OpenSecurityAnalysisParameters().setThreadCount(1));
 
-            long[] best = {Long.MAX_VALUE, Long.MAX_VALUE};
+            // the run-to-run spread on these networks is wider than the difference being measured, so take enough
+            // pairs to report a distribution rather than a single best time
+            int runs = Integer.getInteger("bench.runs", 8);
+            List<List<Long>> times = new ArrayList<>(List.of(new ArrayList<>(), new ArrayList<>()));
             List<List<String>> violations = new ArrayList<>(List.of(new ArrayList<>(), new ArrayList<>()));
             try {
-                // interleaved, three measured pairs after one warmup pair
-                for (int i = 0; i < 8; i++) {
+                // interleaved, one warmup pair then measured pairs
+                for (int i = 0; i < runs; i++) {
                     int mode = i % 2; // 0: evaluable walk, 1: bulk arrays
                     LimitViolationManager.bulkFlowScreen = mode == 1;
                     long t0 = System.nanoTime();
@@ -152,17 +155,32 @@ class RatedNetworkAcScreenBenchmark extends AbstractOpenSecurityAnalysisTest {
                     assertEquals(contingencies.size(), result.getPostContingencyResults().size(),
                             "not every contingency was simulated, the timing would be meaningless");
                     if (i >= 2) { // warmup
-                        best[mode] = Math.min(best[mode], dt);
+                        times.get(mode).add(dt);
                         violations.set(mode, describeViolations(result));
                     }
                 }
             } finally {
                 LimitViolationManager.bulkFlowScreen = true;
             }
-            System.out.printf("RATEDAC %-28s evaluable=%6d ms bulk=%6d ms speedup=x%.3f violations=%d%n",
-                    file.getFileName(), best[0], best[1], (double) best[0] / best[1], violations.get(0).size());
+            for (int mode = 0; mode < 2; mode++) {
+                List<Long> sorted = times.get(mode).stream().sorted().toList();
+                System.out.printf("RATEDAC %-28s %-9s n=%d min=%6d median=%6d mean=%6d max=%6d samples=%s%n",
+                        file.getFileName(), mode == 1 ? "bulk" : "evaluable", sorted.size(), sorted.get(0),
+                        sorted.get(sorted.size() / 2), (long) sorted.stream().mapToLong(Long::longValue).average().orElseThrow(),
+                        sorted.get(sorted.size() - 1), times.get(mode));
+            }
+            double evaluableMedian = median(times.get(0));
+            double bulkMedian = median(times.get(1));
+            System.out.printf("RATEDAC %-28s speedup(median)=x%.3f violations=%d%n",
+                    file.getFileName(), evaluableMedian / bulkMedian, violations.get(0).size());
             assertEquals(violations.get(0), violations.get(1), "the two screening paths must report the same violations");
         }
+    }
+
+    private static double median(List<Long> values) {
+        List<Long> sorted = values.stream().sorted().toList();
+        int n = sorted.size();
+        return n % 2 == 1 ? sorted.get(n / 2) : (sorted.get(n / 2 - 1) + sorted.get(n / 2)) / 2.0;
     }
 
     private static List<String> describeViolations(SecurityAnalysisResult result) {
