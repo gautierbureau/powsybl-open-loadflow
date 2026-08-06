@@ -113,17 +113,17 @@ class MtNetworkCopyTest extends AbstractOpenSecurityAnalysisTest {
                 new Contingency("L1", new BranchContingency("L1")),
                 new Contingency("L2", new BranchContingency("L2")));
 
-        SecurityAnalysisResult initialVariant = run(network, contingencies, 1, false, false, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY);
+        SecurityAnalysisResult initialVariant = run(network, contingencies, 1, false, false);
 
         network.getVariantManager().cloneVariant(VariantManagerConstants.INITIAL_VARIANT_ID, "processVariant");
         network.getVariantManager().setWorkingVariant("processVariant");
         network.getLoad("LD").setP0(network.getLoad("LD").getP0() * 1.2); // modified in the variant only
 
-        SecurityAnalysisResult singleThread = run(network, contingencies, 1, false, false, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY);
+        SecurityAnalysisResult singleThread = run(network, contingencies, 1, false, false);
         RefThreadGuardTestUtil.arm();
         SecurityAnalysisResult multiThread;
         try {
-            multiThread = run(network, contingencies, 4, false, false, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY);
+            multiThread = run(network, contingencies, 4, false, false);
         } finally {
             RefThreadGuardTestUtil.disarm();
         }
@@ -136,7 +136,7 @@ class MtNetworkCopyTest extends AbstractOpenSecurityAnalysisTest {
 
         // switching back to the initial variant still gives the original results
         network.getVariantManager().setWorkingVariant(VariantManagerConstants.INITIAL_VARIANT_ID);
-        assertSameResults(initialVariant, run(network, contingencies, 4, false, false, OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY));
+        assertSameResults(initialVariant, run(network, contingencies, 4, false, false));
     }
 
     @Test
@@ -203,7 +203,6 @@ class MtNetworkCopyTest extends AbstractOpenSecurityAnalysisTest {
         saParameters.setLoadFlowParameters(parameters);
         saParameters.addExtension(OpenSecurityAnalysisParameters.class, new OpenSecurityAnalysisParameters()
                 .setThreadCount(2)
-                .setNetworkPerThreadMode(OpenSecurityAnalysisParameters.NetworkPerThreadMode.COPY)
                 .setCreateResultExtension(true));
 
         RefThreadGuardTestUtil.arm();

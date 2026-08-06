@@ -14,7 +14,6 @@ import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.network.NodeBreakerNetworkFactory;
 import com.powsybl.openloadflow.network.impl.RefThreadGuardTestUtil;
-import org.junit.jupiter.api.Test;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityAnalysisResult;
 import com.powsybl.sensitivity.SensitivityAnalysisRunParameters;
@@ -85,8 +84,7 @@ class AcSensitivityAnalysisMtCopyTest extends AbstractSensitivityAnalysisTest {
 
         RefThreadGuardTestUtil.arm();
         try {
-            SensitivityAnalysisResult result = run(network, factors, contingencies, 2,
-                    OpenSensitivityAnalysisParameters.NetworkPerThreadMode.COPY);
+            SensitivityAnalysisResult result = run(network, factors, contingencies, 2);
             assertFalse(result.getValues().isEmpty());
         } finally {
             RefThreadGuardTestUtil.disarm();
