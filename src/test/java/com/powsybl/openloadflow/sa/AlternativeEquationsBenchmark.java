@@ -56,6 +56,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -445,5 +446,101 @@ class AlternativeEquationsBenchmark extends AbstractOpenSecurityAnalysisTest {
         int threads = Integer.getInteger("bench.threads", 4);
         benchmarkSecurityAnalysis("case9241pegase", 1000, threads);
         benchmarkSecurityAnalysis("case13659pegase", 1000, threads);
+    }
+
+    /**
+     * The two branch limit screening paths against each other: reading the flows from the branch-num indexed arrays
+     * the vectorised equation system publishes, versus walking the branch evaluables
+     * ({@link LimitViolationManager#bulkFlowScreen}). Runs are interleaved so that JIT and thermal drift affect both
+     * equally, and the reported violations of the two paths are compared, so a timing that comes with a behaviour
+     * change cannot pass unnoticed.
+     */
+    private void benchmarkLimitScreen(String caseName, int contingencyCount, boolean alternativeEquations) {
+        Network network = loadPegaseNetwork(caseName);
+        List<Contingency> contingencies = network.getLineStream()
+                .limit(contingencyCount)
+                .map(line -> Contingency.line(line.getId()))
+                .collect(Collectors.toList());
+
+        // how much there is to screen at all: a case whose branches carry no limit exercises nothing
+        LfNetwork lfNetwork = Networks.load(network, new MostMeshedSlackBusSelector()).get(0);
+        BranchLimitScreen screen = BranchLimitScreen.build(lfNetwork, LimitReductionManager.create(Collections.emptyList()));
+        System.out.printf("SCREEN %-16s branches=%d checks=%d%n", caseName, lfNetwork.getBranches().size(), screen.size());
+
+        SecurityAnalysisParameters parameters = new SecurityAnalysisParameters();
+        parameters.setLoadFlowParameters(createLoadFlowParameters(alternativeEquations));
+        parameters.addExtension(OpenSecurityAnalysisParameters.class, new OpenSecurityAnalysisParameters().setThreadCount(1));
+
+        long[] best = {Long.MAX_VALUE, Long.MAX_VALUE};
+        List<List<String>> violations = new ArrayList<>(List.of(new ArrayList<>(), new ArrayList<>()));
+        try {
+            // interleaved, three measured pairs after one warmup pair: the difference between the two paths is a
+            // few percent, so a single pair per mode would not separate it from run-to-run drift
+            for (int i = 0; i < 8; i++) {
+                int mode = i % 2; // 0: evaluable walk, 1: bulk arrays
+                LimitViolationManager.bulkFlowScreen = mode == 1;
+                long t0 = System.nanoTime();
+                SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, Collections.emptyList(), parameters);
+                long dt = (System.nanoTime() - t0) / 1_000_000;
+                System.out.printf("SCREEN %-16s alternativeEquations=%-5s bulk=%-5s run %d: %d ms%n",
+                        caseName, alternativeEquations, mode == 1, i / 2, dt);
+                if (i >= 2) { // warmup
+                    best[mode] = Math.min(best[mode], dt);
+                    violations.set(mode, describeViolations(result));
+                }
+            }
+        } finally {
+            LimitViolationManager.bulkFlowScreen = true;
+        }
+        System.out.printf("SCREEN %-16s alternativeEquations=%-5s evaluable=%5d ms bulk=%5d ms speedup=x%.3f violations=%d%n",
+                caseName, alternativeEquations, best[0], best[1], (double) best[0] / best[1], violations.get(0).size());
+        assertEquals(violations.get(0), violations.get(1), "the two screening paths must report the same violations");
+    }
+
+    private static List<String> describeViolations(SecurityAnalysisResult result) {
+        List<String> described = new ArrayList<>();
+        result.getPostContingencyResults().forEach(postContingencyResult ->
+                postContingencyResult.getLimitViolationsResult().getLimitViolations().forEach(violation ->
+                        described.add(postContingencyResult.getContingency().getId() + "|" + violation.getSubjectId() + "|"
+                                + violation.getSide() + "|" + violation.getLimitType() + "|" + violation.getOperationalLimitsGroupId()
+                                + "|" + violation.getLimitName() + "|" + violation.getAcceptableDuration() + "|"
+                                + violation.getLimit() + "|" + violation.getValue())));
+        return described;
+    }
+
+    /**
+     * What a Pegase case actually carries in the way of operational limits, and how much of it the branch limit screen
+     * therefore has to check. Worth having explicitly: the fast DC security analysis measurements were taken on these
+     * cases with a limit added to every branch, so their figures and the ones taken on the case as loaded are not the
+     * same benchmark and must not be compared to each other.
+     */
+    private void reportLimits(String caseName) {
+        Network network = loadPegaseNetwork(caseName);
+        long ratedBranches = network.getBranchStream()
+                .filter(branch -> branch.getOperationalLimitsGroups1().stream().anyMatch(hasAnyLimit)
+                        || branch.getOperationalLimitsGroups2().stream().anyMatch(hasAnyLimit))
+                .count();
+        LfNetwork lfNetwork = Networks.load(network, new MostMeshedSlackBusSelector()).get(0);
+        BranchLimitScreen screen = BranchLimitScreen.build(lfNetwork, LimitReductionManager.create(Collections.emptyList()));
+        System.out.printf("LIMITS %-16s iidm branches=%d rated=%d (%.1f%%) | lf branches=%d screened checks=%d%n",
+                caseName, network.getBranchCount(), ratedBranches, 100d * ratedBranches / network.getBranchCount(),
+                lfNetwork.getBranches().size(), screen.size());
+    }
+
+    private static final java.util.function.Predicate<com.powsybl.iidm.network.OperationalLimitsGroup> hasAnyLimit =
+            group -> group.getCurrentLimits().isPresent() || group.getActivePowerLimits().isPresent() || group.getApparentPowerLimits().isPresent();
+
+    @Test
+    void reportCaseLimits() {
+        reportLimits("case1354pegase");
+        reportLimits("case2869pegase");
+        reportLimits("case9241pegase");
+        reportLimits("case13659pegase");
+    }
+
+    @Test
+    void benchmarkLimitScreens() {
+        benchmarkLimitScreen("case9241pegase", 1500, false);
+        benchmarkLimitScreen("case9241pegase", 1500, true);
     }
 }

@@ -68,6 +68,7 @@ public class AcVectorizedEquationSystemCreator extends AcEquationSystemCreator {
     protected EquationTerm<AcVariableType, AcEquationType> createClosedBranchSide1ActiveFlowEquationTerm(LfBranch branch, LfBus bus1, LfBus bus2,
                                                                                                          boolean deriveA1, boolean deriveR1,
                                                                                                          EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        networkVector.getBranchVector().onVectorizedFlowTerm(branch.getNum());
         return closedP1Array.getElement(branch.getNum());
     }
 
@@ -75,6 +76,7 @@ public class AcVectorizedEquationSystemCreator extends AcEquationSystemCreator {
     protected EquationTerm<AcVariableType, AcEquationType> createClosedBranchSide1ReactiveFlowEquationTerm(LfBranch branch, LfBus bus1, LfBus bus2,
                                                                                                            boolean deriveA1, boolean deriveR1,
                                                                                                            EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        networkVector.getBranchVector().onVectorizedFlowTerm(branch.getNum());
         return closedQ1Array.getElement(branch.getNum());
     }
 
@@ -82,6 +84,7 @@ public class AcVectorizedEquationSystemCreator extends AcEquationSystemCreator {
     protected EquationTerm<AcVariableType, AcEquationType> createClosedBranchSide2ActiveFlowEquationTerm(LfBranch branch, LfBus bus1, LfBus bus2,
                                                                                                          boolean deriveA1, boolean deriveR1,
                                                                                                          EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        networkVector.getBranchVector().onVectorizedFlowTerm(branch.getNum());
         return closedP2Array.getElement(branch.getNum());
     }
 
@@ -89,6 +92,7 @@ public class AcVectorizedEquationSystemCreator extends AcEquationSystemCreator {
     protected EquationTerm<AcVariableType, AcEquationType> createClosedBranchSide2ReactiveFlowEquationTerm(LfBranch branch, LfBus bus1, LfBus bus2,
                                                                                                            boolean deriveA1, boolean deriveR1,
                                                                                                            EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        networkVector.getBranchVector().onVectorizedFlowTerm(branch.getNum());
         return closedQ2Array.getElement(branch.getNum());
     }
 }

@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.equations.vector;
 import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreationParameters;
 import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.network.LfBranch;
+import com.powsybl.openloadflow.network.LfBranchFlowArrays;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.PiModel;
 import com.powsybl.openloadflow.util.Evaluable;
@@ -23,7 +24,7 @@ import java.util.List;
  *
  * @author Geoffroy Jamgotchian <geoffroy.jamgotchian at rte-france.com>
  */
-public class AcBranchVector {
+public class AcBranchVector implements LfBranchFlowArrays {
 
     final int[] bus1Num;
     final int[] bus2Num;
@@ -64,6 +65,16 @@ public class AcBranchVector {
     final double[] q2;
     final double[] i1;
     final double[] i2;
+
+    /**
+     * Number of vectorised closed flow terms (p1, q1, p2, q2) the equation system creator took from the term arrays
+     * for each branch. A branch reaching four is fully described by the flow arrays; anything less means the creator
+     * modelled it another way (a zero impedance branch, or a branch missing a side) and its evaluables do not read
+     * these arrays.
+     */
+    private final int[] vectorizedFlowTermCount;
+
+    private final boolean[] describedBranches;
 
     final double[] dp1dv1;
     final double[] dp1dv2;
@@ -130,6 +141,8 @@ public class AcBranchVector {
         q2 = new double[size];
         i1 = new double[size];
         i2 = new double[size];
+        vectorizedFlowTermCount = new int[size];
+        describedBranches = new boolean[size];
 
         dp1dv1 = new double[size];
         dp1dv2 = new double[size];
@@ -212,5 +225,51 @@ public class AcBranchVector {
 
     public Evaluable getI2(int branchNum) {
         return () -> i2[branchNum];
+    }
+
+    /**
+     * Record that the equation system creator took one of the four closed flow terms (p1, q1, p2, q2) of this branch
+     * from the vectorised term arrays. Once all four are, the flow arrays and the branch evaluables are the same
+     * computation and {@link #describedBranches()} reports the branch.
+     */
+    void onVectorizedFlowTerm(int branchNum) {
+        if (++vectorizedFlowTermCount[branchNum] == 4) {
+            describedBranches[branchNum] = true;
+        }
+    }
+
+    @Override
+    public boolean[] describedBranches() {
+        return describedBranches;
+    }
+
+    @Override
+    public double[] p1() {
+        return p1;
+    }
+
+    @Override
+    public double[] q1() {
+        return q1;
+    }
+
+    @Override
+    public double[] i1() {
+        return i1;
+    }
+
+    @Override
+    public double[] p2() {
+        return p2;
+    }
+
+    @Override
+    public double[] q2() {
+        return q2;
+    }
+
+    @Override
+    public double[] i2() {
+        return i2;
     }
 }
