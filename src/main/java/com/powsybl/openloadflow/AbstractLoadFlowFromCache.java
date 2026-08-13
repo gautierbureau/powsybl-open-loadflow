@@ -11,8 +11,10 @@ import com.powsybl.commons.report.ReportNode;
 import com.powsybl.iidm.network.*;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.lf.AbstractLoadFlowParameters;
+import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfTopoConfig;
 import com.powsybl.openloadflow.network.impl.LfLegBranch;
+import com.powsybl.openloadflow.util.Reports;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,6 +44,23 @@ public abstract class AbstractLoadFlowFromCache<P extends AbstractLoadFlowParame
         this.parametersExt = Objects.requireNonNull(parametersExt);
         this.acOrDcParameters = Objects.requireNonNull(acOrDcParameters);
         this.reportNode = Objects.requireNonNull(reportNode);
+    }
+
+    /**
+     * Give back to a cached {@link LfNetwork} a report node dedicated to the run which is starting.
+     * <p>
+     * A cached LfNetwork outlives the run that created it, but it keeps the report node it was built with.
+     * Without this, every run appends its reports (voltage initializer, outer loops, completion status) to
+     * the report node of the very first run: the reports of the current run are not visible from the report
+     * node given to that run, and the tree kept alive by the cache grows by a few nodes at each run, without
+     * any bound.
+     */
+    protected void refreshReportNode(LfNetwork lfNetwork) {
+        ReportNode lfNetworkReportNode = acOrDcParameters.getNetworkParameters().isAcDcNetwork()
+                ? Reports.createRootAcDcLfNetworkReportNode(reportNode, lfNetwork.getNumCC())
+                : Reports.createRootLfNetworkReportNode(reportNode, lfNetwork.getNumCC(),
+                        lfNetwork.getSynchronousNetworks().get(0).getNumSC());
+        lfNetwork.setReportNode(Reports.includeLfNetworkReportNode(reportNode, lfNetworkReportNode));
     }
 
     protected void configureTopoConfig(LfTopoConfig topoConfig) {
