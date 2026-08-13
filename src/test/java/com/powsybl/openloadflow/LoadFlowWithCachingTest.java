@@ -25,6 +25,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Set;
@@ -1061,5 +1062,28 @@ class LoadFlowWithCachingTest {
         assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues()); // check cache has not been invalidated
         newGen.setTargetV(newGen.getTargetV() + 0.1);
         assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues()); // check cache has not been invalidated
+    }
+
+    @Test
+    void testNetworkListenerRemovedWhenEntryClosed() {
+        // an entry registers itself as a network listener at construction, so it has to deregister
+        // when closed. As an entry is closed and recreated each time the cache input changes, a long
+        // living network would otherwise accumulate one listener per run.
+        Network network = Mockito.mock(Network.class);
+        VariantManager variantManager = Mockito.mock(VariantManager.class);
+        Mockito.when(network.getVariantManager()).thenReturn(variantManager);
+        Mockito.when(variantManager.getWorkingVariantId()).thenReturn(VariantManagerConstants.INITIAL_VARIANT_ID);
+
+        var firstEntry = NetworkCache.AC_LF_INSTANCE.get(network, new NetworkCache.LfInput(new LoadFlowParameters().setDistributedSlack(true)));
+        Mockito.verify(network).addListener((NetworkListener) firstEntry);
+        Mockito.verify(network, Mockito.never()).removeListener((NetworkListener) firstEntry);
+
+        // a parameter change invalidates the input: the entry is closed and a new one is created
+        var secondEntry = NetworkCache.AC_LF_INSTANCE.get(network, new NetworkCache.LfInput(new LoadFlowParameters().setDistributedSlack(false)));
+        assertNotSame(firstEntry, secondEntry);
+        Mockito.verify(network).removeListener((NetworkListener) firstEntry);
+
+        NetworkCache.AC_LF_INSTANCE.clear();
+        Mockito.verify(network).removeListener((NetworkListener) secondEntry);
     }
 }

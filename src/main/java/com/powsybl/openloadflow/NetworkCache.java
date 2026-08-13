@@ -842,8 +842,16 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
         public void close() {
             reset("close");
             Network network = networkRef.get();
-            if (network != null && variantCleaner != null) {
-                variantCleaner.clean();
+            if (network != null) {
+                // the entry registered itself as a network listener at construction, it has to
+                // deregister here otherwise the network keeps a strong reference to this closed
+                // entry forever. As an entry is closed and recreated each time the cache input
+                // changes, a long living network would otherwise accumulate one listener per run,
+                // and each network update would then notify an ever growing listener list.
+                network.removeListener(this);
+                if (variantCleaner != null) {
+                    variantCleaner.clean();
+                }
             }
         }
     }
