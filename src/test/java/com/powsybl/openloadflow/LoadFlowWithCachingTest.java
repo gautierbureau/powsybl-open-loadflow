@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow;
 
+import com.powsybl.commons.report.ReportNode;
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.*;
 import com.powsybl.iidm.network.extensions.*;
@@ -1061,5 +1062,32 @@ class LoadFlowWithCachingTest {
         assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues()); // check cache has not been invalidated
         newGen.setTargetV(newGen.getTargetV() + 0.1);
         assertNotNull(NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues()); // check cache has not been invalidated
+    }
+
+    private static long countChildren(ReportNode reportNode, String messageKey) {
+        return reportNode.getChildren().stream().filter(child -> messageKey.equals(child.getMessageKey())).count();
+    }
+
+    private static ReportNode lfNetworkReportNode(Network network) {
+        return NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow().getValues().get(0).getNetwork().getReportNode();
+    }
+
+    @Test
+    void testReportNodeNotAccumulatedFromRunToRun() {
+        // a cached LfNetwork outlives the run that built it. Each run has to get a report node of its own,
+        // otherwise the reports of all the runs pile up in the report node of the first one, and the tree
+        // kept alive by the cache grows without any bound.
+        var network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+        var gen = network.getGenerator("GEN");
+
+        assertTrue(loadFlowRunner.run(network, parameters).isFullyConverged());
+
+        gen.setTargetV(gen.getTargetV() + 0.1);
+        assertTrue(loadFlowRunner.run(network, parameters).isFullyConverged());
+        assertEquals(1, countChildren(lfNetworkReportNode(network), "olf.voltageInitializer"));
+
+        gen.setTargetV(gen.getTargetV() + 0.1);
+        assertTrue(loadFlowRunner.run(network, parameters).isFullyConverged());
+        assertEquals(1, countChildren(lfNetworkReportNode(network), "olf.voltageInitializer"));
     }
 }

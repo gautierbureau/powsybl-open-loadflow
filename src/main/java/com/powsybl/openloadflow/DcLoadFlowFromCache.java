@@ -77,6 +77,10 @@ public class DcLoadFlowFromCache extends AbstractLoadFlowFromCache<DcLoadFlowPar
         List<NetworkCache.DcLfValue> values = entry.getValues();
         if (values == null) {
             values = initValues(entry);
+        } else {
+            // cached LfNetworks are reused as is, so they still carry the report node of the run that
+            // created them: give them one dedicated to this run
+            values.forEach(value -> refreshReportNode(value.getNetwork()));
         }
         return values.stream()
                 .map(DcLoadFlowFromCache::run)
