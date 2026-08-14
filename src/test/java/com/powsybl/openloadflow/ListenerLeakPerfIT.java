@@ -8,14 +8,14 @@ import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlow;
 import com.powsybl.loadflow.LoadFlowParameters;
-import com.powsybl.math.matrix.DenseMatrixFactory;
+import com.powsybl.math.matrix.SparseMatrixFactory;
 import org.junit.jupiter.api.Test;
 
 class ListenerLeakPerfIT {
 
     @Test
     void measure() {
-        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new SparseMatrixFactory()));
         Network network = IeeeCdfNetworkFactory.create300();
 
         LoadFlowParameters[] variants = new LoadFlowParameters[2];

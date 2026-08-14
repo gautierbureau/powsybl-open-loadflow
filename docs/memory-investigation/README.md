@@ -97,10 +97,26 @@ compares the whole parameter set, any parameter change between two runs on the
 same network evicts and recreates the entry, leaking one listener each time.
 
 The dominant symptom is CPU: result write-back notifies the whole listener list,
-so cost grows linearly with leaked listeners. 2000 runs alternating
-`distributedSlack`, `-Xmx1G`: **151.6 s** versus **12.1 s** with constant
-parameters, per-250-block times climbing 7.2 → 30.6 s while the control stayed
-flat at ~1.5 s.
+so cost grows linearly with leaked listeners.
+
+Before/after on the same machine with `ListenerLeakPerfIT` (IEEE300, sparse,
+`distributedSlack` alternating between runs, 2000 runs), the only variable being
+the fix itself:
+
+| block ending at | 250 | 500 | 750 | 1000 | 1250 | 1500 | 1750 | 2000 | total |
+|---|---|---|---|---|---|---|---|---|---|
+| without fix (ms) | 10306 | 8131 | 9046 | 10328 | 11816 | 13440 | 15197 | 16134 | **95.3 s** |
+| with fix (ms) | 9612 | 5823 | 5539 | 5816 | 5233 | 5248 | 5069 | 5112 | **48.4 s** |
+
+Without the fix the per-block time grows monotonically after warmup (8131 →
+16134 ms, +98%); with the fix it is flat. The 2x total is not the interesting
+number — the growth is, since it keeps widening with the number of runs.
+
+Beware of a comparison that looks equivalent but is not: alternating parameters
+against **constant** parameters. That varies two things at once, because constant
+parameters get cache hits (fast restart, a few ms per run) while alternating
+parameters rebuild the `LfNetwork` every run. Most of that gap is cache miss vs
+cache hit, not leaked listeners.
 
 ### 3. Report node accumulation (fixed)
 
