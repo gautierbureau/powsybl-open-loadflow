@@ -24,10 +24,10 @@ import com.powsybl.openloadflow.util.PerUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
 import java.util.*;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiFunction;
 
 /**
@@ -848,81 +848,109 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
         }
     }
 
+    /**
+     * Key of a cache entry: a network, by identity, and one of its variants. The network is only
+     * weakly referenced so that the cache never keeps it alive; cleared keys are collected from
+     * {@link #deadKeys} instead of scanning the whole cache.
+     */
+    private static final class EntryKey extends WeakReference<Network> {
+
+        private final String variantId;
+
+        private final int hash;
+
+        private EntryKey(Network network, String variantId, ReferenceQueue<Network> queue) {
+            super(Objects.requireNonNull(network), queue);
+            this.variantId = Objects.requireNonNull(variantId);
+            this.hash = 31 * System.identityHashCode(network) + variantId.hashCode();
+        }
+
+        static EntryKey lookupKey(Network network, String variantId) {
+            return new EntryKey(network, variantId, null);
+        }
+
+        static EntryKey storedKey(Network network, String variantId, ReferenceQueue<Network> queue) {
+            return new EntryKey(network, variantId, Objects.requireNonNull(queue));
+        }
+
+        @Override
+        public int hashCode() {
+            return hash;
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (this == obj) {
+                return true; // so that a key whose network has been collected can still be removed
+            }
+            if (!(obj instanceof EntryKey other)) {
+                return false;
+            }
+            Network network = get();
+            return network != null && network == other.get() && variantId.equals(other.variantId);
+        }
+    }
+
     private final BiFunction<Network, I, Entry<I, V>> entryFactory;
 
-    private final List<Entry<I, V>> entries = new ArrayList<>();
+    private final Map<EntryKey, Entry<I, V>> entries = new ConcurrentHashMap<>();
 
-    private final Lock lock = new ReentrantLock();
+    private final ReferenceQueue<Network> deadKeys = new ReferenceQueue<>();
 
     public NetworkCache(BiFunction<Network, I, Entry<I, V>> entryFactory) {
         this.entryFactory = Objects.requireNonNull(entryFactory);
     }
 
     private void evictDeadEntries() {
-        Iterator<Entry<I, V>> it = entries.iterator();
-        while (it.hasNext()) {
-            Entry<I, V> entry = it.next();
-            if (entry.getNetworkRef().get() == null) {
+        java.lang.ref.Reference<? extends Network> deadKey;
+        while ((deadKey = deadKeys.poll()) != null) {
+            Entry<I, V> entry = entries.remove(deadKey);
+            if (entry != null) {
                 // release all resources
                 entry.close();
-                it.remove();
                 LOGGER.info("Dead network removed from cache ({} remains)", entries.size());
             }
         }
     }
 
     public int getEntryCount() {
-        lock.lock();
-        try {
-            evictDeadEntries();
-            return entries.size();
-        } finally {
-            lock.unlock();
-        }
+        evictDeadEntries();
+        return entries.size();
     }
 
     public Optional<Entry<I, V>> findEntry(Network network) {
         String variantId = network.getVariantManager().getWorkingVariantId();
-        return entries.stream()
-                .filter(e -> e.getNetworkRef().get() == network && e.getWorkingVariantId().equals(variantId))
-                .findFirst();
+        return Optional.ofNullable(entries.get(EntryKey.lookupKey(network, variantId)));
     }
 
     public Entry<I, V> get(Network network, Input<I> input) {
         Objects.requireNonNull(network);
         Objects.requireNonNull(input);
 
-        Entry<I, V> entry;
-        lock.lock();
-        try {
-            evictDeadEntries();
+        evictDeadEntries();
 
-            entry = findEntry(network).orElse(null);
-
-            // invalid cache if input has changed
-            if (entry != null) {
-                String reason = input.hasChanged(entry.getInput());
-                if (reason != null) {
-                    // release all resources
-                    entry.close();
-                    entries.remove(entry);
-                    entry = null;
-                    LOGGER.info("Network cache evicted for network '{}' and variant '{}' because of input change (reason={})",
-                            network.getId(), network.getVariantManager().getWorkingVariantId(), reason);
+        String variantId = network.getVariantManager().getWorkingVariantId();
+        boolean[] created = new boolean[1];
+        // atomic per key: concurrent runs on other networks or other variants do not wait
+        Entry<I, V> entry = entries.compute(EntryKey.storedKey(network, variantId, deadKeys), (key, previousEntry) -> {
+            if (previousEntry != null) {
+                // invalid cache if input has changed
+                String reason = input.hasChanged(previousEntry.getInput());
+                if (reason == null) {
+                    return previousEntry;
                 }
+                // release all resources
+                previousEntry.close();
+                LOGGER.info("Network cache evicted for network '{}' and variant '{}' because of input change (reason={})",
+                        network.getId(), variantId, reason);
             }
+            created[0] = true;
+            return entryFactory.apply(network, input.copy());
+        });
 
-            if (entry == null) {
-                entry = entryFactory.apply(network, input.copy());
-                entries.add(entry);
-
-                LOGGER.info("Network cache created for network '{}' and variant '{}'",
-                        network.getId(), network.getVariantManager().getWorkingVariantId());
-
-                return entry;
-            }
-        } finally {
-            lock.unlock();
+        if (created[0]) {
+            LOGGER.info("Network cache created for network '{}' and variant '{}'", network.getId(), variantId);
+            return entry;
         }
 
         // restart from previous state
@@ -941,14 +969,10 @@ public class NetworkCache<I extends NetworkCache.Input<I>, V extends NetworkCach
     }
 
     public void clear() {
-        lock.lock();
-        try {
-            for (var entry : entries) {
-                entry.close();
-            }
-            entries.clear();
-        } finally {
-            lock.unlock();
+        for (var entry : entries.values()) {
+            entry.close();
         }
+        entries.clear();
+        evictDeadEntries();
     }
 }
