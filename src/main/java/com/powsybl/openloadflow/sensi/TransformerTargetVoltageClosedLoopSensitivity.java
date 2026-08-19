@@ -173,32 +173,36 @@ public final class TransformerTargetVoltageClosedLoopSensitivity {
             return !indexByControlledBus.containsKey(controlledBus);
         }
 
-        /**
-         * {@code w[branch]}: the perturbation of each pinned ratio equivalent to +1 on this bus's voltage
-         * target. Empty when the bus is not transformer-regulated.
-         */
-        public Map<LfBranch, Double> weightsForControlledBus(LfBus controlledBus) {
-            Integer z = indexByControlledBus.get(controlledBus);
-            if (z == null) {
-                return Map.of();
-            }
-            // Solving M y = e_z gives the z-th column of M^-1, i.e. drho_{z'} / dV*_z for every zone z'.
-            DenseMatrix rhs = new DenseMatrix(size, 1);
-            rhs.set(z, 0, 1d);
-            luM.solve(rhs);
+        /** The zones, in the order {@link #index} numbers them. */
+        public List<LfBus> controlledBuses() {
+            return controlledBuses;
+        }
 
-            Map<LfBranch, Double> weights = new LinkedHashMap<>();
-            for (int zp = 0; zp < size; zp++) {
-                double w = rhs.get(zp, 0);
-                if (w != 0d) {
-                    for (LfBranch controller : controllersByControlledBus.get(controlledBuses.get(zp))) {
-                        weights.put(controller, w);
-                    }
-                }
-            }
-            LOGGER.trace("Transformer target voltage at bus {} maps to {} ratio weight(s)",
-                    controlledBus.getId(), weights.size());
-            return weights;
+        /** The changers regulating this bus — a zone's single degree of freedom, tied by {@code DISTR_RHO}. */
+        public List<LfBranch> controllersOf(LfBus controlledBus) {
+            return controllersByControlledBus.getOrDefault(controlledBus, List.of());
+        }
+
+        public int index(LfBus controlledBus) {
+            return indexByControlledBus.get(controlledBus);
+        }
+
+        public int size() {
+            return size;
+        }
+
+        /**
+         * {@code g <- M^-T g}, in place.
+         *
+         * <p>This is the whole contraction, for every declared lever at once. With
+         * {@code g_z = dObj/drho_z} read off the adjoint state, {@code theta_bar = M^-T g} — because the
+         * closed-loop column for {@code V*_z} is {@code sum_z' (M^-1)[z'][z]} times zone {@code z'}'s ratio
+         * column, and contracting that with lambda leaves exactly the transpose solve. Computing the columns
+         * of {@code M^-1} one lever at a time and contracting them afterwards, as an earlier version did, is
+         * the same arithmetic done k times over — forward mode, inside the reduction that exists to avoid it.
+         */
+        public void solveTransposed(double[] g) {
+            luM.solveTransposed(g);
         }
 
         @Override

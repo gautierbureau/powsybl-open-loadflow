@@ -195,7 +195,7 @@ class AdjointRhsBenchmark {
      */
     @Test
     void benchmarkTransformerTargetVoltages() {
-        for (String file : List.of("rte6515_full.xiidm.gz", "pegase9241_full.xiidm.gz")) {
+        for (String file : List.of("rte6515_full.xiidm.gz", "pegase9241_full.xiidm.gz", "pegase13659_full.xiidm.gz")) {
             Path p = DATA.resolve(file);
             if (!Files.exists(p)) {
                 System.out.println("SKIP (missing): " + p);

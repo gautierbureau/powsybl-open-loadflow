@@ -30,7 +30,7 @@ import com.powsybl.openloadflow.ac.equations.*;
 import com.powsybl.openloadflow.ac.outerloop.IncrementalTransformerVoltageControlOuterLoop;
 import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
-import com.powsybl.openloadflow.equations.Equation;
+import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationTerm;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
@@ -328,7 +328,17 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             parameterRhs[group.getIndex()] = group.describeRhs(slackParticipationByBus);
         }
         fillSvcPilotFactorsRhs(factorGroups, (col, column) -> parameterRhs[col] = column, context);
-        fillTransformerTargetVoltageFactorsRhs(transformerGroups, (col, column) -> parameterRhs[col] = column, context);
+
+        // Built BEFORE the adjoint solve, because filling M costs its own back-substitutions against this same
+        // factorisation; applied AFTER it, because the contraction needs lambda.
+        TransformerTargetVoltageClosedLoopSensitivity.Coordination transformerCoordination =
+                transformerGroups.isEmpty() ? null
+                        : TransformerTargetVoltageClosedLoopSensitivity.buildCoordination(context);
+        if (!transformerGroups.isEmpty() && transformerCoordination == null) {
+            throw new PowsyblException("runAdjoint: a transformer target voltage was declared but this network "
+                    + "has no transformer voltage control the load flow kept, so theta_bar would be an "
+                    + "unmarked zero rather than a gradient.");
+        }
 
         // x̄ = Σ_f ȳ_f · (∂f/∂x): transpose of calculateSensi — scatter der() into the equation rows.
         // ȳ is per monitored FUNCTION, so add each function's ∂f/∂x exactly once even though a function
@@ -387,6 +397,11 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             // divide by the variable's per-unit base to finish the unscale (see the x̄ scaling above): θ̄ then
             // equals the forward's unscaled Sᵀ·ȳ in physical units, per variable.
             thetaBar[col] = thetaG / getVariableBaseValue(group.getFactors().get(0));
+        }
+
+        try (var coordination = transformerCoordination) {
+            reduceTransformerTargetVoltages(coordination, transformerGroups, factorGroups, equationSystem,
+                    lambda, thetaBar);
         }
         return thetaBar;
     }
@@ -473,56 +488,62 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
     }
 
     /**
-     * Replace each transformer-carried {@code BUS_TARGET_VOLTAGE} group's (empty) column by the closed-loop
-     * combination of RATIO columns that answers the same question, per
-     * {@link TransformerTargetVoltageClosedLoopSensitivity}.
+     * {@code theta_bar} for the transformer-carried {@code BUS_TARGET_VOLTAGE} groups, from the adjoint state
+     * and the closed-loop coordination — see {@link TransformerTargetVoltageClosedLoopSensitivity}.
      *
-     * <p>The column is empty to begin with because the load flow disabled the control before rounding the
-     * taps, so {@code fillRhs} found an inactive equation. Rather than switch the controls back on — which
-     * would change the equation system, force a refactorisation, and silently re-linearise every OTHER
-     * variable in the call — the target voltage is expressed in terms of the ratio rows, which ARE active in
-     * the converged state. Same Jacobian, same factorisation, nothing mutated. This is the device
-     * {@link #fillSvcPilotFactorsRhs} already uses for an SVC pilot point.</p>
+     * <p>These groups have no column of their own: the load flow disabled the control before rounding the
+     * taps, so {@code fillRhs} found an inactive equation and left it empty. Rather than switch the controls
+     * back on — which changes the equation system, forces a refactorisation, and silently re-linearises every
+     * OTHER variable in the call — the target voltage is read off the RATIO rows, which are active in the
+     * converged state.</p>
      *
-     * @param transformerGroups group index -> the controlled bus whose target voltage it differentiates
+     * <p>With {@code g_z = dObj/drho_z}, which is just {@code lambda} at zone {@code z}'s
+     * {@code BRANCH_TARGET_RHO1} rows and therefore free, the control law {@code V_c = V*} gives
+     * {@code theta_bar = M^-T g} in ONE transpose solve against the small coordination matrix — every
+     * declared lever at once, whatever their number.</p>
      */
-    private static void fillTransformerTargetVoltageFactorsRhs(
+    private static void reduceTransformerTargetVoltages(
+            TransformerTargetVoltageClosedLoopSensitivity.Coordination coordination,
             Map<Integer, LfBus> transformerGroups,
-            RhsColumnSink sink,
-            AcLoadFlowContext context) {
-        if (transformerGroups.isEmpty()) {
+            SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups,
+            EquationSystem<AcVariableType, AcEquationType> equationSystem,
+            double[] lambda, double[] thetaBar) {
+        if (transformerGroups.isEmpty() || coordination == null) {
             return;
         }
-        try (TransformerTargetVoltageClosedLoopSensitivity.Coordination coordination =
-                     TransformerTargetVoltageClosedLoopSensitivity.buildCoordination(context)) {
-            if (coordination == null) {
-                throw new PowsyblException("runAdjoint: a transformer target voltage was declared but this "
-                        + "network has no transformer voltage control at all, so theta_bar would be an "
-                        + "unmarked zero rather than a gradient.");
-            }
-            var equationSystem = context.getEquationSystem();
-            List<String> insensitive = new ArrayList<>();
-            for (var entry : transformerGroups.entrySet()) {
-                LfBus controlledBus = entry.getValue();
-                if (coordination.isInsensitive(controlledBus)) {
-                    insensitive.add(controlledBus.getId());
-                    continue;
+        // g_z: the objective's derivative w.r.t. the zone's pinned ratio. A zone's changers move together
+        // (DISTR_RHO), so its rows are summed.
+        double[] g = new double[coordination.size()];
+        for (LfBus controlledBus : coordination.controlledBuses()) {
+            double sum = 0;
+            for (LfBranch controller : coordination.controllersOf(controlledBus)) {
+                var equation = equationSystem.getEquation(controller.getNum(), AcEquationType.BRANCH_TARGET_RHO1);
+                if (equation.isPresent() && equation.get().isActive()) {
+                    sum += lambda[equation.get().getColumn()];
                 }
-                RhsColumnBuilder builder = new RhsColumnBuilder(4);
-                for (var weight : coordination.weightsForControlledBus(controlledBus).entrySet()) {
-                    equationSystem.getEquation(weight.getKey().getNum(), AcEquationType.BRANCH_TARGET_RHO1)
-                            .filter(Equation::isActive)
-                            .ifPresent(eq -> builder.add(eq.getColumn(), weight.getValue()));
-                }
-                sink.accept(entry.getKey(), builder.build());
             }
-            if (!insensitive.isEmpty()) {
-                // Zero is a legitimate gradient, so it must not double as the error channel: name the levers
-                // too weakly coupled to their own bus for the reduction to carry information.
-                LOGGER.warn("{} transformer-regulated bus(es) have |dV/drho| below {}, so their target-voltage "
-                        + "gradient is left at zero: {}", insensitive.size(),
-                        IncrementalTransformerVoltageControlOuterLoop.MIN_SENSI_FILTER, insensitive);
+            g[coordination.index(controlledBus)] = sum;
+        }
+        coordination.solveTransposed(g);
+
+        List<String> insensitive = new ArrayList<>();
+        for (var entry : transformerGroups.entrySet()) {
+            LfBus controlledBus = entry.getValue();
+            if (coordination.isInsensitive(controlledBus)) {
+                insensitive.add(controlledBus.getId());
+                continue; // theta_bar stays 0, reported below
             }
+            var group = factorGroups.getList().get(entry.getKey());
+            // The same per-unit unscale the other groups get, applied to the reduced value.
+            thetaBar[entry.getKey()] = g[coordination.index(controlledBus)]
+                    / getVariableBaseValue(group.getFactors().get(0));
+        }
+        if (!insensitive.isEmpty()) {
+            // Zero is a legitimate gradient, so it must not double as the error channel: name the levers too
+            // weakly coupled to their own bus for the reduction to carry information.
+            LOGGER.warn("{} transformer-regulated bus(es) have |dV/drho| below {}, so their target-voltage "
+                    + "gradient is left at zero: {}", insensitive.size(),
+                    IncrementalTransformerVoltageControlOuterLoop.MIN_SENSI_FILTER, insensitive);
         }
     }
 
