@@ -44,7 +44,9 @@ public class IncrementalTransformerVoltageControlOuterLoop extends AbstractTrans
 
     private static final int MAX_DIRECTION_CHANGE = 3;
 
-    private static final double MIN_SENSI_FILTER = 0.05; // voltage vs. tap changer ratio sensitivity
+    /** Below this |dV/drho| a changer has no usable authority over its bus, and the reduction that
+     * divides by it is not to be trusted either. Shared with the sensitivity analysis. */
+    public static final double MIN_SENSI_FILTER = 0.05; // voltage vs. tap changer ratio sensitivity
 
     private final int maxTapShift;
 
@@ -88,13 +90,19 @@ public class IncrementalTransformerVoltageControlOuterLoop extends AbstractTrans
         }
     }
 
-    static class SensitivityContext {
+    /**
+     * dV_controlled / drho for each controller branch, from ONE multi-right-hand-side solve against the
+     * converged factorisation. Public because the reverse-mode sensitivity analysis needs exactly this
+     * matrix to express a transformer target voltage as a combination of ratio columns, and computing it
+     * a second time there would be the same math stated twice.
+     */
+    public static class SensitivityContext {
 
         private final DenseMatrix sensitivities;
 
         private final int[] controllerBranchIndex;
 
-        SensitivityContext(LfNetwork network, List<LfBranch> controllerBranches,
+        public SensitivityContext(LfNetwork network, List<LfBranch> controllerBranches,
                                   EquationSystem<AcVariableType, AcEquationType> equationSystem,
                                   JacobianMatrix<AcVariableType, AcEquationType> j) {
             controllerBranchIndex = LfBranch.createIndex(network, controllerBranches);
@@ -121,7 +129,7 @@ public class IncrementalTransformerVoltageControlOuterLoop extends AbstractTrans
             return (EquationTerm<AcVariableType, AcEquationType>) controlledBus.getCalculatedV();
         }
 
-        double calculateSensitivityFromRToV(LfBranch controllerBranch, LfBus controlledBus) {
+        public double calculateSensitivityFromRToV(LfBranch controllerBranch, LfBus controlledBus) {
             return getCalculatedV(controlledBus)
                     .calculateSensi(sensitivities, controllerBranchIndex[controllerBranch.getNum()]);
         }

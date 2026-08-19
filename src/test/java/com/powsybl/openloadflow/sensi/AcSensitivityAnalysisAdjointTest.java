@@ -889,6 +889,70 @@ class AcSensitivityAnalysisAdjointTest {
                 "mode " + mode + ": reverse mode must match forward");
     }
 
+    /**
+     * The SHARED-control case: two transformers regulating one bus, so {@code DISTR_RHO} is active and ties
+     * their ratios together.
+     *
+     * <p>This is the case the closed-loop reduction has to get right and the single-controller fixtures cannot
+     * exercise. There, {@code M} is 1x1 and the weight is just {@code 1/(dV_c/drho)}; here the zone has one
+     * degree of freedom shared by two changers, so the reduction must move them TOGETHER — summing their
+     * {@code dV/drho} into one column — rather than treating each as independently controlling. Getting that
+     * wrong halves or doubles the gradient, which no single-controller test would notice.</p>
+     *
+     * <p>Both transformers regulate the same bus, so a target voltage "on T2wT1" and one "on T2wT2" are the
+     * same zone target: their gradients must be equal as well as matching the forward oracle.</p>
+     */
+    @Test
+    void runAdjointMatchesForwardForSharedTransformerControl() {
+        Network network = VoltageControlNetworkFactory.createNetworkWith2T2wt();
+        for (String id : List.of("T2wT1", "T2wT2")) {
+            network.getTwoWindingsTransformer(id).getRatioTapChanger()
+                    .setTargetDeadband(0).setRegulating(true).setTapPosition(0)
+                    .setRegulationTerminal(network.getLoad("LOAD_3").getTerminal()).setTargetV(33.0);
+        }
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        lfp.setTransformerVoltageControlOn(true);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        SensitivityFunctionType ft = SensitivityFunctionType.BUS_VOLTAGE;
+        SensitivityVariableType vt = SensitivityVariableType.BUS_TARGET_VOLTAGE;
+        List<String> buses = List.of("BUS_1", "BUS_2", "BUS_3");
+        List<String> variables = List.of("T2wT1", "T2wT2");
+        double[] w = {0.7, -1.3, 0.4};
+
+        Map<String, Double> cot = new HashMap<>();
+        List<SensitivityFactor> full = new ArrayList<>();
+        for (int i = 0; i < buses.size(); i++) {
+            cot.put(AcSensitivityAnalysis.functionCotangentKey(ft, buses.get(i)), w[i]);
+            for (String v : variables) {
+                full.add(new SensitivityFactor(ft, buses.get(i), vt, v, false, ContingencyContext.all()));
+            }
+        }
+
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+
+        Map<String, Double> theta = analysis.runAdjoint(network,
+                network.getVariantManager().getWorkingVariantId(), List.of(),
+                adjointBlocks(List.of(ft), List.of(buses), vt, variables), cot);
+
+        SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, full,
+                new SensitivityAnalysisRunParameters().setParameters(sensiParams));
+        for (String v : variables) {
+            double expected = 0;
+            for (int i = 0; i < buses.size(); i++) {
+                expected += w[i] * fwd.getBusVoltageSensitivityValue(v, buses.get(i), vt);
+            }
+            assertTrue(Math.abs(expected) > 1e-6, v + ": oracle is trivially zero, the gate would prove nothing");
+            assertEquals(expected, theta.get(v), 1e-6 * Math.abs(expected) + 1e-9,
+                    v + ": shared-control reverse mode must match forward");
+        }
+        assertEquals(theta.get("T2wT1"), theta.get("T2wT2"), 1e-9 * Math.abs(theta.get("T2wT1")) + 1e-12,
+                "both changers regulate the same bus, so they carry the same zone target voltage");
+    }
+
     private static List<AcSensitivityAnalysis.AdjointVariable> adjointVariables(List<String> ids, SensitivityVariableType vt) {
         return ids.stream().map(v -> new AcSensitivityAnalysis.AdjointVariable(v, vt, false)).toList();
     }
