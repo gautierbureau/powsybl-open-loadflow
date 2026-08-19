@@ -87,12 +87,38 @@ public final class TransformerTargetVoltageClosedLoopSensitivity {
             return null;
         }
 
-        List<LfBus> controlledBuses = new ArrayList<>(controllersByControlledBus.keySet());
+        List<LfBus> candidateBuses = new ArrayList<>(controllersByControlledBus.keySet());
         List<LfBranch> allControllers = controllersByControlledBus.values().stream().flatMap(List::stream).toList();
 
         // dV/drho for every (controller branch, controlled bus) pair: ONE multi-RHS solve on the existing factor.
         var sensitivities = new IncrementalTransformerVoltageControlOuterLoop.SensitivityContext(
                 network, allControllers, context.getEquationSystem(), context.getJacobianMatrix());
+
+        // Keep only the zones whose changers actually move their own bus. A zone with no authority contributes
+        // a zero row AND a zero column, which makes M singular and takes every other zone down with it — on
+        // rte6515, one such zone in 300 is enough. The incremental outer loop applies the same threshold for
+        // the same reason: below it, the tap cannot realise a voltage target, so there is no closed loop to
+        // reduce and the honest gradient is a (reported) zero.
+        List<LfBus> controlledBuses = new ArrayList<>();
+        List<LfBus> insensitiveBuses = new ArrayList<>();
+        for (LfBus bus : candidateBuses) {
+            double self = 0;
+            for (LfBranch controller : controllersByControlledBus.get(bus)) {
+                self += sensitivities.calculateSensitivityFromRToV(controller, bus);
+            }
+            if (Math.abs(self) < IncrementalTransformerVoltageControlOuterLoop.MIN_SENSI_FILTER) {
+                insensitiveBuses.add(bus);
+            } else {
+                controlledBuses.add(bus);
+            }
+        }
+        if (!insensitiveBuses.isEmpty()) {
+            LOGGER.debug("{} transformer-regulated bus(es) below the |dV/drho| threshold, left out of the "
+                    + "coordination", insensitiveBuses.size());
+        }
+        if (controlledBuses.isEmpty()) {
+            return null;
+        }
 
         int size = controlledBuses.size();
         DenseMatrix m = new DenseMatrix(size, size);
@@ -111,15 +137,7 @@ public final class TransformerTargetVoltageClosedLoopSensitivity {
             indexByControlledBus.put(controlledBuses.get(z), z);
         }
         return new Coordination(controllersByControlledBus, controlledBuses, indexByControlledBus,
-                diagonal(m, size), m.decomposeLU(), size);
-    }
-
-    private static double[] diagonal(DenseMatrix m, int size) {
-        double[] d = new double[size];
-        for (int z = 0; z < size; z++) {
-            d[z] = m.get(z, z);
-        }
-        return d;
+                m.decomposeLU(), size);
     }
 
     /** {@code M} factorised, plus the zone structure needed to turn a solve into per-branch weights. */
@@ -128,17 +146,14 @@ public final class TransformerTargetVoltageClosedLoopSensitivity {
         private final Map<LfBus, List<LfBranch>> controllersByControlledBus;
         private final List<LfBus> controlledBuses;
         private final Map<LfBus, Integer> indexByControlledBus;
-        private final double[] selfSensitivity;
         private final LUDecomposition luM;
         private final int size;
 
         private Coordination(Map<LfBus, List<LfBranch>> controllersByControlledBus, List<LfBus> controlledBuses,
-                             Map<LfBus, Integer> indexByControlledBus, double[] selfSensitivity,
-                             LUDecomposition luM, int size) {
+                             Map<LfBus, Integer> indexByControlledBus, LUDecomposition luM, int size) {
             this.controllersByControlledBus = controllersByControlledBus;
             this.controlledBuses = controlledBuses;
             this.indexByControlledBus = indexByControlledBus;
-            this.selfSensitivity = selfSensitivity;
             this.luM = luM;
             this.size = size;
         }
@@ -149,14 +164,13 @@ public final class TransformerTargetVoltageClosedLoopSensitivity {
         }
 
         /**
-         * Whether the changers of this zone have too little authority over their own bus for the reduction to
-         * mean anything. The threshold is the one the incremental outer loop uses to give up on a changer;
-         * below it, the division by {@code dV/drho} amplifies noise rather than carrying a gradient.
+         * Whether this bus was left out of the coordination — either it is not transformer-regulated, or its
+         * changers have too little authority over it for the reduction to mean anything (the threshold is the
+         * one the incremental outer loop uses to give up on a changer; below it, dividing by {@code dV/drho}
+         * amplifies noise rather than carrying a gradient).
          */
         public boolean isInsensitive(LfBus controlledBus) {
-            Integer z = indexByControlledBus.get(controlledBus);
-            return z == null
-                    || Math.abs(selfSensitivity[z]) < IncrementalTransformerVoltageControlOuterLoop.MIN_SENSI_FILTER;
+            return !indexByControlledBus.containsKey(controlledBus);
         }
 
         /**

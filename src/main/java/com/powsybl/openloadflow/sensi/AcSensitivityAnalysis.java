@@ -420,11 +420,14 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      * Group index -> the bus whose voltage that group's transformer regulates, for every declared
      * transformer-carried {@code BUS_TARGET_VOLTAGE} variable.
      *
-     * <p>A declared transformer that regulates nothing in the LF model is rejected rather than answered with a
-     * zero: it means the cached load flow ran with {@code transformerVoltageControlOn} disabled, in which case
-     * the whole family is silently dead. A transformer outside the main connected component resolves to no
-     * branch at all, which is the structural zero the caller already handles through the missing-variable
-     * channel, and is left alone.</p>
+     * <p>A declared transformer that regulates nothing in the LF model is left OUT, and named in a warning. It
+     * is a structural zero of the same kind as a disconnected shunt — the changer is {@code regulating} in the
+     * network but its control did not survive into the LF model (disabled, hidden behind another control,
+     * outside the main component) — and on a real case a handful of them is ordinary: rte6515 has one in 300.
+     * Failing the whole request for it would make one dropped lever cost the other 299. What IS worth failing
+     * on is the config error where NO transformer control exists at all, which
+     * {@link #fillTransformerTargetVoltageFactorsRhs} raises, because then the entire family is silently
+     * dead.</p>
      */
     private static Map<Integer, LfBus> transformerFactorGroupIndices(
             LfNetwork lfNetwork,
@@ -461,10 +464,10 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             }
         }
         if (!notControlling.isEmpty()) {
-            throw new PowsyblException("runAdjoint: " + notControlling.size() + " transformer target voltage "
-                    + "variable(s) regulate nothing in the load flow model, so their theta_bar would be an "
-                    + "unmarked zero rather than a gradient. The cached load flow most likely ran with "
-                    + "transformerVoltageControlOn disabled: " + notControlling);
+            // Zero is a legitimate gradient, so it must never be the only signal: say which levers got one
+            // because the model has no control for them, not because they cannot help.
+            LOGGER.warn("{} declared transformer target voltage(s) have no voltage control in the load flow "
+                    + "model, so their theta_bar is a structural zero: {}", notControlling.size(), notControlling);
         }
         return groups;
     }

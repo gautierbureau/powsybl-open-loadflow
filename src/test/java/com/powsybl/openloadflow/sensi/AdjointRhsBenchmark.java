@@ -184,6 +184,72 @@ class AdjointRhsBenchmark {
      * a default: a contiguous scan over a dense array, against an indirect gather over index arrays that
      * are individually allocated per group.</p>
      */
+    /**
+     * The case Part B is about: a request carrying TRANSFORMER target voltages.
+     *
+     * <p>Serving one used to mean switching the voltage controls back on, which invalidates the Jacobian's
+     * structure and forces a refactorisation inside the call (plus a second one, lazily, when the flags are
+     * restored). Expressing the target voltage as a combination of ratio columns instead costs one extra
+     * multi-right-hand-side solve on the factorisation already there. This times the whole runAdjoint, so the
+     * difference between the two commits is the refactorisation.</p>
+     */
+    @Test
+    void benchmarkTransformerTargetVoltages() {
+        for (String file : List.of("rte6515_full.xiidm.gz", "pegase9241_full.xiidm.gz")) {
+            Path p = DATA.resolve(file);
+            if (!Files.exists(p)) {
+                System.out.println("SKIP (missing): " + p);
+                continue;
+            }
+            Network network = Network.read(p);
+            LoadFlowParameters lfp = params();
+            lfp.setTransformerVoltageControlOn(true);
+            if (!LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged()) {
+                System.out.println("SKIP (did not converge): " + file);
+                continue;
+            }
+
+            List<String> rtcs = network.getTwoWindingsTransformerStream()
+                    .filter(t -> t.getRatioTapChanger() != null && t.getRatioTapChanger().isRegulating()
+                            && t.getTerminal1().isConnected() && t.getTerminal2().isConnected())
+                    .map(t -> t.getId()).toList();
+            if (rtcs.isEmpty()) {
+                System.out.println("SKIP (no regulating RTC): " + file);
+                continue;
+            }
+            List<String> buses = network.getBusView().getBusStream().map(b -> b.getId()).limit(200).toList();
+
+            SensitivityFunctionType ft = SensitivityFunctionType.BUS_VOLTAGE;
+            Map<String, Double> cot = new HashMap<>();
+            for (int i = 0; i < buses.size(); i++) {
+                cot.put(AcSensitivityAnalysis.functionCotangentKey(ft, buses.get(i)), 1.0 + 0.001 * i);
+            }
+            List<AcSensitivityAnalysis.AdjointBlock> blocks = List.of(
+                    new AcSensitivityAnalysis.AdjointBlock(ft, buses,
+                            adjointVars(rtcs, SensitivityVariableType.BUS_TARGET_VOLTAGE)));
+
+            SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+            sensiParams.setLoadFlowParameters(lfp);
+            AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                    new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+            String variant = network.getVariantManager().getWorkingVariantId();
+
+            System.out.printf("%n=== %s TRANSFORMER case : %d regulating ratio tap changers ===%n",
+                    file, rtcs.size());
+            List<Double> adj = new ArrayList<>();
+            for (int i = 0; i < WARMUP + RUNS; i++) {
+                long t0 = System.nanoTime();
+                analysis.runAdjoint(network, variant, List.of(), blocks, cot);
+                double ms = (System.nanoTime() - t0) / 1e6;
+                if (i >= WARMUP) {
+                    adj.add(ms);
+                }
+            }
+            System.out.printf("  runAdjoint (%d transformer targets)   : median %.1f ms   min %.1f ms%n",
+                    rtcs.size(), median(adj), adj.stream().mapToDouble(Double::doubleValue).min().orElse(0));
+        }
+    }
+
     @Test
     void benchmarkDenseColumns() {
         for (String file : List.of("rte6515_full.xiidm.gz", "pegase9241_full.xiidm.gz")) {
