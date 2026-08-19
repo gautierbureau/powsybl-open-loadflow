@@ -209,11 +209,11 @@ class AdjointRhsBenchmark {
                 continue;
             }
 
-            List<String> rtcs = network.getTwoWindingsTransformerStream()
+            List<String> allRtcs = network.getTwoWindingsTransformerStream()
                     .filter(t -> t.getRatioTapChanger() != null && t.getRatioTapChanger().isRegulating()
                             && t.getTerminal1().isConnected() && t.getTerminal2().isConnected())
                     .map(t -> t.getId()).toList();
-            if (rtcs.isEmpty()) {
+            if (allRtcs.isEmpty()) {
                 System.out.println("SKIP (no regulating RTC): " + file);
                 continue;
             }
@@ -224,29 +224,36 @@ class AdjointRhsBenchmark {
             for (int i = 0; i < buses.size(); i++) {
                 cot.put(AcSensitivityAnalysis.functionCotangentKey(ft, buses.get(i)), 1.0 + 0.001 * i);
             }
-            List<AcSensitivityAnalysis.AdjointBlock> blocks = List.of(
-                    new AcSensitivityAnalysis.AdjointBlock(ft, buses,
-                            adjointVars(rtcs, SensitivityVariableType.BUS_TARGET_VOLTAGE)));
-
             SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
             sensiParams.setLoadFlowParameters(lfp);
             AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
                     new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
             String variant = network.getVariantManager().getWorkingVariantId();
 
-            System.out.printf("%n=== %s TRANSFORMER case : %d regulating ratio tap changers ===%n",
-                    file, rtcs.size());
-            List<Double> adj = new ArrayList<>();
-            for (int i = 0; i < WARMUP + RUNS; i++) {
-                long t0 = System.nanoTime();
-                analysis.runAdjoint(network, variant, List.of(), blocks, cot);
-                double ms = (System.nanoTime() - t0) / 1e6;
-                if (i >= WARMUP) {
-                    adj.add(ms);
+            System.out.printf("%n=== %s TRANSFORMER case : up to %d regulating changers ===%n",
+                    file, allRtcs.size());
+            // Swept, because the two approaches scale differently in the number of declared changers: the
+            // reduction pays O(k^2) reads and an O(k^3) dense LU on the coordination matrix, the
+            // refactorisation pays one sparse LU whatever k is. Where they cross decides which is the default.
+            for (int k : new int[] {1, 5, 10, 30, 100, allRtcs.size()}) {
+                if (k > allRtcs.size()) {
+                    continue;
                 }
+                List<AcSensitivityAnalysis.AdjointBlock> blocks = List.of(
+                        new AcSensitivityAnalysis.AdjointBlock(ft, buses,
+                                adjointVars(allRtcs.subList(0, k), SensitivityVariableType.BUS_TARGET_VOLTAGE)));
+                List<Double> adj = new ArrayList<>();
+                for (int i = 0; i < WARMUP + RUNS; i++) {
+                    long t0 = System.nanoTime();
+                    analysis.runAdjoint(network, variant, List.of(), blocks, cot);
+                    double ms = (System.nanoTime() - t0) / 1e6;
+                    if (i >= WARMUP) {
+                        adj.add(ms);
+                    }
+                }
+                System.out.printf("  k=%-5d median %6.1f ms   min %6.1f ms%n", k, median(adj),
+                        adj.stream().mapToDouble(Double::doubleValue).min().orElse(0));
             }
-            System.out.printf("  runAdjoint (%d transformer targets)   : median %.1f ms   min %.1f ms%n",
-                    rtcs.size(), median(adj), adj.stream().mapToDouble(Double::doubleValue).min().orElse(0));
         }
     }
 
