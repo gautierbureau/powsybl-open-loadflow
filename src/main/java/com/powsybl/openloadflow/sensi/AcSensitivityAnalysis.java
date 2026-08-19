@@ -13,7 +13,10 @@ import com.powsybl.commons.report.ReportNode;
 import com.powsybl.contingency.Contingency;
 import com.powsybl.contingency.ContingencyContext;
 import com.powsybl.contingency.strategy.OperatorStrategy;
+import com.powsybl.iidm.network.Identifiable;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.ThreeWindingsTransformer;
+import com.powsybl.iidm.network.TwoWindingsTransformer;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.math.matrix.MatrixFactory;
@@ -238,7 +241,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
 
         // solve system
         DenseMatrix factorsStates = initFactorsRhs(context.getEquationSystem(), factorGroups, participationByBus); // this is the rhs for the moment
-        fillSvcPilotFactorsRhs(factorGroups, factorsStates, context);
+        fillSvcPilotFactorsRhs(factorGroups, (col, column) -> column.writeInto(factorsStates, col), context);
         context.getJacobianMatrix().solveTransposed(factorsStates);
         setFunctionReferences(lfFactors);
 
@@ -254,7 +257,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      */
     private static void fillSvcPilotFactorsRhs(
             SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups,
-            DenseMatrix factorsStates,
+            RhsColumnSink sink,
             AcLoadFlowContext context) {
         boolean hasSvcPilot = factorGroups.getList().stream().anyMatch(group -> {
             LfSensitivityFactor<AcVariableType, AcEquationType> probe = group.getFactors().isEmpty() ? null : group.getFactors().get(0);
@@ -278,14 +281,15 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                 }
                 LfBus pilotBus = (LfBus) ((SingleVariableLfSensitivityFactor<AcVariableType, AcEquationType>) probe).getVariableElement();
                 Map<LfBus, Double> weights = weightsByPilot.computeIfAbsent(pilotBus, coordination::weightsForPilot);
-                int col = group.getIndex();
+                RhsColumnBuilder builder = new RhsColumnBuilder(weights.size());
                 for (var entry : weights.entrySet()) {
                     LfBus controlled = entry.getKey();
                     double w = entry.getValue();
                     context.getEquationSystem()
                             .getEquation(controlled.getNum(), AcEquationType.BUS_TARGET_V)
-                            .ifPresent(eq -> factorsStates.set(eq.getColumn(), col, w));
+                            .ifPresent(eq -> builder.add(eq.getColumn(), w));
                 }
+                sink.accept(group.getIndex(), builder.build());
             }
         }
     }
@@ -310,9 +314,17 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         var equationSystem = context.getEquationSystem();
         int equationCount = equationSystem.getIndex().getColumnCount();
 
-        // ∂F/∂p columns (one per variable group), including the SVC pilot closed-loop — identical to forward.
-        DenseMatrix parameterRhs = initFactorsRhs(equationSystem, factorGroups, slackParticipationByBus);
-        fillSvcPilotFactorsRhs(factorGroups, parameterRhs, context);
+        // ∂F/∂p columns (one per variable group), including the SVC pilot closed-loop — the same fill the
+        // forward path runs, but collected SPARSELY. Forward needs the dense matrix because it SOLVES against
+        // it; the adjoint only ever contracts it with λ, and most variable types write a scaled unit vector
+        // (a bus target voltage or a shunt susceptance is one row; a branch parameter, four), so the dense
+        // n_equations × n_groups array it used to allocate was almost entirely zeros — and on a large network
+        // with several lever families it was the call's dominant allocation.
+        RhsColumn[] parameterRhs = new RhsColumn[factorGroups.getList().size()];
+        for (var group : factorGroups.getList()) {
+            parameterRhs[group.getIndex()] = group.describeRhs(slackParticipationByBus);
+        }
+        fillSvcPilotFactorsRhs(factorGroups, (col, column) -> parameterRhs[col] = column, context);
 
         // x̄ = Σ_f ȳ_f · (∂f/∂x): transpose of calculateSensi — scatter der() into the equation rows.
         // ȳ is per monitored FUNCTION, so add each function's ∂f/∂x exactly once even though a function
@@ -358,11 +370,10 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         double[] thetaBar = new double[factorGroups.getList().size()];
         for (var group : factorGroups.getList()) {
             int col = group.getIndex();
-            double dot = 0.0;
-            for (int row = 0; row < equationCount; row++) {
-                dot += parameterRhs.get(row, col) * lambda[row];
-            }
-            double thetaG = dot;
+            // Over the column's NON-ZEROS: O(nnz) rather than O(n_equations) per group. A one-hot column —
+            // a bus target voltage, a shunt susceptance, a transformer phase — is a single multiply. A
+            // genuinely dense one (an injection under distributed slack) still costs what it always did.
+            double thetaG = parameterRhs[col].dot(lambda);
             for (var factor : group.getFactors()) {
                 Double yBar = cotangents.get(factor);
                 if (yBar != null && yBar != 0.0) {
@@ -374,6 +385,89 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             thetaBar[col] = thetaG / getVariableBaseValue(group.getFactors().get(0));
         }
         return thetaBar;
+    }
+
+    /**
+     * The ids of the factors differentiating against a {@link SensitivityVariableType#BUS_TARGET_VOLTAGE}
+     * carried by a TRANSFORMER — a voltage regulated by a ratio tap changer rather than by a generator or a static var
+     * compensator. Only that case needs the control equations switched back on, and only that case pays the
+     * refactorization for it.
+     *
+     * <p>The forward path asks the same question of the factor READER
+     * ({@code getVariableTargetVoltageInfo}) because it has nothing else at that point; the adjoint already
+     * holds the built factor list, so it reads that instead of running a reader a second time.</p>
+     */
+    private static List<String> transformerTargetVoltageVariableIds(Network network, List<SensitivityFactor> factors) {
+        Set<String> ids = new LinkedHashSet<>();
+        for (SensitivityFactor factor : factors) {
+            if (factor.getVariableType() != SensitivityVariableType.BUS_TARGET_VOLTAGE) {
+                continue;
+            }
+            // A variable-set id resolves to nothing here, which is correct: a GLSK cannot be a target voltage.
+            Identifiable<?> equipment = network.getIdentifiable(factor.getVariableId());
+            if (equipment instanceof TwoWindingsTransformer || equipment instanceof ThreeWindingsTransformer) {
+                ids.add(factor.getVariableId());
+            }
+        }
+        return List.copyOf(ids);
+    }
+
+    /**
+     * The indices of the factor groups whose variable is one of *variableIds* — the groups that must be
+     * differentiated in the control-active system rather than in the converged one.
+     */
+    private static Set<Integer> transformerFactorGroupIndices(
+            SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups,
+            List<SensitivityFactor> factors, List<String> variableIds) {
+        if (variableIds.isEmpty()) {
+            return Set.of();
+        }
+        Set<String> wanted = new HashSet<>(variableIds);
+        Set<Integer> groups = new HashSet<>();
+        for (var group : factorGroups.getList()) {
+            var probe = group.getFactors().isEmpty() ? null : group.getFactors().get(0);
+            if (probe == null) {
+                continue;
+            }
+            // Through `factors` by index, NOT probe.getVariableId(): an LfSensitivityFactor carries the
+            // RESOLVED element id, and the ids collected from the declaration are the caller's. This is the
+            // same detour runAdjoint takes to key its result map.
+            if (factors.get(probe.getIndex()).getVariableType() == SensitivityVariableType.BUS_TARGET_VOLTAGE
+                    && wanted.contains(factors.get(probe.getIndex()).getVariableId())) {
+                groups.add(group.getIndex());
+            }
+        }
+        return groups;
+    }
+
+    /**
+     * Fail on a declared transformer target voltage that has no control equation to be differentiated against,
+     * instead of contracting an empty RHS column into a zero.
+     *
+     * <p>Zero is a legitimate answer here — a lever with no authority over the objective — so it cannot double
+     * as the error channel: the caller reads it as "this changer cannot help", never as "the question was not
+     * asked". Two states reach this point. The changer regulates nothing in the LF model (no
+     * {@code VoltageControl}), typically because the cached load flow ran with transformer voltage control off,
+     * in which case the whole family is silently dead; or {@code fixTransformerVoltageControls} has just
+     * switched it back off because its non-controlled side has no PV bus to lean on, which is a per-changer
+     * modelling verdict. Both are worth a message naming the changer.</p>
+     */
+    private static void checkTransformerTargetVoltagesAreDifferentiable(LfNetwork lfNetwork, List<String> variableIds) {
+        List<String> notControlling = new ArrayList<>();
+        for (String id : variableIds) {
+            LfBranch branch = lfNetwork.getBranchById(id);
+            // An absent branch is out of the main connected component: that is the structural zero the caller
+            // already handles through the missing-variable channel, not a request that could not be honoured.
+            if (branch != null && !branch.isVoltageControlEnabled()) {
+                notControlling.add(id);
+            }
+        }
+        if (!notControlling.isEmpty()) {
+            throw new PowsyblException("runAdjoint: " + notControlling.size() + " transformer target voltage "
+                    + "variable(s) have no active voltage control, so their theta_bar would be an unmarked zero "
+                    + "rather than a gradient. Either the cached load flow ran with transformerVoltageControlOn "
+                    + "disabled, or the changer's non-controlled side has no PV bus: " + notControlling);
+        }
     }
 
     /**
@@ -492,7 +586,62 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             }
         }
 
-        double[] thetaBar = analyseAdjoint(context, factorGroups, cotangents, slackParticipationByBus);
+        // A BUS_TARGET_VOLTAGE variable carried by a TRANSFORMER is differentiated against a control equation
+        // that the load flow destroyed on its way out: every transformer voltage control mode disables the
+        // control before rounding the taps (AbstractTransformerVoltageControlOuterLoop.roundVoltageRatios), so
+        // the cached equation system holds no active BRANCH_TARGET_V and fillRhs leaves that column empty — a
+        // silently ZERO theta_bar, not an unsupported variable type. The forward analyse solves this by
+        // rebuilding "the AC equation system obtained just before the transformer steps rounding"
+        // (analyzeContingencySet); do exactly the same here, or reverse mode answers a different question than
+        // forward on the very same factors. Activating equations invalidates the Jacobian STRUCTURE, so the
+        // solve below refactorizes against the control-active system: ONE factorization for the whole call,
+        // whatever the number of changers — where forward mode needs a column per changer.
+        // The converged state has NO active transformer voltage control: every transformerVoltageControlMode
+        // disables it before rounding the taps (AbstractTransformerVoltageControlOuterLoop.roundVoltageRatios).
+        // A BUS_TARGET_VOLTAGE variable carried by a transformer is therefore differentiated against a dead
+        // equation, fillRhs leaves its column empty, and theta_bar comes back a silent 0.0 — not an
+        // unsupported variable type, and indistinguishable from a changer with no authority. The forward
+        // analyse rebuilds "the AC equation system obtained just before the transformer steps rounding"
+        // before its own solve (analyzeContingencySet); this does the same on the cached context.
+        //
+        // But it does it in a SECOND pass, over the transformer variables alone, rather than for everybody.
+        // Re-activating the controls changes the equation system, hence the Jacobian, hence every variable's
+        // theta_bar — and for a non-transformer variable that answer is worse, not better: a tap is DISCRETE,
+        // so the small perturbation a gradient describes moves no tap at all, while the control-active
+        // linearisation prices in a continuous tap response that will not happen. Measured on a generator
+        // target voltage against a re-solve finite difference of the objective, the taps-frozen value is the
+        // closer one. So: each variable is differentiated in the system that answers ITS question, and
+        // declaring a transformer lever alongside others cannot quietly move their gradients.
+        List<String> transformerTargetVoltageIds = transformerTargetVoltageVariableIds(network, factors);
+        Set<Integer> transformerGroups = transformerFactorGroupIndices(factorGroups, factors, transformerTargetVoltageIds);
+
+        double[] thetaBar = transformerGroups.size() < factorGroups.getList().size()
+                ? analyseAdjoint(context, factorGroups, cotangents, slackParticipationByBus)
+                : new double[factorGroups.getList().size()];
+
+        if (!transformerGroups.isEmpty()) {
+            Map<LfBranch, Boolean> savedVoltageControlEnabled = new LinkedHashMap<>();
+            for (LfBranch branch : lfNetwork.getBranches()) {
+                if (branch.getVoltageControl().isPresent()) {
+                    savedVoltageControlEnabled.put(branch, branch.isVoltageControlEnabled());
+                    branch.setVoltageControlEnabled(true);
+                }
+            }
+            try {
+                lfNetwork.fixTransformerVoltageControls();
+                checkTransformerTargetVoltagesAreDifferentiable(lfNetwork, transformerTargetVoltageIds);
+                double[] withControl = analyseAdjoint(context, factorGroups, cotangents, slackParticipationByBus);
+                for (int group : transformerGroups) {
+                    thetaBar[group] = withControl[group];
+                }
+            } finally {
+                // This context lives in the NETWORK CACHE and is shared with every later load flow, score and
+                // gradient call on this network, so the activation must not outlive the solve — unlike the
+                // forward path, which owns a throwaway LfNetwork and can leave it dirty. Restoring
+                // re-invalidates the Jacobian structure; it is rebuilt lazily, by whoever needs it next.
+                savedVoltageControlEnabled.forEach(LfBranch::setVoltageControlEnabled);
+            }
+        }
 
         Map<String, Double> gradientByVariableId = new LinkedHashMap<>();
         for (var group : factorGroups.getList()) {
@@ -847,7 +996,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
 
             // initialize right hand side from valid factors
             DenseMatrix factorsStates = initFactorsRhs(context.getEquationSystem(), factorGroups, slackParticipationByBus); // this is the rhs for the moment
-            fillSvcPilotFactorsRhs(factorGroups, factorsStates, context);
+            fillSvcPilotFactorsRhs(factorGroups, (col, column) -> column.writeInto(factorsStates, col), context);
 
             // solve system
             context.getJacobianMatrix().solveTransposed(factorsStates);

@@ -416,6 +416,120 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
         }
     }
 
+    /**
+     * The {@code ∂F/∂p} column of one factor group, as its NON-ZEROS.
+     *
+     * <p>Most sensitivity variables move exactly one residual row: a bus target voltage and a transformer
+     * phase are the target equation's own row, a shunt susceptance and a reactive injection are the bus's
+     * reactive row. Branch parameters move four; only an active-power injection under distributed slack, and
+     * a GLSK variable set, are genuinely dense. Describing the column instead of writing it into a dense
+     * matrix lets the adjoint contract it in {@code O(nnz)} rather than scanning every equation row per
+     * group, and lets the forward keep materialising the dense matrix it solves against — from the SAME
+     * description, so the two directions cannot disagree about what a variable type means.</p>
+     */
+    protected sealed interface RhsColumn {
+
+        /** The column with no non-zeros: an inactive target equation, or a group filled elsewhere. */
+        RhsColumn EMPTY = new Entries(new int[0], new double[0]);
+
+        /** {@code Σ_row column[row] · lambda[row]}. */
+        double dot(double[] lambda);
+
+        /** Accumulate this column into {@code rhs} at {@code column}. */
+        void writeInto(Matrix rhs, int column);
+
+        /** A scaled unit vector — the common case, carried as two primitives. */
+        record OneHot(int row, double scale) implements RhsColumn {
+
+            @Override
+            public double dot(double[] lambda) {
+                return scale * lambda[row];
+            }
+
+            @Override
+            public void writeInto(Matrix rhs, int column) {
+                rhs.add(row, column, scale);
+            }
+        }
+
+        /**
+         * An arbitrary set of non-zeros. Rows may REPEAT and are then summed, which is not an edge case: an
+         * active-power injection adds its own +1 on top of the slack participation already spread over every
+         * bus, its own included. Both operations below are additive, so no merge is needed.
+         */
+        record Entries(int[] rows, double[] values) implements RhsColumn {
+
+            @Override
+            public double dot(double[] lambda) {
+                double sum = 0;
+                for (int k = 0; k < rows.length; k++) {
+                    sum += values[k] * lambda[rows[k]];
+                }
+                return sum;
+            }
+
+            @Override
+            public void writeInto(Matrix rhs, int column) {
+                for (int k = 0; k < rows.length; k++) {
+                    rhs.add(rows[k], column, values[k]);
+                }
+            }
+        }
+    }
+
+    /**
+     * Accumulates the non-zeros of one {@link RhsColumn}. A single entry builds a {@link RhsColumn.OneHot},
+     * so the one-hot case is classified by construction rather than detected afterwards.
+     */
+    protected static final class RhsColumnBuilder {
+
+        private int[] rows;
+        private double[] values;
+        private int size;
+
+        /**
+         * @param expectedSize the number of non-zeros the caller is about to add. Worth passing: growing by
+         *                     doubling and copying at the end costs about three times the final arrays, which
+         *                     is invisible for a one-hot column and very much not for an injection spread
+         *                     over every load bus of a large network.
+         */
+        RhsColumnBuilder(int expectedSize) {
+            rows = new int[Math.max(1, expectedSize)];
+            values = new double[Math.max(1, expectedSize)];
+        }
+
+        void add(int row, double value) {
+            if (size == rows.length) {
+                rows = Arrays.copyOf(rows, size * 2);
+                values = Arrays.copyOf(values, size * 2);
+            }
+            rows[size] = row;
+            values[size] = value;
+            size++;
+        }
+
+        RhsColumn build() {
+            return switch (size) {
+                case 0 -> RhsColumn.EMPTY;
+                case 1 -> new RhsColumn.OneHot(rows[0], values[0]);
+                // Hand the arrays over as they are when the hint was exact, which is the whole point of it.
+                default -> new RhsColumn.Entries(
+                        size == rows.length ? rows : Arrays.copyOf(rows, size),
+                        size == values.length ? values : Arrays.copyOf(values, size));
+            };
+        }
+    }
+
+    /**
+     * Where a described column goes. The forward writes it into the dense matrix it will solve against, the
+     * adjoint keeps it to contract with λ — so a producer that cannot live on the factor group itself (the
+     * SVC pilot closed loop, which needs the factorised context) is still written once and read by both.
+     */
+    @FunctionalInterface
+    protected interface RhsColumnSink {
+        void accept(int column, RhsColumn value);
+    }
+
     protected interface SensitivityFactorGroup<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> {
 
         List<LfSensitivityFactor<V, E>> getFactors();
@@ -426,7 +540,7 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
 
         void addFactor(LfSensitivityFactor<V, E> factor);
 
-        void fillRhs(Matrix rhs, Map<LfBus, Double> participationByBus);
+        RhsColumn describeRhs(Map<LfBus, Double> participationByBus);
     }
 
     protected abstract static class AbstractSensitivityFactorGroup<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> implements SensitivityFactorGroup<V, E> {
@@ -461,22 +575,23 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
             factors.add(factor);
         }
 
-        protected void addBusInjection(Matrix rhs, LfBus lfBus, double injection) {
+        // The row an injection lands on is a RUNTIME fact, not a static one — the slack bus contributes
+        // nothing, and an inactive equation has no row at all — so the description is built at the same
+        // moment the write used to happen, not precomputed from the variable type alone.
+        protected void addBusInjection(RhsColumnBuilder builder, LfBus lfBus, double injection) {
             Equation<V, E> p = (Equation<V, E>) lfBus.getP();
             if (lfBus.isSlack() || !p.isActive()) {
                 return;
             }
-            int column = p.getColumn();
-            rhs.add(column, getIndex(), injection);
+            builder.add(p.getColumn(), injection);
         }
 
-        protected void addBusReactiveInjection(Matrix rhs, LfBus lfBus, double injection) {
+        protected void addBusReactiveInjection(RhsColumnBuilder builder, LfBus lfBus, double injection) {
             Equation<V, E> q = (Equation<V, E>) lfBus.getQ();
             if (!q.isActive()) {
                 return;
             }
-            int column = q.getColumn();
-            rhs.add(column, getIndex(), injection);
+            builder.add(q.getColumn(), injection);
         }
     }
 
@@ -497,45 +612,50 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
         }
 
         @Override
-        public void fillRhs(Matrix rhs, Map<LfBus, Double> participationByBus) {
+        public RhsColumn describeRhs(Map<LfBus, Double> participationByBus) {
+            RhsColumnBuilder builder = new RhsColumnBuilder(expectedNonZeros(participationByBus));
             switch (variableType) {
                 case TRANSFORMER_PHASE, TRANSFORMER_PHASE_1, TRANSFORMER_PHASE_2, TRANSFORMER_PHASE_3:
+                    // An INACTIVE target equation has no column, and the variable is not differentiable in
+                    // this state: the empty column is the honest answer, and the caller is expected to know
+                    // that a zero here can mean "not asked" as well as "no authority".
                     if (variableEquation.isActive()) {
-                        rhs.set(variableEquation.getColumn(), getIndex(), Math.toRadians(1d));
+                        builder.add(variableEquation.getColumn(), Math.toRadians(1d));
                     }
                     break;
                 case INJECTION_ACTIVE_POWER:
                     for (Map.Entry<LfBus, Double> lfBusAndParticipationFactor : participationByBus.entrySet()) {
                         LfBus lfBus = lfBusAndParticipationFactor.getKey();
                         Double injection = lfBusAndParticipationFactor.getValue();
-                        addBusInjection(rhs, lfBus, injection);
+                        addBusInjection(builder, lfBus, injection);
                     }
-                    addBusInjection(rhs, (LfBus) variableElement, 1d);
+                    addBusInjection(builder, (LfBus) variableElement, 1d);
                     break;
                 case INJECTION_REACTIVE_POWER:
-                    addBusReactiveInjection(rhs, (LfBus) variableElement, 1d);
+                    addBusReactiveInjection(builder, (LfBus) variableElement, 1d);
                     break;
                 case SVC_PILOT_POINT_TARGET_VOLTAGE:
-                    // No-op here: the RHS column for this factor group is filled at the
-                    // AC-orchestration level (AcSensitivityAnalysis.fillSvcPilotFactorsRhs)
-                    // once the Jacobian is factored and SVC weights can be computed.
+                    // Empty here: this group's column is produced at the AC-orchestration level
+                    // (AcSensitivityAnalysis.fillSvcPilotFactorsRhs) once the Jacobian is factored and the
+                    // SVC coordination weights can be computed.
                     break;
                 case BUS_TARGET_VOLTAGE:
                     if (variableEquation.isActive()) {
-                        rhs.set(variableEquation.getColumn(), getIndex(), 1d);
+                        builder.add(variableEquation.getColumn(), 1d);
                     }
                     break;
                 case SHUNT_COMPENSATOR_SUSCEPTANCE:
                     LfBus shuntLfBus = (LfBus) variableElement;
                     double vShunt = shuntLfBus.getV();
-                    addBusReactiveInjection(rhs, shuntLfBus, vShunt * vShunt);
+                    addBusReactiveInjection(builder, shuntLfBus, vShunt * vShunt);
                     break;
                 case BRANCH_RESISTANCE, BRANCH_REACTANCE, BRANCH_ADMITTANCE:
-                    fillRhsBranchParameter(rhs, (LfBranch) variableElement, variableType);
+                    describeRhsBranchParameter(builder, (LfBranch) variableElement, variableType);
                     break;
                 default:
                     throw createVariableTypeNotImplementedException(variableType);
             }
+            return builder.build();
         }
 
         /**
@@ -635,7 +755,20 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
             };
         }
 
-        private void fillRhsBranchParameter(Matrix rhs, LfBranch branch, SensitivityVariableType varType) {
+        /**
+         * How many non-zeros this variable type is about to write. An active-power injection under distributed
+         * slack reaches every participating bus; a branch parameter reaches the P and Q rows of both its
+         * buses; everything else is a single row.
+         */
+        private int expectedNonZeros(Map<LfBus, Double> participationByBus) {
+            return switch (variableType) {
+                case INJECTION_ACTIVE_POWER -> participationByBus.size() + 1;
+                case BRANCH_RESISTANCE, BRANCH_REACTANCE, BRANCH_ADMITTANCE -> 4;
+                default -> 1;
+            };
+        }
+
+        private void describeRhsBranchParameter(RhsColumnBuilder builder, LfBranch branch, SensitivityVariableType varType) {
             double[] partials = computeBranchFlowParameterPartials(branch, varType);
             if (partials.length == 0) {
                 return;
@@ -643,10 +776,10 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
             LfBus bus1 = branch.getBus1();
             LfBus bus2 = branch.getBus2();
             // RHS = -∂f/∂param at the P and Q equations of both buses.
-            addBusInjection(rhs, bus1, -partials[0]);          // -∂p1/∂param
-            addBusReactiveInjection(rhs, bus1, -partials[1]);  // -∂q1/∂param
-            addBusInjection(rhs, bus2, -partials[2]);          // -∂p2/∂param
-            addBusReactiveInjection(rhs, bus2, -partials[3]);  // -∂q2/∂param
+            addBusInjection(builder, bus1, -partials[0]);          // -∂p1/∂param
+            addBusReactiveInjection(builder, bus1, -partials[1]);  // -∂q1/∂param
+            addBusInjection(builder, bus2, -partials[2]);          // -∂p2/∂param
+            addBusReactiveInjection(builder, bus2, -partials[3]);  // -∂q2/∂param
         }
     }
 
@@ -666,19 +799,20 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
         }
 
         @Override
-        public void fillRhs(Matrix rhs, Map<LfBus, Double> participationByBus) {
+        public RhsColumn describeRhs(Map<LfBus, Double> participationByBus) {
+            RhsColumnBuilder builder = new RhsColumnBuilder(participationByBus.size() + mainComponentWeights.size());
             double weightSum = mainComponentWeights.values().stream().mapToDouble(Math::abs).sum();
             switch (variableType) {
                 case INJECTION_ACTIVE_POWER:
                     for (Map.Entry<LfBus, Double> lfBusAndParticipationFactor : participationByBus.entrySet()) {
                         LfBus lfBus = lfBusAndParticipationFactor.getKey();
                         double injection = lfBusAndParticipationFactor.getValue();
-                        addBusInjection(rhs, lfBus, injection);
+                        addBusInjection(builder, lfBus, injection);
                     }
                     for (Map.Entry<LfElement, Double> variableElementAndWeight : mainComponentWeights.entrySet()) {
                         LfElement variableElement = variableElementAndWeight.getKey();
                         double weight = variableElementAndWeight.getValue();
-                        addBusInjection(rhs, (LfBus) variableElement, weight / weightSum);
+                        addBusInjection(builder, (LfBus) variableElement, weight / weightSum);
                     }
                     break;
                 case HVDC_LINE_ACTIVE_POWER:
@@ -687,18 +821,19 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
                     for (Map.Entry<LfBus, Double> lfBusAndParticipationFactor : participationByBus.entrySet()) {
                         LfBus lfBus = lfBusAndParticipationFactor.getKey();
                         double injection = lfBusAndParticipationFactor.getValue() * balanceDiff; // adapt the sign of the slack distribution depending on the injection
-                        addBusInjection(rhs, lfBus, injection);
+                        addBusInjection(builder, lfBus, injection);
                     }
                     // add the injections on the side of the hvdc
                     for (Map.Entry<LfElement, Double> variableElementAndWeight : mainComponentWeights.entrySet()) {
                         LfElement variableElement = variableElementAndWeight.getKey();
                         double weight = variableElementAndWeight.getValue();
-                        addBusInjection(rhs, (LfBus) variableElement, weight);
+                        addBusInjection(builder, (LfBus) variableElement, weight);
                     }
                     break;
                 default:
                     throw createVariableTypeNotImplementedException(variableType);
             }
+            return builder.build();
         }
 
         protected boolean updateConnectivityWeights(Set<LfBus> nonConnectedBuses) {
@@ -790,7 +925,7 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
                                                                                                                   Matrix rhs,
                                                                                                                   Map<LfBus, Double> participationByBus) {
         for (SensitivityFactorGroup<V, E> factorGroup : factorGroups.getList()) {
-            factorGroup.fillRhs(rhs, participationByBus);
+            factorGroup.describeRhs(participationByBus).writeInto(rhs, factorGroup.getIndex());
         }
     }
 
