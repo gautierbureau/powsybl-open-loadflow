@@ -27,7 +27,6 @@ import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowResult;
 import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.ac.equations.*;
-import com.powsybl.openloadflow.ac.outerloop.IncrementalTransformerVoltageControlOuterLoop;
 import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -541,9 +540,10 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         if (!insensitive.isEmpty()) {
             // Zero is a legitimate gradient, so it must not double as the error channel: name the levers too
             // weakly coupled to their own bus for the reduction to carry information.
-            LOGGER.warn("{} transformer-regulated bus(es) have |dV/drho| below {}, so their target-voltage "
-                    + "gradient is left at zero: {}", insensitive.size(),
-                    IncrementalTransformerVoltageControlOuterLoop.MIN_SENSI_FILTER, insensitive);
+            LOGGER.warn("{} transformer-regulated bus(es) cannot move their own bus at all (|dV/drho| below "
+                    + "{}), so they are excluded from the coordination and their target-voltage gradient is "
+                    + "left at zero: {}", insensitive.size(),
+                    TransformerTargetVoltageClosedLoopSensitivity.SINGULAR_ZONE_TOL, insensitive);
         }
     }
 

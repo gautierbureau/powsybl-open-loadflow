@@ -106,7 +106,7 @@ public final class TransformerTargetVoltageClosedLoopSensitivity {
             for (LfBranch controller : controllersByControlledBus.get(bus)) {
                 self += sensitivities.calculateSensitivityFromRToV(controller, bus);
             }
-            if (Math.abs(self) < IncrementalTransformerVoltageControlOuterLoop.MIN_SENSI_FILTER) {
+            if (Math.abs(self) < tolerance()) {
                 insensitiveBuses.add(bus);
             } else {
                 controlledBuses.add(bus);
@@ -115,6 +115,21 @@ public final class TransformerTargetVoltageClosedLoopSensitivity {
         if (!insensitiveBuses.isEmpty()) {
             LOGGER.debug("{} transformer-regulated bus(es) below the |dV/drho| threshold, left out of the "
                     + "coordination", insensitiveBuses.size());
+        }
+        if (Boolean.parseBoolean(String.valueOf(System.getenv("OLF_DEBUG_TVC")))) {
+            double[] selfs = candidateBuses.stream().mapToDouble(b -> {
+                double v = 0;
+                for (LfBranch c : controllersByControlledBus.get(b)) {
+                    v += sensitivities.calculateSensitivityFromRToV(c, b);
+                }
+                return Math.abs(v);
+            }).sorted().toArray();
+            LOGGER.info("TVC-DEBUG candidates={} kept={} dropped={} |dV/drho| min={} p25={} median={} max={}",
+                    candidateBuses.size(), controlledBuses.size(), insensitiveBuses.size(),
+                    selfs.length == 0 ? "-" : selfs[0],
+                    selfs.length == 0 ? "-" : selfs[selfs.length / 4],
+                    selfs.length == 0 ? "-" : selfs[selfs.length / 2],
+                    selfs.length == 0 ? "-" : selfs[selfs.length - 1]);
         }
         if (controlledBuses.isEmpty()) {
             return null;
@@ -138,6 +153,37 @@ public final class TransformerTargetVoltageClosedLoopSensitivity {
         }
         return new Coordination(controllersByControlledBus, controlledBuses, indexByControlledBus,
                 m.decomposeLU(), size);
+    }
+
+    /**
+     * Below this {@code |dV/drho|} a zone is excluded from the coordination: its row and column are zero,
+     * which makes {@code M} singular and takes every other zone down with it.
+     *
+     * <p>This is a SINGULARITY guard and nothing else. It was briefly
+     * {@link IncrementalTransformerVoltageControlOuterLoop#MIN_SENSI_FILTER} (0.05), which is a different
+     * quantity — the authority an outer loop demands before walking a tap is worth it — and using it here
+     * discarded zones that are weak but perfectly differentiable. Measured against forward mode on
+     * pegase9241 (299 zones), lowering it moved the agreement:</p>
+     *
+     * <pre>
+     *   threshold   zones kept   levers zeroed   median rel   p90 rel
+     *   0.05        253          14              2.02e-04     7.63e-02
+     *   1e-2        264           3              1.13e-05     9.39e-03
+     *   1e-3        269           0              2.27e-06     5.97e-03
+     *   1e-9        269           0              2.27e-06     5.97e-03
+     * </pre>
+     *
+     * <p>Flat below 1e-3 because the distribution is bimodal — about 30 zones sit at exactly zero and the
+     * rest above 1e-3, with nothing in between — so anything in that range excludes the degenerate zones
+     * and keeps every real one. 1e-3 is chosen over 1e-9 for margin against a zone that is not exactly zero
+     * but still has no usable authority.</p>
+     */
+    static final double SINGULAR_ZONE_TOL = 1e-3;
+
+    /** The drop threshold, overridable by {@code OLF_TVC_SENSI_TOL} for the sweep that measured it. */
+    private static double tolerance() {
+        String override = System.getenv("OLF_TVC_SENSI_TOL");
+        return override == null ? SINGULAR_ZONE_TOL : Double.parseDouble(override);
     }
 
     /** {@code M} factorised, plus the zone structure needed to turn a solve into per-branch weights. */
