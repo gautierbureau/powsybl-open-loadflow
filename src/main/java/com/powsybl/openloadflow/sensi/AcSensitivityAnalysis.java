@@ -326,6 +326,18 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         for (var group : factorGroups.getList()) {
             parameterRhs[group.getIndex()] = group.describeRhs(slackParticipationByBus);
         }
+        // A transformer-carried BUS_TARGET_VOLTAGE must not be answered from the controlled bus's own
+        // target-voltage column. That column exists only when the equation is ACTIVE, and for these buses
+        // it is active because something ELSE regulates them — a generator, typically, which is precisely
+        // why the changer has no authority there. Contracting it would return the GENERATOR's sensitivity
+        // under a transformer lever's name: measured on pegase9241, 30 of 300 levers, wrong by up to two
+        // orders of magnitude and in one case the wrong sign. The transformer's answer comes from the ratio
+        // rows instead (reduceTransformerTargetVoltages); where it cannot, a structural zero is the honest
+        // result, and blanking the column here is what makes that true by construction rather than by a
+        // later overwrite.
+        for (int col : transformerGroups.keySet()) {
+            parameterRhs[col] = RhsColumn.EMPTY;
+        }
         fillSvcPilotFactorsRhs(factorGroups, (col, column) -> parameterRhs[col] = column, context);
 
         // Built BEFORE the adjoint solve, because filling M costs its own back-substitutions against this same
@@ -529,8 +541,10 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         for (var entry : transformerGroups.entrySet()) {
             LfBus controlledBus = entry.getValue();
             if (coordination.isInsensitive(controlledBus)) {
+                // theta_bar is already 0: the group's column was blanked in analyseAdjoint precisely so
+                // that a zone the coordination cannot serve reads as a structural zero.
                 insensitive.add(controlledBus.getId());
-                continue; // theta_bar stays 0, reported below
+                continue;
             }
             var group = factorGroups.getList().get(entry.getKey());
             // The same per-unit unscale the other groups get, applied to the reduced value.
