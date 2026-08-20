@@ -374,13 +374,28 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
      * {@link AcOuterLoopContext} constructor, and stay in lockstep with core's setup.
      */
     public static List<Pair<AcOuterLoop, AcOuterLoopContext>> createOuterLoopsAndContexts(AcLoadFlowContext context) {
+        return createOuterLoopsAndContexts(context, true);
+    }
+
+    /**
+     * Create the (outer loop, context) pairs for {@code context}. When {@code initialize} is true each loop is
+     * {@code initialize}d immediately (the normal single-run path). When false the loops are only created and
+     * their load-flow context set — the caller must {@code initialize} them itself. The GPU batched hybrid uses
+     * {@code false} so it can call {@code initialize} PER SCENARIO (after restoring that scenario's base state),
+     * exactly as OLF re-runs the outer loops per contingency: calling {@code initialize} here would enable
+     * transformer/shunt voltage control on the SHARED network at setup, corrupting the base state the batch's
+     * per-scenario snapshot captures.
+     */
+    public static List<Pair<AcOuterLoop, AcOuterLoopContext>> createOuterLoopsAndContexts(AcLoadFlowContext context, boolean initialize) {
         List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = context.getParameters().getOuterLoops().stream()
                 .filter(o -> o.isNeeded(context))
                 .map(outerLoop -> Pair.of(outerLoop, new AcOuterLoopContext(context.getNetwork())))
                 .toList();
         for (var outerLoopAndContext : outerLoopsAndContexts) {
             outerLoopAndContext.getRight().setLoadFlowContext(context);
-            outerLoopAndContext.getLeft().initialize(outerLoopAndContext.getRight());
+            if (initialize) {
+                outerLoopAndContext.getLeft().initialize(outerLoopAndContext.getRight());
+            }
         }
         return outerLoopsAndContexts;
     }
