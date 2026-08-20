@@ -297,8 +297,18 @@ class RtcAdjointCostProfile {
                 }
             }
             System.out.printf("  zones dropped at tol=%.0e        %8d%n", tol, dropped.size());
+            Map<String, LfBus> busByLever = new LinkedHashMap<>();
+            for (var e : zones.entrySet()) {
+                for (LfBranch c : e.getValue()) {
+                    busByLever.put(c.getId(), e.getKey());
+                }
+            }
+            // How many DROPPED zones are dropped because a generator is holding the bus?
+            long droppedHeldByGen = dropped.stream().filter(LfBus::isGeneratorVoltageControlled).count();
+            System.out.printf("  of the %d dropped zones, %d have their bus held by a GENERATOR%n",
+                    dropped.size(), droppedHeldByGen);
             compare(analysis, network, variant, levers, buses, cot, sensiParams, verbose,
-                    selfSensiByLever, couplingToDropped);
+                    selfSensiByLever, couplingToDropped, busByLever);
         }
 
         // (d) the alternative: one refactorisation of the network Jacobian
@@ -336,7 +346,8 @@ class RtcAdjointCostProfile {
                                 List<String> levers, List<String> buses, Map<String, Double> cot,
                                 SensitivityAnalysisParameters sensiParams, boolean verbose,
                                 Map<String, Double> selfSensiByLever,
-                                Map<String, Double> couplingToDroppedByLever) {
+                                Map<String, Double> couplingToDroppedByLever,
+                                Map<String, LfBus> busByLever) {
         SensitivityFunctionType ft = SensitivityFunctionType.BUS_VOLTAGE;
         SensitivityVariableType vt = SensitivityVariableType.BUS_TARGET_VOLTAGE;
 
@@ -350,7 +361,12 @@ class RtcAdjointCostProfile {
                 full.add(new SensitivityFactor(ft, bus, vt, lever, false, ContingencyContext.all()));
             }
         }
-        System.out.printf("%n  comparing against forward analyse (%d factors) ...%n", full.size());
+        long exactZeros = levers.stream().map(reduced::get)
+                .filter(v -> v != null && v == 0.0).count();
+        long missing = levers.stream().filter(l -> !reduced.containsKey(l)).count();
+        System.out.printf("%n  declared %d | returned %d | exactly-zero theta_bar %d | absent %d%n",
+                levers.size(), reduced.size(), exactZeros, missing);
+        System.out.printf("  comparing against forward analyse (%d factors) ...%n", full.size());
         long t = System.nanoTime();
         SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, full,
                 new SensitivityAnalysisRunParameters().setParameters(sensiParams));
@@ -488,13 +504,21 @@ class RtcAdjointCostProfile {
             order.add(i);
         }
         order.sort((x, y) -> Double.compare(rels.get(y), rels.get(x)));
-        System.out.println("  ten worst levers:      rel        |dV/drho|   coupling-to-dropped");
+        System.out.println();
+        System.out.println("  TEN WORST — the actual adjoint values:");
+        System.out.printf("    %-22s %14s %14s %10s %11s %-13s %s%n",
+                "lever", "reduction", "forward", "rel", "|dV/drho|", "in M?", "bus also held by");
         for (int k = 0; k < Math.min(10, order.size()); k++) {
             int i = order.get(k);
-            System.out.printf("    %-8s          %8.2e   %8.2e   %8.2e%n",
-                    verbose ? ids.get(i) : "#" + k,
-                    rels.get(i), Math.abs(selfSensiByLever.getOrDefault(ids.get(i), Double.NaN)),
-                    couplingToDroppedByLever.getOrDefault(ids.get(i), Double.NaN));
+            Double self = selfSensiByLever.get(ids.get(i));
+            LfBus bus = busByLever.get(ids.get(i));
+            String heldBy = bus == null ? "?"
+                    : (bus.isGeneratorVoltageControlled() ? "GENERATOR"
+                        + (bus.isGeneratorVoltageControlEnabled() ? " (enabled)" : " (off)") : "nothing else");
+            System.out.printf("    %-22s %+14.6e %+14.6e %10.2e %11s %-13s %s%n",
+                    ids.get(i), gotAll.get(i), expectedAll.get(i), rels.get(i),
+                    self == null ? "?" : String.format("%.3e", Math.abs(self)),
+                    self == null ? "unknown" : (Math.abs(self) < 1e-3 ? "NO (dropped)" : "yes"), heldBy);
         }
 
         double[] edges = {0.05, 0.1, 0.2, 0.5, 1.0, Double.MAX_VALUE};
