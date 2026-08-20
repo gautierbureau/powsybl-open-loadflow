@@ -132,7 +132,11 @@ public final class TransformerTargetVoltageClosedLoopSensitivity {
                     selfs.length == 0 ? "-" : selfs[selfs.length - 1]);
         }
         if (controlledBuses.isEmpty()) {
-            return null;
+            // Every zone was filtered out. That is NOT "this network has no transformer voltage control" —
+            // it has one, and no changer can move its own bus. An empty coordination reports each of them as
+            // a structural zero, which is the honest answer; null is reserved for the config error where no
+            // transformer control exists at all.
+            return new Coordination(controllersByControlledBus, List.of(), Map.of(), null, 0);
         }
 
         int size = controlledBuses.size();
@@ -248,12 +252,16 @@ public final class TransformerTargetVoltageClosedLoopSensitivity {
          * the same arithmetic done k times over — forward mode, inside the reduction that exists to avoid it.
          */
         public void solveTransposed(double[] g) {
-            luM.solveTransposed(g);
+            if (luM != null) {
+                luM.solveTransposed(g);
+            }
         }
 
         @Override
         public void close() {
-            luM.close();
+            if (luM != null) {
+                luM.close();
+            }
         }
     }
 }
