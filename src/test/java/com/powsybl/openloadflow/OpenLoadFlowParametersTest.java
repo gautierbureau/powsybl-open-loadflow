@@ -542,7 +542,8 @@ class OpenLoadFlowParametersTest {
                 "maxActivePowerMismatch=0.01, maxReactivePowerMismatch=0.01, maxVoltageMismatch=1.0E-4, maxAngleMismatch=1.0E-5, " +
                 "maxRatioMismatch=1.0E-5, maxSusceptanceMismatch=1.0E-4, voltagePerReactivePowerControl=false, generatorReactivePowerRemoteControl=false, " +
                 "transformerReactivePowerControl=false, maxNewtonRaphsonIterations=15, maxOuterLoopIterations=20, newtonRaphsonConvEpsPerEq=1.0E-4, " +
-                "voltageInitModeOverride=NONE, transformerVoltageControlMode=INCREMENTAL_VOLTAGE_CONTROL, shuntVoltageControlMode=WITH_GENERATOR_VOLTAGE_CONTROL, " +
+                "voltageInitModeOverride=NONE, transformerVoltageControlMode=INCREMENTAL_VOLTAGE_CONTROL, " +
+                "transformerTargetVoltageAdjointMode=REDUCTION, shuntVoltageControlMode=WITH_GENERATOR_VOLTAGE_CONTROL, " +
                 "minPlausibleTargetVoltage=0.8, maxPlausibleTargetVoltage=1.2, minRealisticVoltage=0.5, maxRealisticVoltage=2.0, " +
                 "minNominalVoltageRealisticVoltageCheck=0.0, reactiveRangeCheckMode=MAX, lowImpedanceThreshold=1.0E-8, networkCacheEnabled=false, " +
                 "svcVoltageMonitoring=true, stateVectorScalingMode=NONE, maxSlackBusCount=1, debugDir=null, " +
