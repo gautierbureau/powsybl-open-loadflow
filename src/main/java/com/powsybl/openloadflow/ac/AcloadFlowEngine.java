@@ -241,18 +241,8 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
                                                context.getTargetVector(),
                                                context.getEquationVector());
 
-        List<AcOuterLoop> outerLoops = context.getParameters().getOuterLoops().stream().filter(o -> o.isNeeded(context)).toList();
-        List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = outerLoops.stream()
-                .map(outerLoop -> Pair.of(outerLoop, new AcOuterLoopContext(context.getNetwork())))
-                .toList();
-
-        // outer loops initialization
-        for (var outerLoopAndContext : outerLoopsAndContexts) {
-            var outerLoop = outerLoopAndContext.getLeft();
-            var outerLoopContext = outerLoopAndContext.getRight();
-            outerLoopContext.setLoadFlowContext(context);
-            outerLoop.initialize(outerLoopContext);
-        }
+        List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = createOuterLoopsAndContexts(context);
+        List<AcOuterLoop> outerLoops = outerLoopsAndContexts.stream().map(Pair::getLeft).toList();
 
         if (context.getParameters().isDetailedReport()) {
             if (context.getNetwork().getSynchronousNetworks().size() == 1) {
@@ -371,6 +361,28 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         context.setResult(result);
 
         return result;
+    }
+
+    /**
+     * Build the needed AC outer loops for {@code context} paired with a fresh, fully-initialized
+     * {@link AcOuterLoopContext} each — the exact sequence {@link #run()} uses internally (filter
+     * {@link AcOuterLoop#isNeeded}, one context per loop, {@code setLoadFlowContext}, {@code initialize}).
+     *
+     * <p>Exposed so out-of-package callers that drive OLF's outer loops themselves — e.g. the GPU batched
+     * security analysis, which runs one Java outer-loop pass per scenario over a shared network — can obtain
+     * per-scenario outer-loop contexts without reflecting on the package-private
+     * {@link AcOuterLoopContext} constructor, and stay in lockstep with core's setup.
+     */
+    public static List<Pair<AcOuterLoop, AcOuterLoopContext>> createOuterLoopsAndContexts(AcLoadFlowContext context) {
+        List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = context.getParameters().getOuterLoops().stream()
+                .filter(o -> o.isNeeded(context))
+                .map(outerLoop -> Pair.of(outerLoop, new AcOuterLoopContext(context.getNetwork())))
+                .toList();
+        for (var outerLoopAndContext : outerLoopsAndContexts) {
+            outerLoopAndContext.getRight().setLoadFlowContext(context);
+            outerLoopAndContext.getLeft().initialize(outerLoopAndContext.getRight());
+        }
+        return outerLoopsAndContexts;
     }
 
     public static List<AcLoadFlowResult> run(List<LfNetwork> lfNetworks, AcLoadFlowParameters parameters) {
