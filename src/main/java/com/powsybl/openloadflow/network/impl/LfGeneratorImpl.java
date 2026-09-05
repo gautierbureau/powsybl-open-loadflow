@@ -212,7 +212,7 @@ public final class LfGeneratorImpl extends AbstractLfGenerator {
     }
 
     @Override
-    protected Optional<ReactiveLimits> getReactiveLimits() {
+    public Optional<ReactiveLimits> getReactiveLimits() {
         return Optional.of(getGenerator().getReactiveLimits());
     }
 

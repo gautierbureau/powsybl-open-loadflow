@@ -159,7 +159,7 @@ public abstract class AbstractLfGenerator extends AbstractLfInjection implements
         return OptionalDouble.empty();
     }
 
-    protected abstract Optional<ReactiveLimits> getReactiveLimits();
+    public abstract Optional<ReactiveLimits> getReactiveLimits();
 
     @Override
     public double getMinQ() {
