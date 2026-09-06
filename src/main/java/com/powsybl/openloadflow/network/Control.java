@@ -58,7 +58,7 @@ public class Control {
         return qKeys;
     }
 
-    static double[] createReactiveKeys(List<LfBus> controllerBuses, LfGenerator.GeneratorControlType generatorControlType) {
+    public static double[] createReactiveKeys(List<LfBus> controllerBuses, LfGenerator.GeneratorControlType generatorControlType) {
         double[] qKeys = new double[controllerBuses.size()];
         for (int i = 0; i < controllerBuses.size(); i++) {
             LfBus controllerBus = controllerBuses.get(i);
