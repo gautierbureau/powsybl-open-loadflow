@@ -31,6 +31,11 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ReactiveLimitsOuterLoop.class);
 
+    /** {@code OLF_RL_TRACE}: print every PV -> PQ / PQ -> PV switch this loop makes, to stderr. The
+     *  test logging config attaches no appender to this logger, so the decisions are otherwise
+     *  invisible — and they are exactly what a GPU port has to reproduce. */
+    private static final boolean RL_TRACE = System.getenv("OLF_RL_TRACE") != null;
+
     public static final String NAME = "ReactiveLimits";
 
     private static final double REALISTIC_VOLTAGE_MARGIN = 1.02;
@@ -167,6 +172,12 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
 
         }
 
+        if (RL_TRACE) {
+            for (ControllerBusToPqBus b : pvToPqBuses) {
+                System.err.printf("RL_SWITCH PV->PQ bus=%s q=%.9f qLimit=%.9f limitType=%s%n",
+                        b.controllerBus.getId(), b.q, b.qLimit, b.limitType);
+            }
+        }
         LOGGER.info("{} buses switched PV -> PQ ({} bus remains PV)", pvToPqBuses.size(), modifiedRemainingPvBusCount);
 
         return done;
@@ -183,6 +194,11 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
     }
 
     private static boolean switchPqPv(List<PqToPvBus> pqToPvBuses, ContextData contextData, ReportNode reportNode, int maxPqPvSwitch) {
+        if (RL_TRACE) {
+            for (PqToPvBus b : pqToPvBuses) {
+                System.err.printf("RL_SWITCH PQ->PV bus=%s limitType=%s%n", b.controllerBus.getId(), b.limitType);
+            }
+        }
         int pqPvSwitchCount = 0;
 
         boolean log = LOGGER.isTraceEnabled();
