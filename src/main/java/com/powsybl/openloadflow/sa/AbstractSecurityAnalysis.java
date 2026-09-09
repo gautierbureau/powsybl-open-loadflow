@@ -657,7 +657,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 // value AT THE CHECK, before the loop pins and re-solves — comparing that against another
                 // implementation's converged q compares two different moments.
                 for (LfBus b : network.getBuses()) {
-                    if (b.getId().startsWith(System.getenv("OLF_Q_PROBE"))) {
+                    if (java.util.Arrays.stream(System.getenv("OLF_Q_PROBE").split(","))
+                            .anyMatch(b.getId()::startsWith)) {
                         double q = b.getQ().eval() + b.getLoadTargetQ();
                         // DISTR_Q shares the DEVIATION from targetQ, not q itself: its target is
                         // (qPct-1)*targetQ_i + qPct*sum_j targetQ_j (AcTargetVector), so two members
@@ -666,6 +667,12 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                                 + "qPct=%.9f maxQ=%.9f overMaxBy=%.9f%n",
                                 lfContingency.getId(), b.getId(), q, b.getGenerationTargetQ(), b.getLoadTargetQ(),
                                 b.getRemoteControlReactivePercent(), b.getMaxQ(), q - b.getMaxQ());
+                        // A CURVE reactive limit is a function of the GENERATOR's targetP, so a limit
+                        // that disagrees between arms is a P disagreement, not a limit-model one.
+                        for (var g : b.getGenerators()) {
+                            System.err.printf("Q_PROBE_CPU_GEN ctg=%s bus=%s gen=%s targetP=%.9f minQ=%.9f maxQ=%.9f%n",
+                                    lfContingency.getId(), b.getId(), g.getId(), g.getTargetP(), g.getMinQ(), g.getMaxQ());
+                        }
                     }
                 }
             }
