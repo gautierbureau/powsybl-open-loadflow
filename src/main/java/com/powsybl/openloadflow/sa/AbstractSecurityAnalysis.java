@@ -659,8 +659,13 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 for (LfBus b : network.getBuses()) {
                     if (b.getId().startsWith(System.getenv("OLF_Q_PROBE"))) {
                         double q = b.getQ().eval() + b.getLoadTargetQ();
-                        System.err.printf("Q_PROBE_CPU ctg=%s bus=%s q=%.9f maxQ=%.9f overMaxBy=%.9f%n",
-                                lfContingency.getId(), b.getId(), q, b.getMaxQ(), q - b.getMaxQ());
+                        // DISTR_Q shares the DEVIATION from targetQ, not q itself: its target is
+                        // (qPct-1)*targetQ_i + qPct*sum_j targetQ_j (AcTargetVector), so two members
+                        // with different targetQ legitimately settle at different q. Print the parts.
+                        System.err.printf("Q_PROBE_CPU ctg=%s bus=%s q=%.9f genTgtQ=%.9f loadTgtQ=%.9f "
+                                + "qPct=%.9f maxQ=%.9f overMaxBy=%.9f%n",
+                                lfContingency.getId(), b.getId(), q, b.getGenerationTargetQ(), b.getLoadTargetQ(),
+                                b.getRemoteControlReactivePercent(), b.getMaxQ(), q - b.getMaxQ());
                     }
                 }
             }
