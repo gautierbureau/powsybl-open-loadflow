@@ -101,6 +101,9 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         return reportNode;
     }
 
+    /** {@code OLF_OL_TRACE}: print every outer-loop CHECK and its status. */
+    private static final boolean OL_TRACE = System.getenv("OLF_OL_TRACE") != null;
+
     private void runOuterLoop(AcOuterLoop outerLoop, AcOuterLoopContext outerLoopContext, AcSolver solver, RunningContext runningContext, boolean checkUnrealistic) {
         ReportNode olReportNode = Reports.createOuterLoopReporter(outerLoopContext.getNetwork().getReportNode(), outerLoop.getName());
 
@@ -115,6 +118,13 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
             outerLoopContext.setLastSolverResult(runningContext.lastSolverResult);
             outerLoopResult = outerLoop.check(outerLoopContext, olReportNode);
             runningContext.lastOuterLoopResult = outerLoopResult;
+            if (OL_TRACE) {
+                // Which loop reports UNSTABLE, and therefore how many times the solver is re-run, IS the
+                // trajectory: two implementations that agree on every loop's DECISION still diverge if one
+                // of them performs a different number of re-solves.
+                System.err.printf("OL_CHECK loop=%s iteration=%d status=%s%n",
+                        outerLoop.getName(), outerLoopContext.getIteration(), outerLoopResult.status());
+            }
 
             if (outerLoopResult.status() == OuterLoopStatus.UNSTABLE) {
                 LOGGER.debug("Start outer loop '{}' iteration {}", outerLoop.getName(), runningContext.outerLoopTotalIterations);
