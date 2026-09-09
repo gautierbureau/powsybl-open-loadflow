@@ -173,6 +173,8 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
         }
 
         if (RL_TRACE) {
+            System.err.printf("RL_PASS switchPvPq candidates=%d remainingPvBusCount=%d%n",
+                    pvToPqBuses.size(), remainingPvBusCount);
             for (ControllerBusToPqBus b : pvToPqBuses) {
                 System.err.printf("RL_SWITCH PV->PQ bus=%s q=%.9f qLimit=%.9f limitType=%s%n",
                         b.controllerBus.getId(), b.q, b.qLimit, b.limitType);
