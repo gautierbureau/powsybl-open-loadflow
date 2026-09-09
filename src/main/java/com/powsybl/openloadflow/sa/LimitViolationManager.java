@@ -281,19 +281,41 @@ public class LimitViolationManager {
             if (violation2.getLimit() == violation1.getLimit()) {
                 // the limit violated is the same: we consider the violations equivalent if the new value is close to previous one.
                 if (isFlowViolation(violation2)) {
-                    return Math.abs(violation2.getValue()) <= Math.abs(violation1.getValue()) * (1 + violationsParameters.getFlowProportionalThreshold());
+                    return Math.abs(violation2.getValue()) <= Math.abs(violation1.getValue())
+                            * (1 + violationsParameters.getFlowProportionalThreshold() + EQUALITY_EPSILON);
                 } else if (violation2.getLimitType() == LimitViolationType.HIGH_VOLTAGE) {
                     double value = Math.min(violationsParameters.getHighVoltageAbsoluteThreshold(), violation1.getValue() * violationsParameters.getHighVoltageProportionalThreshold());
-                    return violation2.getValue() <= violation1.getValue() + value;
+                    return violation2.getValue() <= violation1.getValue() + value + equalityMargin(violation1.getValue());
                 } else if (violation2.getLimitType() == LimitViolationType.LOW_VOLTAGE) {
                     return violation2.getValue() >= violation1.getValue() - Math.min(violationsParameters.getLowVoltageAbsoluteThreshold(),
-                        violation1.getValue() * violationsParameters.getLowVoltageProportionalThreshold());
+                        violation1.getValue() * violationsParameters.getLowVoltageProportionalThreshold()) - equalityMargin(violation1.getValue());
                 } else {
                     return false;
                 }
             }
         }
         return false;
+    }
+
+    /**
+     * Relative tolerance below which a post-contingency value counts as EQUAL to its
+     * pre-contingency reference rather than as an increase.
+     *
+     * <p>The increased-violations thresholds default to 0.0 for voltage, which turns the
+     * comparisons above into exact floating-point equality tests: a post-contingency value one ULP
+     * below its base value is reported as an increased LOW_VOLTAGE violation. For a contingency
+     * whose outage is electrically far from the bus, whether the last bit lands above or below the
+     * base value is decided by the order of operations in the load flow, not by the network — so
+     * the same case reported by two solvers, or by the same solver after an unrelated change,
+     * flips. 1e-12 relative is far below any meaningful voltage difference and far above the
+     * accumulated rounding of a converged load flow, so it separates "the same value" from "a
+     * smaller value" without weakening any real comparison: a genuine 1e-9 relative difference
+     * still reports.
+     */
+    private static final double EQUALITY_EPSILON = 1e-12;
+
+    private static double equalityMargin(double referenceValue) {
+        return Math.abs(referenceValue) * EQUALITY_EPSILON;
     }
 
     private static boolean isFlowViolation(LimitViolation limit) {
