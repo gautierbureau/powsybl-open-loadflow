@@ -651,6 +651,19 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
         if (status.equals(PostContingencyComputationStatus.CONVERGED)) {
             // update network result
+            if (System.getenv("OLF_Q_PROBE") != null) {
+                // The FINAL post-contingency q at a controller bus, computed exactly as
+                // ReactiveLimitsOuterLoop.checkControllerBus does. The q printed by the RL trace is the
+                // value AT THE CHECK, before the loop pins and re-solves — comparing that against another
+                // implementation's converged q compares two different moments.
+                for (LfBus b : network.getBuses()) {
+                    if (b.getId().startsWith(System.getenv("OLF_Q_PROBE"))) {
+                        double q = b.getQ().eval() + b.getLoadTargetQ();
+                        System.err.printf("Q_PROBE_CPU ctg=%s bus=%s q=%.9f maxQ=%.9f overMaxBy=%.9f%n",
+                                lfContingency.getId(), b.getId(), q, b.getMaxQ(), q - b.getMaxQ());
+                    }
+                }
+            }
             postContingencyNetworkResult.update();
 
             // detect violations
