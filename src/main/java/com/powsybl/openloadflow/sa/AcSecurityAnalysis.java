@@ -107,6 +107,9 @@ public class AcSecurityAnalysis extends AbstractSecurityAnalysis<AcVariableType,
 
     @Override
     protected void afterPreContingencySimulation(AcLoadFlowParameters parameters) {
+        if (System.getenv("OLF_RL_TRACE") != null) {
+            System.err.println("RL_MARK base load flow finished — everything after this is per-contingency");
+        }
         // in some post-contingency computation, it does not remain elements to participate to slack distribution.
         // in that case, no exception should be thrown. If parameters were configured to throw, reconfigure to FAIL.
         // (the contingency will be marked as not converged)
