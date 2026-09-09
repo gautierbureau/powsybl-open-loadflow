@@ -52,6 +52,13 @@ public class DistributedSlackOuterLoop
         return NAME;
     }
 
+    /** {@code OLF_DS_TRACE}: print the mismatch this loop sees and the amount it distributes on
+     *  every pass, to stderr. The stopping rule is a TOLERANCE (slackBusPMaxMismatch, 1 MW by
+     *  default), so the converged operating point depends on the sequence of passes, not only on
+     *  the network — and that sequence is exactly what another implementation has to reproduce.
+     *  The test logging config attaches no appender to this logger. */
+    private static final boolean DS_TRACE = System.getenv("OLF_DS_TRACE") != null;
+
     @Override
     public void initialize(AcOuterLoopContext context) {
         context.setData(new DistributedSlackContextData());
@@ -92,6 +99,11 @@ public class DistributedSlackOuterLoop
         double absMismatch = Math.abs(slackBusActivePowerMismatch);
         boolean shouldDistributeSlack = absMismatch > slackBusPMaxMismatch / PerUnit.SB && absMismatch > ActivePowerDistribution.P_RESIDUE_EPS;
 
+        if (DS_TRACE) {
+            System.err.printf("DS_PASS sc=%d mismatch=%.9f threshold=%.9f distribute=%b%n",
+                    lfScNetwork.getNumSC(), slackBusActivePowerMismatch,
+                    slackBusPMaxMismatch / PerUnit.SB, shouldDistributeSlack);
+        }
         if (!shouldDistributeSlack) {
             LOGGER.debug("Already balanced");
             return new OuterLoopResult(this, OuterLoopStatus.STABLE);
@@ -107,6 +119,11 @@ public class DistributedSlackOuterLoop
         );
         double remainingMismatch = resultWbh.remainingMismatch();
         double distributedActivePower = slackBusActivePowerMismatch - remainingMismatch;
+        if (DS_TRACE) {
+            System.err.printf("DS_DIST sc=%d distributed=%.9f remaining=%.9f movedBuses=%b iterations=%d%n",
+                    lfScNetwork.getNumSC(), distributedActivePower, remainingMismatch,
+                    resultWbh.movedBuses(), result.iteration());
+        }
         if (Math.abs(remainingMismatch) > slackBusPMaxMismatch / PerUnit.SB) {
             Reports.reportMismatchDistributionFailure(iterationReportNode, remainingMismatch * PerUnit.SB);
         } else {

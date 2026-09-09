@@ -106,6 +106,16 @@ public final class ActivePowerDistribution {
         var participatingBuses = filterParticipatingBuses(buses);
         PreviousStateInfo previousStateInfo = step.resetToInitialState(participatingBuses, referenceGenerator);
         double remainingMismatch = activePowerMismatch + previousStateInfo.previousMismatch();
+        if (System.getenv("OLF_DS_TRACE") != null) {
+            // resetToInitialState puts every participant back to its INITIAL targetP -- the value from
+            // the ORIGINAL network, NOT the base-converged one -- and previousMismatch adds back
+            // whatever that undid. So the amount actually water-filled is the contingency mismatch PLUS
+            // everything the base load flow had distributed, re-derived from the original anchor. With
+            // clamping, that is not the same function as filling the contingency mismatch alone.
+            System.err.printf("DS_RUN mismatch=%.9f previousMismatch=%.9f effective=%.9f participants=%d%n",
+                    activePowerMismatch, previousStateInfo.previousMismatch(), remainingMismatch,
+                    participatingBuses.size());
+        }
         List<ParticipatingElement> participatingElements = step.getParticipatingElements(participatingBuses, remainingMismatch);
 
         int iteration = 0;
