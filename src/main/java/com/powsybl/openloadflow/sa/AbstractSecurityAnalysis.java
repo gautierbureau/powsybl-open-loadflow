@@ -74,6 +74,19 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
     protected static final Logger LOGGER = LoggerFactory.getLogger(AbstractSecurityAnalysis.class);
 
+    /** {@code OLF_SA_PROFILE=1}: split the per-contingency wall time into the four things the engine
+     *  does around the simulation itself — building the LfContingency (which runs the connectivity
+     *  analysis), applying it, pre-distributing the lost active power, and restoring the base network
+     *  state. Printed once per component after the contingency loop. Off by default and read once, so
+     *  the timers cost nothing normally. */
+    private static final boolean SA_PROFILE = System.getenv("OLF_SA_PROFILE") != null;
+
+    private static final java.util.concurrent.atomic.LongAdder TO_LF_NS = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.LongAdder APPLY_NS = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.LongAdder LOSS_NS = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.LongAdder SIM_NS = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.LongAdder RESTORE_NS = new java.util.concurrent.atomic.LongAdder();
+
     protected final Network network;
 
     protected final MatrixFactory matrixFactory;
@@ -565,7 +578,12 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 Iterator<PropagatedContingency> contingencyIt = propagatedContingencies.iterator();
                 while (contingencyIt.hasNext() && !Thread.currentThread().isInterrupted()) {
                     PropagatedContingency propagatedContingency = contingencyIt.next();
-                    propagatedContingency.toLfContingency(lfNetwork)
+                    long tToLf = System.nanoTime();
+                    Optional<LfContingency> lfContingencyOpt = propagatedContingency.toLfContingency(lfNetwork);
+                    if (SA_PROFILE) {
+                        TO_LF_NS.add(System.nanoTime() - tToLf);
+                    }
+                    lfContingencyOpt
                             .ifPresent(lfContingency -> processContingency(lfNetwork, securityAnalysisParameters,
                                 limitReductions, contingencyActivePowerLossDistribution,
                                 networkReportNode, lfContingency, p, networkState,
@@ -575,6 +593,14 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                                 preContingencyNetworkResult, postContingencyResults,
                                 contingencyParametersResetter, operatorStrategiesByContingencyId,
                                 operatorStrategyResults, contingencyIt));
+                }
+
+                if (SA_PROFILE) {
+                    System.err.printf("SA_PROFILE toLfContingency=%d ms apply=%d ms lossDistribution=%d ms "
+                                    + "runPostContingencySimulation=%d ms networkState.restore=%d ms%n",
+                            TO_LF_NS.sum() / 1_000_000, APPLY_NS.sum() / 1_000_000, LOSS_NS.sum() / 1_000_000,
+                            SIM_NS.sum() / 1_000_000, RESTORE_NS.sum() / 1_000_000);
+                    System.err.println("SA_PROFILE detectViolations " + LimitViolationManager.profile());
                 }
 
                 // Restore parameters in case they are used for another component
@@ -792,15 +818,23 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             applySpecificContingencyParameters(context.getParameters(), contingencyLoadFlowParameters, loadFlowParameters, contingencyOpenLoadFlowParameters);
         }
 
+        long tApply = System.nanoTime();
         lfContingency.apply(loadFlowParameters.getBalanceType());
 
+        long tLoss = System.nanoTime();
         double preDistributedActivePower = contingencyActivePowerLossDistribution.run(lfNetwork, lfContingency,
             propagatedContingency.getContingency(), securityAnalysisParameters, contingencyLoadFlowParameters, postContSimReportNode);
 
+        long tSim = System.nanoTime();
         var postContingencyResult = runPostContingencySimulation(lfNetwork, context, propagatedContingency.getContingency(),
             lfContingency, preContingencyLimitViolationManager,
             securityAnalysisParameters,
             preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
+        if (SA_PROFILE) {
+            APPLY_NS.add(tLoss - tApply);
+            LOSS_NS.add(tSim - tLoss);
+            SIM_NS.add(System.nanoTime() - tSim);
+        }
         postContingencyResults.add(postContingencyResult);
 
         if (contingencyLoadFlowParameters != null &&
@@ -847,7 +881,11 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         }
         if (contingencyIt.hasNext()) {
             // restore base state
+            long tRestore = System.nanoTime();
             networkState.restore();
+            if (SA_PROFILE) {
+                RESTORE_NS.add(System.nanoTime() - tRestore);
+            }
             if (contingencyLoadFlowParameters != null &&
                 Objects.equals(ContingencyLoadFlowParameters.Scope.CONTINGENCY_AND_OPERATOR_STRATEGY, contingencyLoadFlowParameters.getScope())) {
                 // reset parameters
