@@ -84,14 +84,19 @@ public class LimitViolationManager {
         // Detect violation limits on buses
         network.getBuses().stream().filter(b -> !b.isDisabled()).forEach(this::detectBusViolations);
 
-        // Detect voltage angle limits
-        network.getVoltageAngleLimits().stream()
-                .filter(limit -> !limit.getFrom().isDisabled() && !limit.getTo().isDisabled())
-                .forEach(this::detectVoltageAngleLimitViolations);
+        detectVoltageAngleViolations(network);
         if (PROFILE) {
             BRANCH_NS.add(tBus - tBranch);
             BUS_NS.add(System.nanoTime() - tBus);
         }
+    }
+
+    /** Detect the voltage-angle limit violations. A handful per network and they need only bus angles,
+     *  so an accelerated branch/bus detector leaves them here rather than reproducing them. */
+    public void detectVoltageAngleViolations(LfNetwork network) {
+        network.getVoltageAngleLimits().stream()
+                .filter(limit -> !limit.getFrom().isDisabled() && !limit.getTo().isDisabled())
+                .forEach(this::detectVoltageAngleLimitViolations);
     }
 
     /** {@code OLF_LVM_PROFILE=1}: split violation detection into the SCAN (walking every branch's
@@ -142,11 +147,16 @@ public class LimitViolationManager {
         }
     }
 
-    private void addBranchLimitViolation(LimitViolation limitViolation) {
+    /** Feed in a branch violation detected elsewhere — same key, same reference filtering as
+     *  {@link #detectViolations}. An accelerated detector (the GPU security analysis scans the limits
+     *  as flat arrays, and eventually on the device) still reports through this manager, so the
+     *  increased-violations filtering is never a second implementation. */
+    public void addBranchLimitViolation(LimitViolation limitViolation) {
         addLimitViolation(limitViolation, Pair.of(getSubjectIdSide(limitViolation), limitViolation.getOperationalLimitsGroupId()));
     }
 
-    private void addBusLimitViolation(LimitViolation limitViolation, LfBus bus) {
+    /** Feed in a bus violation detected elsewhere. See {@link #addBranchLimitViolation}. */
+    public void addBusLimitViolation(LimitViolation limitViolation, LfBus bus) {
         addLimitViolation(limitViolation, Pair.of(bus.getId(), limitViolation.getOperationalLimitsGroupId()));
     }
 
@@ -237,7 +247,10 @@ public class LimitViolationManager {
         }
     }
 
-    private static LimitViolation createLimitViolation(LfBranch branch, String operationalLimitsGroupId, LfBranch.LfLimit temporaryLimit,
+    /** Build the violation an exceeded branch limit reports. Every field except {@code value} comes
+     *  from the branch and the limit, which is what lets an accelerated detector carry only
+     *  {@code (limit entry, value)} and rebuild the violation here rather than re-implement it. */
+    public static LimitViolation createLimitViolation(LfBranch branch, String operationalLimitsGroupId, LfBranch.LfLimit temporaryLimit,
                                                        LimitViolationType type, double scale, double value,
                                                        TwoSides side) {
         return new LimitViolationBuilder()
@@ -263,28 +276,28 @@ public class LimitViolationManager {
         double busV = bus.getV();
         if (!Double.isNaN(bus.getHighVoltageLimit()) && busV > bus.getHighVoltageLimit()) {
             long t = PROFILE ? System.nanoTime() : 0;
-            LimitViolation limitViolationHigh = new LimitViolationBuilder()
-                    .subject(bus.getVoltageLevelId())
-                    .type(LimitViolationType.HIGH_VOLTAGE)
-                    .limit(bus.getHighVoltageLimit() * scale)
-                    .value(busV * scale)
-                    .violationLocation(bus.getViolationLocation())
-                    .build();
-            addBusLimitViolation(limitViolationHigh, bus);
+            addBusLimitViolation(createBusLimitViolation(bus, LimitViolationType.HIGH_VOLTAGE,
+                    bus.getHighVoltageLimit() * scale, busV * scale), bus);
             reported(t);
         }
         if (!Double.isNaN(bus.getLowVoltageLimit()) && busV < bus.getLowVoltageLimit()) {
             long t = PROFILE ? System.nanoTime() : 0;
-            LimitViolation limitViolationLow = new LimitViolationBuilder()
-                    .subject(bus.getVoltageLevelId())
-                    .type(LimitViolationType.LOW_VOLTAGE)
-                    .limit(bus.getLowVoltageLimit() * scale)
-                    .value(busV * scale)
-                    .violationLocation(bus.getViolationLocation())
-                    .build();
-            addBusLimitViolation(limitViolationLow, bus);
+            addBusLimitViolation(createBusLimitViolation(bus, LimitViolationType.LOW_VOLTAGE,
+                    bus.getLowVoltageLimit() * scale, busV * scale), bus);
             reported(t);
         }
+    }
+
+    /** Build the violation an exceeded bus voltage limit reports — the bus counterpart of
+     *  {@link #createLimitViolation}, with the limit and value already scaled to nominal V. */
+    public static LimitViolation createBusLimitViolation(LfBus bus, LimitViolationType type, double limit, double value) {
+        return new LimitViolationBuilder()
+                .subject(bus.getVoltageLevelId())
+                .type(type)
+                .limit(limit)
+                .value(value)
+                .violationLocation(bus.getViolationLocation())
+                .build();
     }
 
     /**
