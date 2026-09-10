@@ -85,8 +85,35 @@ public class BusState extends BusDcState {
         return new LoadState();
     }
 
+    /** {@code OLF_BUSSTATE_PROFILE=1}: accumulate where a bus-state restore spends its time. Read and
+     *  reset with {@link #profile()}. Off by default and read once, so the timers cost nothing normally. */
+    private static final boolean PROFILE = System.getenv("OLF_BUSSTATE_PROFILE") != null;
+
+    private static final java.util.concurrent.atomic.LongAdder SUPER_NS = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.LongAdder VC_NS = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.LongAdder REST_NS = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.LongAdder CALLS = new java.util.concurrent.atomic.LongAdder();
+
+    /** "calls=N super=X ms recomputeTargetQ=Y ms rest=Z ms", then resets. */
+    public static String profile() {
+        String out = "calls=" + CALLS.sum()
+                + " super(BusDcState)=" + SUPER_NS.sum() / 1_000_000 + " ms"
+                + " setGeneratorVoltageControlEnabledAndRecomputeTargetQ=" + VC_NS.sum() / 1_000_000 + " ms"
+                + " rest=" + REST_NS.sum() / 1_000_000 + " ms"
+                + " | inside super: " + BusDcState.profile();
+        CALLS.reset();
+        SUPER_NS.reset();
+        VC_NS.reset();
+        REST_NS.reset();
+        return out;
+    }
+
     @Override
     public void restore() {
+        if (PROFILE) {
+            profiledRestore();
+            return;
+        }
         super.restore();
         element.setAngle(angle);
         element.setV(voltage);
@@ -115,6 +142,46 @@ public class BusState extends BusDcState {
         }
         element.getGenerators().forEach(g -> g.setGeneratorControlType(controlTypeOf(g.getId())));
         element.setQLimitType(qLimitType);
+    }
+
+    /** Same as {@link #restore()}, timed in three parts. */
+    private void profiledRestore() {
+        long t0 = System.nanoTime();
+        super.restore();
+        long t1 = System.nanoTime();
+        element.setAngle(angle);
+        element.setV(voltage);
+        element.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(voltageControlEnabled);
+        long t2 = System.nanoTime();
+        if (isGenerationTargetQFrozen) {
+            element.freezeGenerationTargetQAndDisableGeneratorVoltageControl(generationTargetQ);
+        }
+        element.setGeneratorReactivePowerControlEnabled(reactiveControlEnabled);
+        if (shuntVoltageControlEnabled != null) {
+            element.getControllerShunt().orElseThrow().setVoltageControlEnabled(shuntVoltageControlEnabled);
+        }
+        if (!Double.isNaN(controllerShuntB)) {
+            element.getControllerShunt().orElseThrow().setB(controllerShuntB);
+        }
+        if (!Double.isNaN(controllerShuntG)) {
+            element.getControllerShunt().orElseThrow().setG(controllerShuntG);
+        }
+        if (!Double.isNaN(shuntB)) {
+            element.getShunt().orElseThrow().setB(shuntB);
+        }
+        if (!Double.isNaN(shuntG)) {
+            element.getShunt().orElseThrow().setG(shuntG);
+        }
+        if (!Double.isNaN(svcShuntB)) {
+            element.getSvcShunt().orElseThrow().setB(svcShuntB);
+        }
+        element.getGenerators().forEach(g -> g.setGeneratorControlType(controlTypeOf(g.getId())));
+        element.setQLimitType(qLimitType);
+        long t3 = System.nanoTime();
+        SUPER_NS.add(t1 - t0);
+        VC_NS.add(t2 - t1);
+        REST_NS.add(t3 - t2);
+        CALLS.increment();
     }
 
     /** The saved control type for {@code generatorId}, or null when it was not saved — the exact
