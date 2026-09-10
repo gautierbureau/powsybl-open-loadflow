@@ -137,6 +137,19 @@ public class NewtonRaphson extends AbstractAcSolver {
             AcSolverUtil.updateNetwork(network, equationSystem);
         }
 
+        if (System.getenv("OLF_NR_TRACE") != null) {
+            // How DEEP this solve converged, not just that it did. The slack bus absorbs the
+            // network's ACCUMULATED imbalance, so two states that both satisfy the criterion can
+            // still report slack mismatches an order of magnitude apart.
+            double ssq = 0;
+            double inf = 0;
+            for (double v : equationVector.getArray()) {
+                ssq += v * v;
+                inf = Math.max(inf, Math.abs(v));
+            }
+            System.err.printf("NR_EXIT iters=%d status=%s ||F||2=%.9e ||F||inf=%.9e%n",
+                    iterations.getValue(), status, Math.sqrt(ssq), inf);
+        }
         Map<Integer, Double> slackBusActivePowerMismatch = new TreeMap<>();
         for (LfSynchronousNetwork lfScNetwork : network.getSynchronousNetworks()) {
             slackBusActivePowerMismatch.put(lfScNetwork.getNumSC(), lfScNetwork.getSlackBuses().stream().mapToDouble(LfBus::getMismatchP).sum());

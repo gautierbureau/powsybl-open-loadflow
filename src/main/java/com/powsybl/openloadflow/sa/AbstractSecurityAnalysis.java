@@ -830,6 +830,16 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             lfContingency, preContingencyLimitViolationManager,
             securityAnalysisParameters,
             preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
+        if (System.getenv("OLF_DS_TARGET_DUMP") != null) {
+            // Every participating bus's net P target at the END of the contingency, for a direct
+            // comparison against the device's distributed targets. Double.toString round-trips.
+            for (LfBus b : lfNetwork.getBuses()) {
+                if (b.isParticipating() && !b.isDisabled() && !b.isFictitious()) {
+                    System.err.println("CPU_DS_TARGET ctg=" + propagatedContingency.getContingency().getId()
+                            + " bus=" + b.getId() + " target=" + Double.toString(b.getTargetP()));
+                }
+            }
+        }
         if (SA_PROFILE) {
             APPLY_NS.add(tLoss - tApply);
             LOSS_NS.add(tSim - tLoss);
