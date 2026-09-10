@@ -117,6 +117,10 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
             outerLoopContext.setOuterLoopTotalIterations(runningContext.outerLoopTotalIterations);
             outerLoopContext.setLastSolverResult(runningContext.lastSolverResult);
             outerLoopResult = outerLoop.check(outerLoopContext, olReportNode);
+            if (System.getenv("OLF_OL_TRACE") != null) {
+                System.err.printf("OL_CHECK %-34s iter=%d -> %s%n",
+                        outerLoop.getName(), outerLoopContext.getIteration(), outerLoopResult.status());
+            }
             runningContext.lastOuterLoopResult = outerLoopResult;
             if (OL_TRACE) {
                 // Which loop reports UNSTABLE, and therefore how many times the solver is re-run, IS the
