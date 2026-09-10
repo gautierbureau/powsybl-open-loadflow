@@ -146,7 +146,15 @@ public abstract class AbstractLfGenerator extends AbstractLfInjection implements
 
     @Override
     public void setGeneratorControlType(GeneratorControlType generatorControlType) {
-        this.generatorControlType = Objects.requireNonNull(generatorControlType);
+        Objects.requireNonNull(generatorControlType);
+        if (this.generatorControlType != generatorControlType) {
+            this.generatorControlType = generatorControlType;
+            if (bus != null) {
+                for (LfNetworkListener listener : bus.getNetwork().getListeners()) {
+                    listener.onGeneratorControlTypeChange(this, generatorControlType);
+                }
+            }
+        }
     }
 
     @Override
