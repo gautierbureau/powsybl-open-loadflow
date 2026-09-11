@@ -255,7 +255,7 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
                                                context.getTargetVector(),
                                                context.getEquationVector());
 
-        List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = createOuterLoopsAndContexts(context);
+        List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = engineOuterLoopsAndContexts(context);
         List<AcOuterLoop> outerLoops = outerLoopsAndContexts.stream().map(Pair::getLeft).toList();
 
         if (context.getParameters().isDetailedReport()) {
@@ -387,6 +387,15 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
      * per-scenario outer-loop contexts without reflecting on the package-private
      * {@link AcOuterLoopContext} constructor, and stay in lockstep with core's setup.
      */
+    /**
+     * The (outer loop, context) pairs THIS engine will drive. Overridable so an engine backed by a
+     * solver that already runs some of those loops itself can drop them here — running them in both
+     * places applies them twice. The static factory below stays the shared construction path.
+     */
+    protected List<Pair<AcOuterLoop, AcOuterLoopContext>> engineOuterLoopsAndContexts(AcLoadFlowContext context) {
+        return createOuterLoopsAndContexts(context);
+    }
+
     public static List<Pair<AcOuterLoop, AcOuterLoopContext>> createOuterLoopsAndContexts(AcLoadFlowContext context) {
         return createOuterLoopsAndContexts(context, true);
     }
