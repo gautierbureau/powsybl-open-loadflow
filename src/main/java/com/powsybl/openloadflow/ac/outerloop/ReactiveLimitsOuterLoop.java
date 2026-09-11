@@ -84,6 +84,16 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
         }
     }
 
+    /** The PV->PQ switch budget and the reactive-mismatch band this loop switches outside of.
+     *  Exposed so an alternative engine can drive the same loop with the run's own settings. */
+    public int getMaxPqPvSwitch() {
+        return maxPqPvSwitch;
+    }
+
+    public double getMaxReactivePowerMismatch() {
+        return maxReactivePowerMismatch;
+    }
+
     @Override
     public String getName() {
         return NAME;
