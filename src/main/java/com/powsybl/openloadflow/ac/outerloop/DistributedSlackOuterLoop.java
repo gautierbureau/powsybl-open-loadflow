@@ -59,6 +59,12 @@ public class DistributedSlackOuterLoop
      *  The test logging config attaches no appender to this logger. */
     private static final boolean DS_TRACE = System.getenv("OLF_DS_TRACE") != null;
 
+    /** The band this loop distributes outside of, in MW. Exposed so an alternative engine can drive
+     *  the same loop with the run's own tolerance rather than a guessed one. */
+    public double getSlackBusPMaxMismatch() {
+        return slackBusPMaxMismatch;
+    }
+
     @Override
     public void initialize(AcOuterLoopContext context) {
         context.setData(new DistributedSlackContextData());
