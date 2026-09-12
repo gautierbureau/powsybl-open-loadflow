@@ -12,12 +12,16 @@ import com.powsybl.contingency.ContingencyContext;
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Generator;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.TwoWindingsTransformer;
 import com.powsybl.iidm.network.extensions.SecondaryVoltageControlAdder;
+import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
 import com.powsybl.loadflow.LoadFlow;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
+import com.powsybl.openloadflow.network.EurostagFactory;
+import com.powsybl.openloadflow.network.VoltageControlNetworkFactory;
 import com.powsybl.sensitivity.SensitivityAnalysis;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
 import com.powsybl.sensitivity.SensitivityAnalysisResult;
@@ -26,13 +30,19 @@ import com.powsybl.sensitivity.SensitivityFactor;
 import com.powsybl.sensitivity.SensitivityFunctionType;
 import com.powsybl.sensitivity.SensitivityVariableType;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -264,8 +274,18 @@ class AcSensitivityAnalysisAdjointTest {
             assertEquals(sKv, theta, 1e-12 * Math.abs(sKv) + 1e-13,
                     "runAdjoint vs forward closed-loop S for " + f0);
 
+            // A loose PHYSICAL sanity check, not the precision gate — that is the 1e-12 comparison against the
+            // forward S above. This re-solve FD cannot be made tighter by shrinking the step, and gets WORSE
+            // when you try: the SVC outer loop exits on its own pilot tolerance, so a small perturbation
+            // leaves the controllers not fully re-equalised and measures a partially coordinated response.
+            // Swept in SvcFdStepProbe: B6's FD settles at 0.80828 as dV -> 0 while the closed-loop
+            // sensitivity is 0.80883, and at dV = 0.1 the FD reads 0.80882 — closest at the LARGER step.
+            // AcSvcPilotPointSensitivityTest#testSvcClosedLoopSensitivityIeee14 checks the same closed-loop
+            // sensitivity against the same kind of re-solve and allows 5e-2 relative for exactly this reason;
+            // the worst residual over the three buses here is ~7e-4 relative (B4), so 1e-3 is still fifty
+            // times tighter than the established bar.
             double fdKv = (busVoltage(nAfter, f0) - busVoltage(nBefore, f0)) / (2 * dV);
-            assertEquals(fdKv, theta, 1e-4 * (Math.abs(fdKv) + 1e-2),   // measured FD residual max ~1.6e-5
+            assertEquals(fdKv, theta, 1e-3 * (Math.abs(fdKv) + 1e-2),
                     "runAdjoint vs re-solve FD for " + f0);
 
             if (f0.equals(pilot)) {
@@ -652,6 +672,404 @@ class AcSensitivityAnalysisAdjointTest {
             assertTrue(Math.abs(theta.get(lines.get(2))) > 1e-6,
                     "expected a non-trivial θ̄ on a non-first variable, got " + theta.get(lines.get(2)));
         }
+    }
+
+    /**
+     * A ratio tap changer's target voltage must be differentiable in REVERSE mode, and to the same number the
+     * forward path returns.
+     *
+     * <p>It was not, and the reason was invisible from outside: every transformer voltage control mode disables
+     * the control before rounding the taps, so the converged context the adjoint reuses holds no active
+     * BRANCH_TARGET_V equation and {@code fillRhs} left the column empty — theta_bar came back an unmarked
+     * 0.0, indistinguishable from a changer with no authority. Forward mode never saw it because
+     * {@code analyzeContingencySet} rebuilds "the AC equation system obtained just before the transformer steps
+     * rounding" before its own solve. runAdjoint now does the same on the cached context.</p>
+     *
+     * <p>The oracle is the forward sensitivity over the same factors, contracted with the same cotangents:
+     * distinct weights on three monitored buses, so every column of S has to be right, not just their sum. The
+     * gate would pass vacuously on the old behaviour if the expected value were zero — hence the explicit
+     * non-triviality assertion.</p>
+     */
+    @ParameterizedTest
+    @EnumSource(OpenLoadFlowParameters.TransformerTargetVoltageAdjointMode.class)
+    void runAdjointMatchesForwardForATransformerTargetVoltage(OpenLoadFlowParameters.TransformerTargetVoltageAdjointMode adjointMode) {
+        Network network = VoltageControlNetworkFactory.createNetworkWithT2wt();
+        TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("T2wT");
+        t2wt.getRatioTapChanger()
+                .setTargetDeadband(0)
+                .setRegulating(true)
+                .setTapPosition(0)
+                .setRegulationTerminal(t2wt.getTerminal2())
+                .setTargetV(34.0);
+
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        lfp.setTransformerVoltageControlOn(true);
+        OpenLoadFlowParameters.get(lfp).setTransformerTargetVoltageAdjointMode(adjointMode);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        SensitivityFunctionType ft = SensitivityFunctionType.BUS_VOLTAGE;
+        SensitivityVariableType vt = SensitivityVariableType.BUS_TARGET_VOLTAGE;
+        List<String> buses = List.of("BUS_1", "BUS_2", "BUS_3");
+        List<String> variables = List.of("T2wT");
+        double[] w = {0.7, -1.3, 0.4};
+
+        Map<String, Double> cot = new HashMap<>();
+        for (int i = 0; i < buses.size(); i++) {
+            cot.put(AcSensitivityAnalysis.functionCotangentKey(ft, buses.get(i)), w[i]);
+        }
+
+        List<SensitivityFactor> full = new ArrayList<>();
+        for (String v : variables) {
+            for (String f : buses) {
+                full.add(new SensitivityFactor(ft, f, vt, v, false, ContingencyContext.all()));
+            }
+        }
+        List<AcSensitivityAnalysis.AdjointBlock> blocks = adjointBlocks(List.of(ft), List.of(buses), vt, variables);
+
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+        String variantId = network.getVariantManager().getWorkingVariantId();
+
+        Map<String, Double> theta = analysis.runAdjoint(network, variantId, List.of(), blocks, cot);
+
+        SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, full,
+                new SensitivityAnalysisRunParameters().setParameters(sensiParams));
+        double expected = 0;
+        for (int i = 0; i < buses.size(); i++) {
+            expected += w[i] * fwd.getBusVoltageSensitivityValue("T2wT", buses.get(i), vt);
+        }
+        assertTrue(Math.abs(expected) > 1e-6,
+                "the oracle itself must be non-zero, or the old silent-zero behaviour would pass: " + expected);
+        assertEquals(expected, theta.get("T2wT"), 1e-9 * Math.abs(expected) + 1e-10,
+                "reverse mode must answer the same question as forward for a transformer target voltage");
+    }
+
+    /**
+     * runAdjoint borrows the NETWORK CACHE's context to switch the transformer controls back on, so it must
+     * hand it back exactly as found — the same context serves every later load flow, score and gradient call on
+     * this network, and a control left enabled would quietly change their equation system.
+     *
+     * <p>The check that matters is behavioural rather than a flag comparison: a load flow re-run after the
+     * adjoint must land on the same operating point as one re-run without it.</p>
+     */
+    @ParameterizedTest
+    @EnumSource(OpenLoadFlowParameters.TransformerTargetVoltageAdjointMode.class)
+    void runAdjointRestoresTheCachedContextAfterATransformerTargetVoltage(OpenLoadFlowParameters.TransformerTargetVoltageAdjointMode adjointMode) {
+        Network network = VoltageControlNetworkFactory.createNetworkWithT2wt();
+        TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("T2wT");
+        t2wt.getRatioTapChanger()
+                .setTargetDeadband(0)
+                .setRegulating(true)
+                .setTapPosition(0)
+                .setRegulationTerminal(t2wt.getTerminal2())
+                .setTargetV(34.0);
+
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        lfp.setTransformerVoltageControlOn(true);
+        OpenLoadFlowParameters.get(lfp).setTransformerTargetVoltageAdjointMode(adjointMode);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        double vBefore = busVoltage(network, "BUS_3");
+        int tapBefore = t2wt.getRatioTapChanger().getTapPosition();
+
+        SensitivityFunctionType ft = SensitivityFunctionType.BUS_VOLTAGE;
+        Map<String, Double> cot = Map.of(AcSensitivityAnalysis.functionCotangentKey(ft, "BUS_3"), 1.0);
+        List<AcSensitivityAnalysis.AdjointBlock> blocks = adjointBlocks(List.of(ft), List.of(List.of("BUS_3")),
+                SensitivityVariableType.BUS_TARGET_VOLTAGE, List.of("T2wT"));
+
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+        analysis.runAdjoint(network, network.getVariantManager().getWorkingVariantId(), List.of(), blocks, cot);
+
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        assertEquals(vBefore, busVoltage(network, "BUS_3"), 1e-9,
+                "a load flow after the adjoint must reach the same operating point as one before it");
+        assertEquals(tapBefore, t2wt.getRatioTapChanger().getTapPosition(),
+                "the adjoint must not move a tap");
+    }
+
+    /**
+     * Declaring a transformer target voltage must not move any OTHER variable's theta_bar.
+     *
+     * <p>Serving a transformer means re-activating the voltage controls, which changes the equation system
+     * and so every variable's gradient. That extra response is wrong for a non-transformer variable: a tap is
+     * DISCRETE, and the infinitesimal perturbation a gradient describes moves none, so a generator target
+     * voltage differentiated in the control-active system prices in a tap response that will not happen.
+     * (Measured against a re-solve finite difference of a real objective, the taps-frozen value is the closer
+     * one.) runAdjoint therefore differentiates each variable in the system that answers its question, and
+     * this pins the contract that makes fusing lever families safe: adding a family cannot silently shift the
+     * others. The forward analyse does NOT have this property — it re-activates for the whole run.</p>
+     */
+    @ParameterizedTest
+    @EnumSource(OpenLoadFlowParameters.TransformerTargetVoltageAdjointMode.class)
+    void aTransformerVariableDoesNotDisturbTheOtherVariablesGradients(OpenLoadFlowParameters.TransformerTargetVoltageAdjointMode adjointMode) {
+        Network network = VoltageControlNetworkFactory.createNetworkWithT2wt();
+        TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("T2wT");
+        t2wt.getRatioTapChanger()
+                .setTargetDeadband(0)
+                .setRegulating(true)
+                .setTapPosition(0)
+                .setRegulationTerminal(t2wt.getTerminal2())
+                .setTargetV(34.0);
+
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        lfp.setTransformerVoltageControlOn(true);
+        OpenLoadFlowParameters.get(lfp).setTransformerTargetVoltageAdjointMode(adjointMode);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        SensitivityFunctionType ft = SensitivityFunctionType.BUS_VOLTAGE;
+        SensitivityVariableType vt = SensitivityVariableType.BUS_TARGET_VOLTAGE;
+        List<String> buses = List.of("BUS_1", "BUS_2", "BUS_3");
+        double[] w = {0.7, -1.3, 0.4};
+        Map<String, Double> cot = new HashMap<>();
+        for (int i = 0; i < buses.size(); i++) {
+            cot.put(AcSensitivityAnalysis.functionCotangentKey(ft, buses.get(i)), w[i]);
+        }
+
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+        String variantId = network.getVariantManager().getWorkingVariantId();
+
+        double alone = analysis.runAdjoint(network, variantId, List.of(),
+                adjointBlocks(List.of(ft), List.of(buses), vt, List.of("GEN_1")), cot).get("GEN_1");
+        Map<String, Double> together = analysis.runAdjoint(network, variantId, List.of(),
+                adjointBlocks(List.of(ft), List.of(buses), vt, List.of("GEN_1", "T2wT")), cot);
+
+        assertTrue(Math.abs(alone) > 1e-9, "the generator's theta_bar is trivially zero: " + alone);
+        assertTrue(Math.abs(together.get("T2wT")) > 1e-9,
+                "the transformer must actually be served, or this proves nothing: " + together.get("T2wT"));
+        assertEquals(alone, together.get("GEN_1"), 1e-12 * Math.abs(alone) + 1e-13,
+                "declaring a transformer variable changed the generator's gradient");
+    }
+
+    /**
+     * The transformer fix must hold under ALL THREE {@code transformerVoltageControlMode} values, because
+     * the silent zero did: the two in-equation-system modes destroy the control equation at
+     * {@code roundVoltageRatios}, and the incremental one never builds it into the system at all
+     * ({@code IncrementalTransformerVoltageControlOuterLoop.initialize} disables every one of them, since
+     * it searches integer taps outside the equations). The three reach the same cached state by different
+     * routes, so a fix that keyed on one route would leave the others silently at zero.
+     *
+     * <p>What makes the fix mode-independent is that all three leave the {@code VoltageControl} OBJECT in
+     * place and only clear its enabled flag, so re-enabling reconstructs the same System B in each case.
+     * The forward path is the oracle per mode — the modes converge to genuinely different taps, so the
+     * expected value differs between them and cannot be hard-coded.</p>
+     */
+    @ParameterizedTest
+    @MethodSource("controlModeAndAdjointMode")
+    void runAdjointMatchesForwardForATransformerUnderEveryControlMode(
+            OpenLoadFlowParameters.TransformerVoltageControlMode mode,
+            OpenLoadFlowParameters.TransformerTargetVoltageAdjointMode adjointMode) {
+        Network network = VoltageControlNetworkFactory.createNetworkWithT2wt();
+        TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("T2wT");
+        t2wt.getRatioTapChanger()
+                .setTargetDeadband(0)
+                .setRegulating(true)
+                .setTapPosition(0)
+                .setRegulationTerminal(t2wt.getTerminal2())
+                .setTargetV(34.0);
+
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        lfp.setTransformerVoltageControlOn(true);
+        OpenLoadFlowParameters.get(lfp).setTransformerTargetVoltageAdjointMode(adjointMode);
+        OpenLoadFlowParameters.get(lfp).setTransformerVoltageControlMode(mode);
+        OpenLoadFlowParameters.get(lfp).setTransformerTargetVoltageAdjointMode(adjointMode);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        SensitivityFunctionType ft = SensitivityFunctionType.BUS_VOLTAGE;
+        SensitivityVariableType vt = SensitivityVariableType.BUS_TARGET_VOLTAGE;
+        List<String> buses = List.of("BUS_1", "BUS_2", "BUS_3");
+        double[] w = {0.7, -1.3, 0.4};
+        Map<String, Double> cot = new HashMap<>();
+        List<SensitivityFactor> full = new ArrayList<>();
+        for (int i = 0; i < buses.size(); i++) {
+            cot.put(AcSensitivityAnalysis.functionCotangentKey(ft, buses.get(i)), w[i]);
+            full.add(new SensitivityFactor(ft, buses.get(i), vt, "T2wT", false, ContingencyContext.all()));
+        }
+
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+
+        Map<String, Double> theta = analysis.runAdjoint(network,
+                network.getVariantManager().getWorkingVariantId(), List.of(),
+                adjointBlocks(List.of(ft), List.of(buses), vt, List.of("T2wT")), cot);
+
+        SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, full,
+                new SensitivityAnalysisRunParameters().setParameters(sensiParams));
+        double expected = 0;
+        for (int i = 0; i < buses.size(); i++) {
+            expected += w[i] * fwd.getBusVoltageSensitivityValue("T2wT", buses.get(i), vt);
+        }
+        assertTrue(Math.abs(expected) > 1e-6,
+                "mode " + mode + ": the oracle is zero, so this would pass on the old behaviour too");
+        assertEquals(expected, theta.get("T2wT"), 1e-9 * Math.abs(expected) + 1e-10,
+                "mode " + mode + ": reverse mode must match forward");
+    }
+
+    /**
+     * The SHARED-control case: two transformers regulating one bus, so {@code DISTR_RHO} is active and ties
+     * their ratios together.
+     *
+     * <p>This is the case the closed-loop reduction has to get right and the single-controller fixtures cannot
+     * exercise. There, {@code M} is 1x1 and the weight is just {@code 1/(dV_c/drho)}; here the zone has one
+     * degree of freedom shared by two changers, so the reduction must move them TOGETHER — summing their
+     * {@code dV/drho} into one column — rather than treating each as independently controlling. Getting that
+     * wrong halves or doubles the gradient, which no single-controller test would notice.</p>
+     *
+     * <p>Both transformers regulate the same bus, so a target voltage "on T2wT1" and one "on T2wT2" are the
+     * same zone target: their gradients must be equal as well as matching the forward oracle.</p>
+     */
+    @ParameterizedTest
+    @EnumSource(OpenLoadFlowParameters.TransformerTargetVoltageAdjointMode.class)
+    void runAdjointMatchesForwardForSharedTransformerControl(OpenLoadFlowParameters.TransformerTargetVoltageAdjointMode adjointMode) {
+        Network network = VoltageControlNetworkFactory.createNetworkWith2T2wt();
+        for (String id : List.of("T2wT1", "T2wT2")) {
+            network.getTwoWindingsTransformer(id).getRatioTapChanger()
+                    .setTargetDeadband(0).setRegulating(true).setTapPosition(0)
+                    .setRegulationTerminal(network.getLoad("LOAD_3").getTerminal()).setTargetV(33.0);
+        }
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        lfp.setTransformerVoltageControlOn(true);
+        OpenLoadFlowParameters.get(lfp).setTransformerTargetVoltageAdjointMode(adjointMode);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        SensitivityFunctionType ft = SensitivityFunctionType.BUS_VOLTAGE;
+        SensitivityVariableType vt = SensitivityVariableType.BUS_TARGET_VOLTAGE;
+        List<String> buses = List.of("BUS_1", "BUS_2", "BUS_3");
+        List<String> variables = List.of("T2wT1", "T2wT2");
+        double[] w = {0.7, -1.3, 0.4};
+
+        Map<String, Double> cot = new HashMap<>();
+        List<SensitivityFactor> full = new ArrayList<>();
+        for (int i = 0; i < buses.size(); i++) {
+            cot.put(AcSensitivityAnalysis.functionCotangentKey(ft, buses.get(i)), w[i]);
+            for (String v : variables) {
+                full.add(new SensitivityFactor(ft, buses.get(i), vt, v, false, ContingencyContext.all()));
+            }
+        }
+
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+
+        Map<String, Double> theta = analysis.runAdjoint(network,
+                network.getVariantManager().getWorkingVariantId(), List.of(),
+                adjointBlocks(List.of(ft), List.of(buses), vt, variables), cot);
+
+        SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, full,
+                new SensitivityAnalysisRunParameters().setParameters(sensiParams));
+        for (String v : variables) {
+            double expected = 0;
+            for (int i = 0; i < buses.size(); i++) {
+                expected += w[i] * fwd.getBusVoltageSensitivityValue(v, buses.get(i), vt);
+            }
+            assertTrue(Math.abs(expected) > 1e-6, v + ": oracle is trivially zero, the gate would prove nothing");
+            assertEquals(expected, theta.get(v), 1e-6 * Math.abs(expected) + 1e-9,
+                    v + ": shared-control reverse mode must match forward");
+        }
+        assertEquals(theta.get("T2wT1"), theta.get("T2wT2"), 1e-9 * Math.abs(theta.get("T2wT1")) + 1e-12,
+                "both changers regulate the same bus, so they carry the same zone target voltage");
+    }
+
+    /**
+     * A bus regulated by BOTH a transformer and a GENERATOR — the case that separates the two adjoint modes,
+     * and the one no other fixture reaches.
+     *
+     * <p>The generator holds the voltage, so the changer has no authority over it: {@code dV/drho} is zero and
+     * the coordination drops the zone. But the bus's {@code BUS_TARGET_V} equation is ACTIVE all the same,
+     * because the generator regulates it — so the generic right-hand-side fill happily produces a column, and
+     * contracting it returns the GENERATOR's sensitivity under the transformer lever's name. That is precisely
+     * the defect this pins: on pegase9241 it hit 30 of 300 declared levers, wrong by up to two orders of
+     * magnitude and in one case in sign.</p>
+     *
+     * <p>So the two modes answer differently here, by design rather than by numerical accident:</p>
+     * <ul>
+     *   <li>{@code REDUCTION} reports a STRUCTURAL ZERO — in the state that was actually solved, the generator
+     *       holds the voltage and moving the tap's target does nothing;</li>
+     *   <li>{@code REBUILD} re-enables the transformer control so that it COMPETES with the generator for one
+     *       bus, and reports that state's sensitivity — a state the load flow never solved.</li>
+     * </ul>
+     *
+     * <p>Neither is "the" right answer, which is why this is a parameter and not a fix. What must never happen
+     * again is the third thing: a non-zero number that belongs to a different piece of equipment.</p>
+     */
+    @ParameterizedTest
+    @EnumSource(OpenLoadFlowParameters.TransformerTargetVoltageAdjointMode.class)
+    void aGeneratorHeldBusSeparatesTheTwoAdjointModes(
+            OpenLoadFlowParameters.TransformerTargetVoltageAdjointMode adjointMode) {
+        // NHV2_NLOAD's changer set to regulate NGEN — a bus a GENERATOR already holds. The same
+        // configuration VoltageTargetPrioritiesTest uses, so it is known to converge.
+        Network network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+        network.getTwoWindingsTransformer("NHV2_NLOAD").getRatioTapChanger()
+                .setTargetDeadband(0)
+                .setRegulating(true)
+                .setRegulationTerminal(network.getTwoWindingsTransformer("NGEN_NHV1").getTerminal1())
+                .setTargetV(25.115);
+
+        LoadFlowParameters lfp = new LoadFlowParameters().setUseReactiveLimits(false).setDistributedSlack(false);
+        lfp.setTransformerVoltageControlOn(true);
+        OpenLoadFlowParameters.create(lfp).setNetworkCacheEnabled(true)
+                .setTransformerTargetVoltageAdjointMode(adjointMode);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        SensitivityFunctionType ft = SensitivityFunctionType.BUS_VOLTAGE;
+        SensitivityVariableType vt = SensitivityVariableType.BUS_TARGET_VOLTAGE;
+        List<String> buses = List.of("NGEN", "NHV1", "NHV2", "NLOAD");
+        Map<String, Double> cot = new HashMap<>();
+        double[] w = {0.7, -1.3, 0.4, 0.9};
+        for (int i = 0; i < buses.size(); i++) {
+            cot.put(AcSensitivityAnalysis.functionCotangentKey(ft, buses.get(i)), w[i]);
+        }
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+        String variant = network.getVariantManager().getWorkingVariantId();
+
+        double theta = analysis.runAdjoint(network, variant, List.of(),
+                adjointBlocks(List.of(ft), List.of(buses), vt, List.of("NHV2_NLOAD")), cot).get("NHV2_NLOAD");
+
+        // The generator's own gradient for the same cotangent: what the transformer lever must NOT return.
+        double generatorTheta = analysis.runAdjoint(network, variant, List.of(),
+                adjointBlocks(List.of(ft), List.of(buses), vt, List.of("GEN")), cot).get("GEN");
+        assertTrue(Math.abs(generatorTheta) > 1e-6,
+                "the generator must have a real gradient, or this proves nothing: " + generatorTheta);
+
+        if (adjointMode == OpenLoadFlowParameters.TransformerTargetVoltageAdjointMode.REDUCTION) {
+            // The state that was actually solved: the generator holds the bus, the changer has no authority
+            // over it, and moving the changer's target does nothing. A structural zero, reported as such.
+            assertEquals(0.0, theta, 0.0,
+                    "the generator holds this bus, so the tap cannot move it: expected a structural zero");
+            assertNotEquals(generatorTheta, theta, 1e-12,
+                    "and it must not be the GENERATOR's gradient wearing the transformer's name");
+        } else {
+            // REBUILD switches the changer's control back on, and a bus has exactly ONE BUS_TARGET_V
+            // equation - the generator's control and the changer's point at the same row. So the two levers
+            // become indistinguishable: both report the sensitivity of that shared target. It is not a
+            // mistake in the contraction, it is what the formulation can express. Two consequences worth
+            // knowing: the answer describes a state where both devices regulate one bus, which the load flow
+            // never solved (forward analyse has the same property, for the same reason); and declaring both
+            // levers to a descent double-counts one degree of freedom.
+            assertEquals(generatorTheta, theta, 1e-9 * Math.abs(generatorTheta) + 1e-12,
+                    "REBUILD shares the bus's target-voltage row, so the two levers must coincide");
+        }
+    }
+
+    /** Every transformerVoltageControlMode against every way of answering the adjoint: the two are
+     *  independent, and the fix for the silent zero had to hold across both. */
+    static Stream<Arguments> controlModeAndAdjointMode() {
+        return Stream.of(OpenLoadFlowParameters.TransformerVoltageControlMode.values())
+                .flatMap(mode -> Stream.of(OpenLoadFlowParameters.TransformerTargetVoltageAdjointMode.values())
+                        .map(adjoint -> Arguments.of(mode, adjoint)));
     }
 
     private static List<AcSensitivityAnalysis.AdjointVariable> adjointVariables(List<String> ids, SensitivityVariableType vt) {

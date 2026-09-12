@@ -112,6 +112,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
 
     public static final ShuntVoltageControlMode SHUNT_VOLTAGE_CONTROL_MODE_DEFAULT_VALUE = ShuntVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL;
 
+    public static final TransformerTargetVoltageAdjointMode TRANSFORMER_TARGET_VOLTAGE_ADJOINT_MODE_DEFAULT_VALUE = TransformerTargetVoltageAdjointMode.REDUCTION;
+
     public static final PhaseShifterControlMode PHASE_SHIFTER_CONTROL_MODE_DEFAULT_VALUE = PhaseShifterControlMode.CONTINUOUS_WITH_DISCRETISATION;
 
     public static final Set<String> ACTIONABLE_SWITCH_IDS_DEFAULT_VALUE = Collections.emptySet();
@@ -195,6 +197,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
     public static final String VOLTAGE_INIT_MODE_OVERRIDE_PARAM_NAME = "voltageInitModeOverride";
 
     public static final String TRANSFORMER_VOLTAGE_CONTROL_MODE_PARAM_NAME = "transformerVoltageControlMode";
+
+    public static final String TRANSFORMER_TARGET_VOLTAGE_ADJOINT_MODE_PARAM_NAME = "transformerTargetVoltageAdjointMode";
 
     public static final String SHUNT_VOLTAGE_CONTROL_MODE_PARAM_NAME = "shuntVoltageControlMode";
 
@@ -432,6 +436,10 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
             "Transformer voltage control mode",
             TRANSFORMER_VOLTAGE_CONTROL_MODE_DEFAULT_VALUE.name(), getEnumPossibleValues(TransformerVoltageControlMode.class),
             ParameterScope.FUNCTIONAL, TRANSFORMER_VOLTAGE_CONTROL_CATEGORY_KEY),
+        new Parameter(TRANSFORMER_TARGET_VOLTAGE_ADJOINT_MODE_PARAM_NAME, ParameterType.STRING,
+            "How the reverse-mode sensitivity answers a transformer target voltage",
+            TRANSFORMER_TARGET_VOLTAGE_ADJOINT_MODE_DEFAULT_VALUE.name(), getEnumPossibleValues(TransformerTargetVoltageAdjointMode.class),
+            ParameterScope.FUNCTIONAL, TRANSFORMER_VOLTAGE_CONTROL_CATEGORY_KEY),
         new Parameter(SHUNT_VOLTAGE_CONTROL_MODE_PARAM_NAME, ParameterType.STRING,
             "Shunt voltage control mode",
             SHUNT_VOLTAGE_CONTROL_MODE_DEFAULT_VALUE.name(), getEnumPossibleValues(ShuntVoltageControlMode.class), ParameterScope.FUNCTIONAL, SHUNT_VOLTAGE_CONTROL_CATEGORY_KEY),
@@ -646,6 +654,33 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
         INCREMENTAL_VOLTAGE_CONTROL
     }
 
+    /**
+     * How {@code AcSensitivityAnalysis.runAdjoint} answers a {@code BUS_TARGET_VOLTAGE} variable carried by
+     * a TRANSFORMER. The converged state has no active transformer control equation — every mode disables it
+     * before rounding the taps — so the question cannot be answered directly, and the two ways of getting at
+     * it do NOT agree everywhere. See {@link com.powsybl.openloadflow.sensi.TransformerTargetVoltageClosedLoopSensitivity}.
+     */
+    public enum TransformerTargetVoltageAdjointMode {
+        /**
+         * Express the target voltage as a combination of the RATIO rows, which are active in the converged
+         * state, through a dense coordination matrix over the controlled buses. Nothing is mutated and the
+         * load flow's factorisation is reused, but forming that matrix costs one back-substitution per
+         * controlled bus IN THE NETWORK — not per declared lever — so it scales with the fleet. A changer
+         * whose bus is held by something else (a generator) has no authority over it and reads as a
+         * structural zero.
+         */
+        REDUCTION,
+        /**
+         * Switch the transformer controls back on and let the Jacobian refactorise, as the forward analysis
+         * does, then take the transformer variables from that second solve. One refactorisation whatever the
+         * fleet size, but it mutates the cached equation system (restored afterwards, leaving the Jacobian
+         * to be rebuilt by whoever needs it next) and it re-linearises every variable, which is why the
+         * non-transformer ones are taken from a first solve on the untouched state. On a bus held by a
+         * generator it reports the value of a state in which the changer COMPETES with that generator.
+         */
+        REBUILD
+    }
+
     public enum ShuntVoltageControlMode {
         WITH_GENERATOR_VOLTAGE_CONTROL,
         INCREMENTAL_VOLTAGE_CONTROL
@@ -715,6 +750,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
     private VoltageInitModeOverride voltageInitModeOverride = VOLTAGE_INIT_MODE_OVERRIDE_DEFAULT_VALUE;
 
     private TransformerVoltageControlMode transformerVoltageControlMode = TRANSFORMER_VOLTAGE_CONTROL_MODE_DEFAULT_VALUE;
+
+    private TransformerTargetVoltageAdjointMode transformerTargetVoltageAdjointMode = TRANSFORMER_TARGET_VOLTAGE_ADJOINT_MODE_DEFAULT_VALUE;
 
     private ShuntVoltageControlMode shuntVoltageControlMode = SHUNT_VOLTAGE_CONTROL_MODE_DEFAULT_VALUE;
 
@@ -1098,6 +1135,15 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
 
     public OpenLoadFlowParameters setTransformerVoltageControlMode(TransformerVoltageControlMode transformerVoltageControlMode) {
         this.transformerVoltageControlMode = Objects.requireNonNull(transformerVoltageControlMode);
+        return this;
+    }
+
+    public TransformerTargetVoltageAdjointMode getTransformerTargetVoltageAdjointMode() {
+        return transformerTargetVoltageAdjointMode;
+    }
+
+    public OpenLoadFlowParameters setTransformerTargetVoltageAdjointMode(TransformerTargetVoltageAdjointMode transformerTargetVoltageAdjointMode) {
+        this.transformerTargetVoltageAdjointMode = Objects.requireNonNull(transformerTargetVoltageAdjointMode);
         return this;
     }
 
@@ -1728,6 +1774,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
             .ifPresent(this::setVoltageInitModeOverride);
         config.getOptionalEnumProperty(TRANSFORMER_VOLTAGE_CONTROL_MODE_PARAM_NAME, TransformerVoltageControlMode.class)
             .ifPresent(this::setTransformerVoltageControlMode);
+        config.getOptionalEnumProperty(TRANSFORMER_TARGET_VOLTAGE_ADJOINT_MODE_PARAM_NAME, TransformerTargetVoltageAdjointMode.class)
+            .ifPresent(this::setTransformerTargetVoltageAdjointMode);
         config.getOptionalEnumProperty(SHUNT_VOLTAGE_CONTROL_MODE_PARAM_NAME, ShuntVoltageControlMode.class)
             .ifPresent(this::setShuntVoltageControlMode);
         config.getOptionalDoubleProperty(MIN_PLAUSIBLE_TARGET_VOLTAGE_PARAM_NAME).ifPresent(this::setMinPlausibleTargetVoltage);
@@ -1855,6 +1903,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 .ifPresent(prop -> this.setVoltageInitModeOverride(VoltageInitModeOverride.valueOf(prop)));
         Optional.ofNullable(properties.get(TRANSFORMER_VOLTAGE_CONTROL_MODE_PARAM_NAME))
                 .ifPresent(prop -> this.setTransformerVoltageControlMode(TransformerVoltageControlMode.valueOf(prop)));
+        Optional.ofNullable(properties.get(TRANSFORMER_TARGET_VOLTAGE_ADJOINT_MODE_PARAM_NAME))
+                .ifPresent(prop -> this.setTransformerTargetVoltageAdjointMode(TransformerTargetVoltageAdjointMode.valueOf(prop)));
         Optional.ofNullable(properties.get(SHUNT_VOLTAGE_CONTROL_MODE_PARAM_NAME))
                 .ifPresent(prop -> this.setShuntVoltageControlMode(ShuntVoltageControlMode.valueOf(prop)));
         Optional.ofNullable(properties.get(MIN_PLAUSIBLE_TARGET_VOLTAGE_PARAM_NAME))
@@ -2010,6 +2060,7 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
         map.put(NEWTON_RAPHSON_CONV_EPS_PER_EQ_PARAM_NAME, newtonRaphsonConvEpsPerEq);
         map.put(VOLTAGE_INIT_MODE_OVERRIDE_PARAM_NAME, voltageInitModeOverride);
         map.put(TRANSFORMER_VOLTAGE_CONTROL_MODE_PARAM_NAME, transformerVoltageControlMode);
+        map.put(TRANSFORMER_TARGET_VOLTAGE_ADJOINT_MODE_PARAM_NAME, transformerTargetVoltageAdjointMode);
         map.put(SHUNT_VOLTAGE_CONTROL_MODE_PARAM_NAME, shuntVoltageControlMode);
         map.put(MIN_PLAUSIBLE_TARGET_VOLTAGE_PARAM_NAME, minPlausibleTargetVoltage);
         map.put(MAX_PLAUSIBLE_TARGET_VOLTAGE_PARAM_NAME, maxPlausibleTargetVoltage);
@@ -2438,6 +2489,7 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 extension1.getNewtonRaphsonConvEpsPerEq() == extension2.getNewtonRaphsonConvEpsPerEq() &&
                 extension1.getVoltageInitModeOverride() == extension2.getVoltageInitModeOverride() &&
                 extension1.getTransformerVoltageControlMode() == extension2.getTransformerVoltageControlMode() &&
+                extension1.getTransformerTargetVoltageAdjointMode() == extension2.getTransformerTargetVoltageAdjointMode() &&
                 extension1.getShuntVoltageControlMode() == extension2.getShuntVoltageControlMode() &&
                 extension1.getMinPlausibleTargetVoltage() == extension2.getMinPlausibleTargetVoltage() &&
                 extension1.getMaxPlausibleTargetVoltage() == extension2.getMaxPlausibleTargetVoltage() &&
@@ -2524,6 +2576,7 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 .setNewtonRaphsonConvEpsPerEq(extension.getNewtonRaphsonConvEpsPerEq())
                 .setVoltageInitModeOverride(extension.getVoltageInitModeOverride())
                 .setTransformerVoltageControlMode(extension.getTransformerVoltageControlMode())
+                .setTransformerTargetVoltageAdjointMode(extension.getTransformerTargetVoltageAdjointMode())
                 .setShuntVoltageControlMode(extension.getShuntVoltageControlMode())
                 .setMinPlausibleTargetVoltage(extension.getMinPlausibleTargetVoltage())
                 .setMaxPlausibleTargetVoltage(extension.getMaxPlausibleTargetVoltage())
