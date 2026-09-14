@@ -90,8 +90,24 @@ public final class ActivePowerDistribution {
 
     private final ActivePowerDistribution.Step step;
 
-    private ActivePowerDistribution(Step step) {
+    private final LoadFlowParameters.BalanceType balanceType;
+
+    private final boolean useActiveLimits;
+
+    private ActivePowerDistribution(Step step, LoadFlowParameters.BalanceType balanceType, boolean useActiveLimits) {
         this.step = Objects.requireNonNull(step);
+        this.balanceType = balanceType;
+        this.useActiveLimits = useActiveLimits;
+    }
+
+    /** The balance type this distribution was created with — for an alternative engine that must
+     *  distribute with the run's own settings. */
+    public LoadFlowParameters.BalanceType getBalanceType() {
+        return balanceType;
+    }
+
+    public boolean isUseActiveLimits() {
+        return useActiveLimits;
     }
 
     public String getElementType() {
@@ -136,7 +152,7 @@ public final class ActivePowerDistribution {
     }
 
     public static ActivePowerDistribution create(LoadFlowParameters.BalanceType balanceType, boolean loadPowerFactorConstant, boolean useActiveLimits) {
-        return new ActivePowerDistribution(getStep(balanceType, loadPowerFactorConstant, useActiveLimits));
+        return new ActivePowerDistribution(getStep(balanceType, loadPowerFactorConstant, useActiveLimits), balanceType, useActiveLimits);
     }
 
     public static Step getStep(LoadFlowParameters.BalanceType balanceType, boolean loadPowerFactorConstant, boolean useActiveLimits) {
