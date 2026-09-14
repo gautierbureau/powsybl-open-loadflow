@@ -163,7 +163,7 @@ public class DcNetworkVector extends AbstractLfNetworkListener
     }
 
     @Override
-    public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition) {
+    public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition, boolean modifiedTapImpedance) {
         if (!branchVector.zeroImpedance[branch.getNum()]) {
             branchVector.updateBranchModel(branch.getNum(), branch);
         }
@@ -172,6 +172,11 @@ public class DcNetworkVector extends AbstractLfNetworkListener
     @Override
     public void onVariableChange(Variable<DcVariableType> variable, ChangeType changeType) {
         variablesInvalid = true;
+    }
+
+    @Override
+    public void onEquationTermConstantsChanged() {
+        // the branch model is refreshed on the tap position change itself (onTapPositionChange)
     }
 
     @Override
