@@ -61,6 +61,10 @@ public class DistributedSlackOuterLoop
 
     /** The band this loop distributes outside of, in MW. Exposed so an alternative engine can drive
      *  the same loop with the run's own tolerance rather than a guessed one. */
+    public ActivePowerDistribution getActivePowerDistribution() {
+        return activePowerDistribution;
+    }
+
     public double getSlackBusPMaxMismatch() {
         return slackBusPMaxMismatch;
     }
