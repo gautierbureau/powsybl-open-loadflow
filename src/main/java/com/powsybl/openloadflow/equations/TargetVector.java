@@ -75,6 +75,19 @@ public class TargetVector<V extends Enum<V> & Quantity, E extends Enum<E> & Quan
             for (var equationTerm : equationSystem.getEquationTerms(element.getType(), element.getNum())) {
                 if (equationTerm.hasRhs()) {
                     invalidateValues();
+                    return;
+                }
+            }
+            // vectorized terms are held in equation term arrays (not indexed as single terms per element):
+            // invalidate the target vector if the disabled element carries a non-zero right-hand side there
+            for (EquationArray<V, E> equationArray : equationSystem.getEquationArrays()) {
+                for (EquationTermArray<V, E> termArray : equationArray.getTermArrays()) {
+                    if (termArray.getElementType() == element.getType()
+                            && termArray.hasTermElement(element.getNum())
+                            && termArray.getEvaluator().rhs(element.getNum()) != 0) {
+                        invalidateValues();
+                        return;
+                    }
                 }
             }
         }
