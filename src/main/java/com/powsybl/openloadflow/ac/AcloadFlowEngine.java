@@ -248,12 +248,7 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
             return buildAcLoadFlowResult(runningContext, OuterLoopResult.stable(), distributedActivePowerPerSc);
         }
 
-        AcSolver solver = solverFactory.create(context.getNetwork(),
-                                               context.getParameters(),
-                                               context.getEquationSystem(),
-                                               context.getJacobianMatrix(),
-                                               context.getTargetVector(),
-                                               context.getEquationVector());
+        AcSolver solver = createSolver(solverFactory, context);
 
         List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = engineOuterLoopsAndContexts(context);
         List<AcOuterLoop> outerLoops = outerLoopsAndContexts.stream().map(Pair::getLeft).toList();
@@ -392,6 +387,17 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
      * solver that already runs some of those loops itself can drop them here — running them in both
      * places applies them twice. The static factory below stays the shared construction path.
      */
+    /** The solver this engine run drives — overridable so an alternative engine can tie its
+     *  outer-loop handling to the solver it actually created. */
+    protected AcSolver createSolver(AcSolverFactory solverFactory, AcLoadFlowContext context) {
+        return solverFactory.create(context.getNetwork(),
+                                    context.getParameters(),
+                                    context.getEquationSystem(),
+                                    context.getJacobianMatrix(),
+                                    context.getTargetVector(),
+                                    context.getEquationVector());
+    }
+
     protected List<Pair<AcOuterLoop, AcOuterLoopContext>> engineOuterLoopsAndContexts(AcLoadFlowContext context) {
         return createOuterLoopsAndContexts(context);
     }
