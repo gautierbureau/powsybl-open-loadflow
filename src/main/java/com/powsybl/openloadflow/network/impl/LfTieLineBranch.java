@@ -103,6 +103,20 @@ public class LfTieLineBranch extends AbstractImpedantLfBranch {
         return List.of(branchResult, half1Result, half2Result); // make sure to put the tie-line first in the list, used in post-contingency flow filtering
     }
 
+    @Override
+    public void emitBranchResults(double preContingencyBranchP1, double preContingencyBranchOfContingencyP1,
+                                  Map<String, LfBranchResults> zeroImpedanceFlows, LoadFlowModel loadFlowModel, BranchFlowConsumer consumer) {
+        double currentScale1 = PerUnit.ib(getHalf1().getTerminal().getVoltageLevel().getNominalV());
+        double currentScale2 = PerUnit.ib(getHalf2().getTerminal().getVoltageLevel().getNominalV());
+        // emit the tie-line first (kept first in createBranchResult), then each half line (side 1 only, like createBranchResult)
+        emitBranchFlows(loadFlowModel, zeroImpedanceFlows, currentScale1, currentScale2, preContingencyBranchP1, preContingencyBranchOfContingencyP1,
+            (id, p1v, q1v, i1v, p2v, q2v, i2v, flowTransfer) -> {
+                consumer.accept(id, p1v, q1v, i1v, p2v, q2v, i2v, flowTransfer);
+                consumer.accept(getHalf1().getId(), p1v, q1v, i1v, Double.NaN, Double.NaN, Double.NaN, flowTransfer);
+                consumer.accept(getHalf2().getId(), p2v, q2v, i2v, Double.NaN, Double.NaN, Double.NaN, flowTransfer);
+            });
+    }
+
     private <T extends LoadingLimits> Supplier<Map<String, T>> toMapIndexedByOperationalLimitsGroupId(Function<OperationalLimitsGroup, Optional<T>> limitsGetter, TwoSides side) {
         return () -> (side == TwoSides.ONE ? getHalf1() : getHalf2())
                 .getAllSelectedOperationalLimitsGroups()

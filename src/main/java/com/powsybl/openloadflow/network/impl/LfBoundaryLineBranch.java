@@ -81,6 +81,13 @@ public class LfBoundaryLineBranch extends AbstractImpedantLfBranch {
         return List.of(buildBranchResult(loadFlowModel, zeroImpedanceFlows, currentScale, currentScale, Double.NaN, Double.NaN));
     }
 
+    @Override
+    public void emitBranchResults(double preContingencyBranchP1, double preContingencyBranchOfContingencyP1,
+                                  Map<String, LfBranchResults> zeroImpedanceFlows, LoadFlowModel loadFlowModel, BranchFlowConsumer consumer) {
+        double currentScale = PerUnit.ib(getBoundaryLine().getTerminal().getVoltageLevel().getNominalV());
+        emitBranchFlows(loadFlowModel, zeroImpedanceFlows, currentScale, currentScale, Double.NaN, Double.NaN, consumer);
+    }
+
     private <T extends LoadingLimits> Supplier<Map<String, T>> toMapIndexedByOperationalLimitsGroupId(Function<OperationalLimitsGroup, Optional<T>> limitsGetter) {
         return () -> getBoundaryLine()
                 .getAllSelectedOperationalLimitsGroups()

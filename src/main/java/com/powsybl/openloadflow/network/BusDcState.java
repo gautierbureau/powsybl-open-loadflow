@@ -32,21 +32,34 @@ public class BusDcState extends ElementState<LfBus> {
     protected static class LoadDcState {
 
         private double loadTargetP;
+        private double loadInitialTargetP;
         private double absVariableLoadTargetP;
         private Map<String, Boolean> loadsDisablingStatus;
+        private Map<String, Double> loadsP0;
+        private Map<String, Double> loadsQ0;
 
         protected LoadDcState save(LfLoad load) {
             loadTargetP = load.getTargetP();
+            loadInitialTargetP = load.getInitialTargetP();
             absVariableLoadTargetP = load.getAbsVariableTargetP();
             // The copy is load-bearing: restore() hands this map back to the load and callers MUTATE it
             // afterwards, so it must be a fresh mutable map even when empty (Map.of() here fails
             // testDcSaHvdcLineContingency with UnsupportedOperationException).
             loadsDisablingStatus = new HashMap<>(load.getOriginalLoadsDisablingStatus());
+            loadsP0 = new HashMap<>(load.getOriginalLoadsP0());
+            loadsQ0 = new HashMap<>(load.getOriginalLoadsQ0());
             return this;
         }
 
         protected void restore(LfLoad load) {
+            // Replaying the set points first is what restores everything derived from them. The running totals they
+            // move on the way are overwritten just below by their saved values -- and for targetQ by LoadState, which
+            // is where reactive power is restored. Nothing to replay, and so nothing to pay, for a load whose set
+            // points were never changed.
+            loadsP0.forEach(load::setOriginalLoadP0);
+            loadsQ0.forEach(load::setOriginalLoadQ0);
             load.setTargetP(loadTargetP);
+            load.setInitialTargetP(loadInitialTargetP);
             load.setAbsVariableTargetP(absVariableLoadTargetP);
             load.setOriginalLoadsDisablingStatus(loadsDisablingStatus);
         }

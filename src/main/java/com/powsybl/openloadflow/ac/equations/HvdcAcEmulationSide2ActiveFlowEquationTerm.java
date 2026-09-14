@@ -45,16 +45,16 @@ public class HvdcAcEmulationSide2ActiveFlowEquationTerm extends AbstractHvdcAcEm
 
     @Override
     public double eval() {
-        return p2(p0, k, lossFactor1, lossFactor2, r, ph1(), ph2());
+        return p2(p0(), k, lossFactor1, lossFactor2, r, ph1(), ph2());
     }
 
     @Override
     public double der(Variable<AcVariableType> variable) {
         Objects.requireNonNull(variable);
         if (variable.equals(ph1Var)) {
-            return dp2dph1(p0, k, lossFactor1, lossFactor2, ph1(), ph2());
+            return dp2dph1(p0(), k, lossFactor1, lossFactor2, ph1(), ph2());
         } else if (variable.equals(ph2Var)) {
-            return dp2dph2(p0, k, lossFactor1, lossFactor2, ph1(), ph2());
+            return dp2dph2(p0(), k, lossFactor1, lossFactor2, ph1(), ph2());
         } else {
             throw new IllegalStateException("Unknown variable: " + variable);
         }

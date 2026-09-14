@@ -231,6 +231,15 @@ public class LfBranchImpl extends AbstractImpedantLfBranch {
         return List.of(branchResult);
     }
 
+    @Override
+    public void emitBranchResults(double preContingencyBranchP1, double preContingencyBranchOfContingencyP1,
+                                  Map<String, LfBranch.LfBranchResults> zeroImpedanceFlows, LoadFlowModel loadFlowModel, BranchFlowConsumer consumer) {
+        var branch = getBranch();
+        double currentScale1 = PerUnit.ib(branch.getTerminal1().getVoltageLevel().getNominalV());
+        double currentScale2 = PerUnit.ib(branch.getTerminal2().getVoltageLevel().getNominalV());
+        emitBranchFlows(loadFlowModel, zeroImpedanceFlows, currentScale1, currentScale2, preContingencyBranchP1, preContingencyBranchOfContingencyP1, consumer);
+    }
+
     private <T extends LoadingLimits> Supplier<Map<String, T>> toMapIndexedByOperationalLimitsGroupId(Function<OperationalLimitsGroup, Optional<T>> limitsGetter, TwoSides side) {
         return () -> getBranch()
                 .getAllSelectedOperationalLimitsGroups(side)

@@ -51,7 +51,8 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
 
     @Test
     void specificParametersNamesTest() {
-        assertEquals(List.of("createResultExtension", "contingencyPropagation", "threadCount", "dcFastMode", "contingencyActivePowerLossDistribution", "startWithFrozenACEmulation"),
+        assertEquals(List.of("createResultExtension", "contingencyPropagation", "threadCount", "dcFastMode",
+                "contingencyActivePowerLossDistribution", "startWithFrozenACEmulation", "monitorAllBranches"),
             provider.getSpecificParametersNames());
     }
 
@@ -92,6 +93,11 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         assertEquals("Default", parametersExt.getContingencyActivePowerLossDistribution());
         testCount++;
 
+        assertFalse(parametersExt.isMonitorAllBranches());
+        parametersExt.setMonitorAllBranches(true);
+        assertTrue(parametersExt.isMonitorAllBranches());
+        testCount++;
+
         assertEquals(OpenSecurityAnalysisParameters.SPECIFIC_PARAMETERS_NAMES.size(), testCount);
     }
 
@@ -105,6 +111,7 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         moduleConfig.setStringProperty("startWithFrozenACEmulation", "false");
         moduleConfig.setStringProperty("threadCount", "3");
         moduleConfig.setStringProperty("contingencyActivePowerLossDistribution", "Default");
+        moduleConfig.setStringProperty("monitorAllBranches", "false");
 
         OpenSecurityAnalysisParameters parametersExt = (OpenSecurityAnalysisParameters) provider.loadSpecificParameters(platformConfig).orElseThrow();
         assertTrue(parametersExt.isCreateResultExtension());
@@ -133,7 +140,8 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
                 "dcFastMode", "true",
                 "threadCount", "3",
                 "startWithFrozenACEmulation", "false",
-                "contingencyActivePowerLossDistribution", "Default");
+                "contingencyActivePowerLossDistribution", "Default",
+                "monitorAllBranches", "false");
         OpenSecurityAnalysisParameters parametersExt = (OpenSecurityAnalysisParameters) provider.loadSpecificParameters(properties).orElseThrow();
         assertTrue(parametersExt.isCreateResultExtension());
         assertFalse(parametersExt.isContingencyPropagation());
