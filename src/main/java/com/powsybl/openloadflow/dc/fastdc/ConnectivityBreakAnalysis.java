@@ -203,7 +203,7 @@ public final class ConnectivityBreakAnalysis {
      * Compute post contingency and operator strategy connectivity analysis result by analyzing network connectivity.
      * Both contingency and actions can impact connectivity.
      */
-    private static Optional<ConnectivityAnalysisResult> computeConnectivityAnalysisResult(LfNetwork lfNetwork,
+    public static Optional<ConnectivityAnalysisResult> computeConnectivityAnalysisResult(LfNetwork lfNetwork,
                                                                                           PropagatedContingency contingency, Map<String, ComputedContingencyElement> contingencyElementByBranch,
                                                                                           LfOperatorStrategy operatorStrategy, Map<LfAction, List<ComputedElement>> actionElementByBranch) {
         GraphConnectivity<LfBus, LfBranch> connectivity = lfNetwork.getConnectivity();
@@ -293,7 +293,7 @@ public final class ConnectivityBreakAnalysis {
         return elementsToReconnect;
     }
 
-    private static Map<String, ComputedContingencyElement> createContingencyElementsIndexByBranchId(List<PropagatedContingency> contingencies,
+    public static Map<String, ComputedContingencyElement> createContingencyElementsIndexByBranchId(List<PropagatedContingency> contingencies,
                                                                                                     LfNetwork lfNetwork, EquationSystem<DcVariableType, DcEquationType> equationSystem,
                                                                                                     DcEquationSystemCreationParameters creationParameters) {
         Map<String, ComputedContingencyElement> contingencyElementByBranch =
