@@ -98,7 +98,7 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
      * Calculate the active power flows for pre-contingency or a post-contingency state.
      * The interesting disabled branches are only phase shifters.
      */
-    private DenseMatrix calculateFlowStates(DcLoadFlowContext loadFlowContext, List<ParticipatingElement> participatingElements,
+    protected DenseMatrix calculateFlowStates(DcLoadFlowContext loadFlowContext, List<ParticipatingElement> participatingElements,
                                             DisabledNetwork disabledNetwork, List<LfAction> actions, ReportNode reportNode) {
         List<BusState> busStates = Collections.emptyList();
         DcLoadFlowParameters parameters = loadFlowContext.getParameters();
@@ -162,7 +162,7 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
     /**
      * Compute state for sensitivity factors taking into account slack distribution.
      */
-    private DenseMatrix calculateFactorStates(DcLoadFlowContext loadFlowContext,
+    protected DenseMatrix calculateFactorStates(DcLoadFlowContext loadFlowContext,
                                               SensitivityFactorGroupList<DcVariableType, DcEquationType> factorGroups,
                                               List<ParticipatingElement> participatingElements) {
         Map<LfBus, Double> slackParticipationByBus;
@@ -183,7 +183,7 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
     /**
      * Create branch flow and sensitivity values from a pre-contingency state or a post-contingency state.
      */
-    private void calculateSensitivityValues(List<LfSensitivityFactor<DcVariableType, DcEquationType>> lfFactors, DenseMatrix factorStates, DenseMatrix flowStates,
+    protected void calculateSensitivityValues(List<LfSensitivityFactor<DcVariableType, DcEquationType>> lfFactors, DenseMatrix factorStates, DenseMatrix flowStates,
                                             PropagatedContingency contingency, LfOperatorStrategy operatorStrategy, SensitivityResultWriter resultWriter, DisabledNetwork disabledNetwork) {
         if (lfFactors.isEmpty()) {
             return;
@@ -202,6 +202,19 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
                 createBranchSensitivityValue(factor, factorGroup, flowStates, factorStates, contingency, operatorStrategy, resultWriter, disabledNetwork);
             }
         }
+    }
+
+    /**
+     * The Woodbury engine used to turn pre-contingency states into post-contingency states. An
+     * alternative engine (a device one, keeping the states off the host) is installed by overriding
+     * this.
+     */
+    protected WoodburyEngine createWoodburyEngine(DcEquationSystemCreationParameters creationParameters,
+                                                  List<ComputedContingencyElement> contingencyElements,
+                                                  DenseMatrix contingenciesStates,
+                                                  List<ComputedElement> actionElements,
+                                                  DenseMatrix actionsStates) {
+        return new WoodburyEngine(creationParameters, contingencyElements, contingenciesStates, actionElements, actionsStates);
     }
 
     /**
@@ -250,7 +263,7 @@ public class DcSensitivityAnalysis extends AbstractSensitivityAnalysis<DcVariabl
         DisabledNetwork disabledNetwork = new DisabledNetwork(disabledBuses, disabledBranches);
         DenseMatrix newFactorStates = factorStates;
 
-        WoodburyEngine engine = new WoodburyEngine(loadFlowContext.getParameters().getEquationSystemCreationParameters(),
+        WoodburyEngine engine = createWoodburyEngine(loadFlowContext.getParameters().getEquationSystemCreationParameters(),
                                                    contingencyElements, contingenciesStates, actionElements, actionsStates);
         int operatorStrategyIndex = operatorStrategy != null ? operatorStrategy.getIndex() : -1;
         if (contingency != null && contingency.getGeneratorIdsToLose().isEmpty() && contingency.getLoadIdsToLose().isEmpty()) {
