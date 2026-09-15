@@ -56,6 +56,11 @@ public class IncrementalShuntVoltageControlOuterLoop extends AbstractShuntVoltag
         this.maxSectionShift = maxSectionShift;
     }
 
+    /** The largest section move one pass may make — for an alternative engine driving this loop. */
+    public int getMaxSectionShift() {
+        return maxSectionShift;
+    }
+
     @Override
     public String getName() {
         return NAME;
