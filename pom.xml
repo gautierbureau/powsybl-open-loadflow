@@ -87,6 +87,7 @@
                                 <include>com/powsybl/openloadflow/sensi/DcSensitivityAnalysisTest*.class</include>
                                 <include>com/powsybl/openloadflow/sensi/DcSensitivityAnalysisContingenciesTest*.class</include>
                                 <include>com/powsybl/openloadflow/sensi/DcSensitivityAnalysisActionsTest*.class</include>
+                                <include>com/powsybl/openloadflow/ts/TimeSeriesLoadFlowTest*.class</include>
                             </includes>
                         </configuration>
                     </execution>

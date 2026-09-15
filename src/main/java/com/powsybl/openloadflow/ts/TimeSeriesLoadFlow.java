@@ -329,7 +329,7 @@ public final class TimeSeriesLoadFlow {
                 if (batchSize > 1) {
                     for (NetworkRun run : runs) {
                         for (int step = chunkStart; step < chunkEnd; step++) {
-                            run.baseState().restore();
+                            run.engine().restoreState(run.baseState());
                             applySetpoints(run.setpoints(), step, networkParameters);
                             run.engine().prepare(step - chunkStart);
                         }
@@ -349,7 +349,7 @@ public final class TimeSeriesLoadFlow {
                         if (batchSize > 1) {
                             solveResult = run.engine().apply(step - chunkStart);
                         } else {
-                            run.baseState().restore();
+                            run.engine().restoreState(run.baseState());
                             applySetpoints(run.setpoints(), step, networkParameters);
                             solveResult = run.engine().solve();
                         }
@@ -680,6 +680,21 @@ public final class TimeSeriesLoadFlow {
         /** Make the slot's solution current on the network, and return its summary. */
         default SolveResult apply(int slot) {
             throw new UnsupportedOperationException("not a batched engine");
+        }
+
+        /**
+         * Put the network back where a step starts, before that step's set points are applied.
+         *
+         * <p>The default restores the snapshot taken before anything was solved, which undoes
+         * everything any engine could have changed. An engine that knows exactly what it dirties —
+         * a DC engine with no outer loop moves the generator targets it distributes the slack over
+         * and the phase shift of the branches carrying an angle variable, and nothing else — may
+         * override this to undo only that. It is then responsible for the step contract: after this
+         * call the network must be indistinguishable, for everything a step reads or emits, from the
+         * snapshot.
+         */
+        default void restoreState(NetworkState baseState) {
+            baseState.restore();
         }
 
         @Override
