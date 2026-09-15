@@ -83,6 +83,10 @@
                                 <include>com/powsybl/openloadflow/util/LoadFlowAssert.class</include>
                                 <include>com/powsybl/openloadflow/util/LoadFlowResultBuilder.class</include>
                                 <include>com/powsybl/openloadflow/sa/AbstractOpenSecurityAnalysisTest.class</include>
+                                <include>com/powsybl/openloadflow/sensi/AbstractSensitivityAnalysisTest.class</include>
+                                <include>com/powsybl/openloadflow/sensi/DcSensitivityAnalysisTest*.class</include>
+                                <include>com/powsybl/openloadflow/sensi/DcSensitivityAnalysisContingenciesTest*.class</include>
+                                <include>com/powsybl/openloadflow/sensi/DcSensitivityAnalysisActionsTest*.class</include>
                             </includes>
                         </configuration>
                     </execution>

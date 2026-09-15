@@ -123,7 +123,17 @@ public final class TimeSeriesLoadFlow {
      */
     public static TimeSeriesLoadFlowResult run(Network network, List<DoubleTimeSeries> plan,
                                                TimeSeriesLoadFlowParameters parameters, NetworkResultWriterFactory writerFactory) {
+        return run(network, plan, parameters, writerFactory, EnginePlanProvider.DEFAULT);
+    }
+
+    /**
+     * Same, with the engine plan built by the given provider instead of OLF's own.
+     */
+    public static TimeSeriesLoadFlowResult run(Network network, List<DoubleTimeSeries> plan,
+                                               TimeSeriesLoadFlowParameters parameters, NetworkResultWriterFactory writerFactory,
+                                               EnginePlanProvider enginePlanProvider) {
         Objects.requireNonNull(network, "network");
+        Objects.requireNonNull(enginePlanProvider, "enginePlanProvider");
         Objects.requireNonNull(plan, "plan");
         Objects.requireNonNull(parameters, "parameters");
         Objects.requireNonNull(writerFactory, "writerFactory");
@@ -208,7 +218,7 @@ public final class TimeSeriesLoadFlow {
         List<StepResult> results;
         if (ranges.size() == 1) {
             try (NetworkResultWriter writer = writerFactory.create(0)) {
-                EnginePlan enginePlan = buildEnginePlan(network, parameters, matrixFactory, connectivityFactory);
+                EnginePlan enginePlan = enginePlanProvider.create(network, parameters, matrixFactory, connectivityFactory);
                 network.getVariantManager().setWorkingVariant(workingVariantId);
                 try (LfNetworkList lfNetworks = Networks.loadWithReconnectableElements(network, new LfTopoConfig(),
                         enginePlan.networkParameters(), ReportNode.NO_OP)) {
@@ -217,7 +227,7 @@ public final class TimeSeriesLoadFlow {
             }
         } else {
             results = runMultiThread(network, workingVariantId, planSeries, vscHvdcInfo, index, ranges, parameters,
-                    matrixFactory, connectivityFactory, writerFactory);
+                    matrixFactory, connectivityFactory, writerFactory, enginePlanProvider);
         }
 
         results.sort(Comparator.comparingInt(StepResult::stepIndex));
@@ -228,7 +238,7 @@ public final class TimeSeriesLoadFlow {
                                                    Map<String, VscHvdcPlanInfo> vscHvdcInfo,
                                                    TimeSeriesIndex index, List<int[]> ranges, TimeSeriesLoadFlowParameters parameters,
                                                    MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory,
-                                                   NetworkResultWriterFactory writerFactory) {
+                                                   NetworkResultWriterFactory writerFactory, EnginePlanProvider enginePlanProvider) {
         boolean oldAllowVariantMultiThreadAccess = network.getVariantManager().isVariantMultiThreadAccessAllowed();
         network.getVariantManager().allowVariantMultiThreadAccess(true);
         ExecutorService executor = Executors.newFixedThreadPool(ranges.size());
@@ -237,7 +247,7 @@ public final class TimeSeriesLoadFlow {
             // Build one LfNetworkList per partition on the main thread: cloning an IIDM variant (done by the loader) is
             // not thread-safe, so all clones happen here, sequentially, before any parallel work starts.
             for (int i = 0; i < ranges.size(); i++) {
-                EnginePlan enginePlan = buildEnginePlan(network, parameters, matrixFactory, connectivityFactory);
+                EnginePlan enginePlan = enginePlanProvider.create(network, parameters, matrixFactory, connectivityFactory);
                 network.getVariantManager().setWorkingVariant(workingVariantId);
                 LfNetworkList lfNetworks = Networks.loadWithReconnectableElements(network, new LfTopoConfig(),
                         enginePlan.networkParameters(), ReportNode.NO_OP);
@@ -307,25 +317,49 @@ public final class TimeSeriesLoadFlow {
                 runs.add(new NetworkRun(lfNetwork, engine, setpoints, baseState));
             }
 
+            // An engine that solves several steps at once is driven in two phases per chunk: the set
+            // points of every step of the chunk are applied and captured, the chunk is solved, then
+            // each step's solution is made current on the network and emitted. Set points are applied
+            // exactly once per step either way, and the emitted values are read from the network in
+            // both, so a batched engine changes nothing about what a step means.
+            int batchSize = runs.stream().mapToInt(run -> Math.max(1, run.engine().batchSize())).min().orElse(1);
             List<StepResult> results = new ArrayList<>();
-            for (int step = range[0]; step < range[1]; step++) {
-                Instant timestamp = index.getInstantAt(step);
-                String stateId = timestamp.toString();
-                LoadFlowResult.ComponentResult.Status status = runs.isEmpty()
-                        ? LoadFlowResult.ComponentResult.Status.FAILED
-                        : LoadFlowResult.ComponentResult.Status.CONVERGED;
-                double distributedActivePower = 0;
-                double slackBusActivePowerMismatch = 0;
-                for (NetworkRun run : runs) {
-                    run.baseState().restore();
-                    applySetpoints(run.setpoints(), step, networkParameters);
-                    SolveResult solveResult = run.engine().solve();
-                    status = mergeStatus(status, solveResult.status());
-                    distributedActivePower += solveResult.distributedActivePower();
-                    slackBusActivePowerMismatch += solveResult.slackBusActivePowerMismatch();
-                    emit(run.lfNetwork(), stateId, solveResult.status(), loadFlowModel, dcPowerFactor, parameters, writer);
+            for (int chunkStart = range[0]; chunkStart < range[1]; chunkStart += batchSize) {
+                int chunkEnd = Math.min(chunkStart + batchSize, range[1]);
+                if (batchSize > 1) {
+                    for (NetworkRun run : runs) {
+                        for (int step = chunkStart; step < chunkEnd; step++) {
+                            run.baseState().restore();
+                            applySetpoints(run.setpoints(), step, networkParameters);
+                            run.engine().prepare(step - chunkStart);
+                        }
+                        run.engine().solveBatch(chunkEnd - chunkStart);
+                    }
                 }
-                results.add(new StepResult(step, timestamp, status, slackBusActivePowerMismatch, distributedActivePower));
+                for (int step = chunkStart; step < chunkEnd; step++) {
+                    Instant timestamp = index.getInstantAt(step);
+                    String stateId = timestamp.toString();
+                    LoadFlowResult.ComponentResult.Status status = runs.isEmpty()
+                            ? LoadFlowResult.ComponentResult.Status.FAILED
+                            : LoadFlowResult.ComponentResult.Status.CONVERGED;
+                    double distributedActivePower = 0;
+                    double slackBusActivePowerMismatch = 0;
+                    for (NetworkRun run : runs) {
+                        SolveResult solveResult;
+                        if (batchSize > 1) {
+                            solveResult = run.engine().apply(step - chunkStart);
+                        } else {
+                            run.baseState().restore();
+                            applySetpoints(run.setpoints(), step, networkParameters);
+                            solveResult = run.engine().solve();
+                        }
+                        status = mergeStatus(status, solveResult.status());
+                        distributedActivePower += solveResult.distributedActivePower();
+                        slackBusActivePowerMismatch += solveResult.slackBusActivePowerMismatch();
+                        emit(run.lfNetwork(), stateId, solveResult.status(), loadFlowModel, dcPowerFactor, parameters, writer);
+                    }
+                    results.add(new StepResult(step, timestamp, status, slackBusActivePowerMismatch, distributedActivePower));
+                }
             }
             return results;
         } finally {
@@ -592,7 +626,11 @@ public final class TimeSeriesLoadFlow {
         return ranges;
     }
 
-    private interface EnginePlan {
+    /**
+     * How a step is solved. An alternative implementation (another solver, a device) is installed
+     * through {@link EnginePlanProvider}.
+     */
+    public interface EnginePlan {
         LfNetworkParameters networkParameters();
 
         LoadFlowModel loadFlowModel();
@@ -600,16 +638,57 @@ public final class TimeSeriesLoadFlow {
         StepEngine createEngine(LfNetwork lfNetwork);
     }
 
-    private interface StepEngine extends AutoCloseable {
+    /** Builds the engine plan of a run; {@link #DEFAULT} is OLF's own AC and DC engines. */
+    @FunctionalInterface
+    public interface EnginePlanProvider {
+
+        EnginePlanProvider DEFAULT = TimeSeriesLoadFlow::buildEnginePlan;
+
+        EnginePlan create(Network network, TimeSeriesLoadFlowParameters parameters, MatrixFactory matrixFactory,
+                          GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory);
+    }
+
+    /**
+     * Solves one step of one network.
+     *
+     * <p>By default a step is solved on its own, right after its set points are applied. An engine
+     * that is faster on several steps at once — one factorization against many right-hand sides —
+     * reports a {@link #batchSize()} above one and is then driven in two phases: {@link
+     * #prepare(int)} once per step, with that step's set points applied on the network, then {@link
+     * #solveBatch(int)} once, then {@link #apply(int)} per step to make its solution current on the
+     * network so the results can be emitted. The set points of a step are applied exactly once
+     * either way.
+     */
+    public interface StepEngine extends AutoCloseable {
         SolveResult solve();
+
+        /** Steps this engine solves together; one means step by step, the default contract. */
+        default int batchSize() {
+            return 1;
+        }
+
+        /** Capture the step currently applied on the network into the batch slot. */
+        default void prepare(int slot) {
+            throw new UnsupportedOperationException("not a batched engine");
+        }
+
+        /** Solve the captured slots. */
+        default void solveBatch(int count) {
+            throw new UnsupportedOperationException("not a batched engine");
+        }
+
+        /** Make the slot's solution current on the network, and return its summary. */
+        default SolveResult apply(int slot) {
+            throw new UnsupportedOperationException("not a batched engine");
+        }
 
         @Override
         void close();
     }
 
-    private record SolveResult(LoadFlowResult.ComponentResult.Status status,
-                               double slackBusActivePowerMismatch,
-                               double distributedActivePower) {
+    public record SolveResult(LoadFlowResult.ComponentResult.Status status,
+                              double slackBusActivePowerMismatch,
+                              double distributedActivePower) {
     }
 
     /** One plan series, read once: the element it targets and its per-step values. */
