@@ -31,6 +31,18 @@ public class LfBranchImpl extends AbstractImpedantLfBranch {
 
     private final Ref<Branch<?>> branchRef;
 
+    /**
+     * The per-unit current to ampere scales of both sides, computed on first use and kept.
+     *
+     * <p>They are functions of the nominal voltages alone, and the branch's pi model already baked
+     * those in when the network was built, so a branch that outlives a nominal voltage change is
+     * stale either way. Recomputing them for every emitted row costs three network lookups per
+     * branch per step, which a time series pays millions of times over.
+     */
+    private double emitScale1 = Double.NaN;
+
+    private double emitScale2 = Double.NaN;
+
     protected LfBranchImpl(LfNetwork network, LfBus bus1, LfBus bus2, PiModel piModel, Branch<?> branch, LfNetworkParameters parameters) {
         super(network, bus1, bus2, piModel, parameters);
         this.branchRef = Ref.create(branch, parameters.isCacheEnabled());
@@ -234,10 +246,12 @@ public class LfBranchImpl extends AbstractImpedantLfBranch {
     @Override
     public void emitBranchResults(double preContingencyBranchP1, double preContingencyBranchOfContingencyP1,
                                   Map<String, LfBranch.LfBranchResults> zeroImpedanceFlows, LoadFlowModel loadFlowModel, BranchFlowConsumer consumer) {
-        var branch = getBranch();
-        double currentScale1 = PerUnit.ib(branch.getTerminal1().getVoltageLevel().getNominalV());
-        double currentScale2 = PerUnit.ib(branch.getTerminal2().getVoltageLevel().getNominalV());
-        emitBranchFlows(loadFlowModel, zeroImpedanceFlows, currentScale1, currentScale2, preContingencyBranchP1, preContingencyBranchOfContingencyP1, consumer);
+        if (Double.isNaN(emitScale1)) {
+            var branch = getBranch();
+            emitScale1 = PerUnit.ib(branch.getTerminal1().getVoltageLevel().getNominalV());
+            emitScale2 = PerUnit.ib(branch.getTerminal2().getVoltageLevel().getNominalV());
+        }
+        emitBranchFlows(loadFlowModel, zeroImpedanceFlows, emitScale1, emitScale2, preContingencyBranchP1, preContingencyBranchOfContingencyP1, consumer);
     }
 
     private <T extends LoadingLimits> Supplier<Map<String, T>> toMapIndexedByOperationalLimitsGroupId(Function<OperationalLimitsGroup, Optional<T>> limitsGetter, TwoSides side) {

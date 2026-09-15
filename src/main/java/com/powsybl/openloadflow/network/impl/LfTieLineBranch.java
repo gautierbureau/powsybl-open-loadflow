@@ -26,6 +26,10 @@ import java.util.stream.Collectors;
  */
 public class LfTieLineBranch extends AbstractImpedantLfBranch {
 
+    private double emitScale1 = Double.NaN;
+
+    private double emitScale2 = Double.NaN;
+
     private final Ref<BoundaryLine> boundaryLine1Ref;
 
     private final Ref<BoundaryLine> boundaryLine2Ref;
@@ -106,10 +110,13 @@ public class LfTieLineBranch extends AbstractImpedantLfBranch {
     @Override
     public void emitBranchResults(double preContingencyBranchP1, double preContingencyBranchOfContingencyP1,
                                   Map<String, LfBranchResults> zeroImpedanceFlows, LoadFlowModel loadFlowModel, BranchFlowConsumer consumer) {
-        double currentScale1 = PerUnit.ib(getHalf1().getTerminal().getVoltageLevel().getNominalV());
-        double currentScale2 = PerUnit.ib(getHalf2().getTerminal().getVoltageLevel().getNominalV());
+        if (Double.isNaN(emitScale1)) {
+            // computed once: see LfBranchImpl, the nominal voltages are already baked into the pi model
+            emitScale1 = PerUnit.ib(getHalf1().getTerminal().getVoltageLevel().getNominalV());
+            emitScale2 = PerUnit.ib(getHalf2().getTerminal().getVoltageLevel().getNominalV());
+        }
         // emit the tie-line first (kept first in createBranchResult), then each half line (side 1 only, like createBranchResult)
-        emitBranchFlows(loadFlowModel, zeroImpedanceFlows, currentScale1, currentScale2, preContingencyBranchP1, preContingencyBranchOfContingencyP1,
+        emitBranchFlows(loadFlowModel, zeroImpedanceFlows, emitScale1, emitScale2, preContingencyBranchP1, preContingencyBranchOfContingencyP1,
             (id, p1v, q1v, i1v, p2v, q2v, i2v, flowTransfer) -> {
                 consumer.accept(id, p1v, q1v, i1v, p2v, q2v, i2v, flowTransfer);
                 consumer.accept(getHalf1().getId(), p1v, q1v, i1v, Double.NaN, Double.NaN, Double.NaN, flowTransfer);
