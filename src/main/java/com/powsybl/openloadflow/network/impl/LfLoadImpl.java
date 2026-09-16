@@ -175,11 +175,17 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
 
     @Override
     public void setOriginalLoadP0(String originalId, double p0) {
-        double oldP0 = getLoadP0(originalId);
+        // one hash lookup, not two: put returns the previous value, and writing p0 before the equality
+        // check is harmless because the value written in that case is the one already there
+        Double previous = loadsP0.put(originalId, p0);
+        if (previous == null) {
+            loadsP0.remove(originalId);
+            throw new PowsyblException("Load '" + originalId + "' is not an original load of '" + getId() + "'");
+        }
+        double oldP0 = previous;
         if (p0 == oldP0) {
             return;
         }
-        loadsP0.put(originalId, p0);
         // The aggregate follows the set point by the same amount, keeping whatever slack distribution had already
         // moved it by. On a network that has just been restored the two are equal, so both end up on the new p0.
         double diffP0 = p0 - oldP0;
@@ -207,11 +213,16 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
 
     @Override
     public void setOriginalLoadQ0(String originalId, double q0) {
-        double oldQ0 = getLoadQ0(originalId);
+        // one hash lookup, not two: see setOriginalLoadP0
+        Double previous = loadsQ0.put(originalId, q0);
+        if (previous == null) {
+            loadsQ0.remove(originalId);
+            throw new PowsyblException("Load '" + originalId + "' is not an original load of '" + getId() + "'");
+        }
+        double oldQ0 = previous;
         if (q0 == oldQ0) {
             return;
         }
-        loadsQ0.put(originalId, q0);
         // No initial counterpart to keep in step, unlike p0: reactive power has no equivalent of the initial target the
         // active power distribution measures its own movement against.
         setTargetQ(targetQ + q0 - oldQ0);
