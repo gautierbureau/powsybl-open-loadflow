@@ -46,7 +46,7 @@ public class PiModelArray implements PiModel {
         maxR1 = this.models.stream().mapToDouble(PiModel::getMaxR1).max().orElseThrow();
     }
 
-    List<PiModel> getModels() {
+    public List<PiModel> getModels() {
         return models;
     }
 
