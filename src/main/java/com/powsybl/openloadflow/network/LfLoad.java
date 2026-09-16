@@ -95,6 +95,25 @@ public interface LfLoad extends PropertyBag {
 
     int getOriginalLoadCount();
 
+    /**
+     * The identifier of the original load at {@code index}, in {@code [0, getOriginalLoadCount())}.
+     *
+     * <p>The positional accessors below exist so that saving and restoring a load's set points costs
+     * neither a hash lookup nor boxing: the order is the order the loads were added to the aggregate
+     * and never changes, so a state saved at an index restores to the same load.
+     */
+    String getOriginalLoadId(int index);
+
+    double getOriginalLoadP0(int index);
+
+    double getOriginalLoadQ0(int index);
+
+    /** {@link #setOriginalLoadP0(String, double)} by position. */
+    void setOriginalLoadP0(int index, double p0);
+
+    /** {@link #setOriginalLoadQ0(String, double)} by position. */
+    void setOriginalLoadQ0(int index, double q0);
+
     boolean isOriginalLoadDisabled(String originalId);
 
     void setOriginalLoadDisabled(String originalId, boolean disabled);
