@@ -148,6 +148,30 @@ public final class ActivePowerDistribution {
             iteration++;
         }
 
+        // OLF_DS_SPLIT=<file>: what this run actually put on each participating BUS, as
+        // sum over its generators of (targetP - initialTargetP). The device's batched path dumps the
+        // same quantity per DS row (GPU_DS_TARGET ... delta=), so the two are directly comparable and
+        // a difference in the SPLIT shows up here even when the cumulative TOTAL agrees (measured: it
+        // does, to 5e-05 pu, on rte6515 GEN-6172).
+        String splitFile = System.getenv("OLF_DS_SPLIT");
+        if (splitFile != null) {
+            try (java.io.PrintWriter w = new java.io.PrintWriter(new java.io.FileWriter(splitFile, true))) {
+                w.printf("# DS_SPLIT mismatch=%.9f previousMismatch=%.9f effectiveIn=%.9f "
+                        + "remaining=%.9f iterations=%d%n",
+                        activePowerMismatch, previousStateInfo.previousMismatch(),
+                        activePowerMismatch + previousStateInfo.previousMismatch(), remainingMismatch, iteration);
+                for (LfBus b : participatingBuses) {
+                    double moved = b.getGenerators().stream()
+                            .filter(LfGenerator::isParticipating)
+                            .mapToDouble(g -> g.getTargetP() - g.getInitialTargetP()).sum();
+                    if (moved != 0) {
+                        w.printf("%s %.12f%n", b.getId(), moved);
+                    }
+                }
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        }
         return new Result(iteration, remainingMismatch, previousStateInfo.moved());
     }
 
