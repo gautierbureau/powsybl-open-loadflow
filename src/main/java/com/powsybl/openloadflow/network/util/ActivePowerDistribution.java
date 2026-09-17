@@ -167,6 +167,16 @@ public final class ActivePowerDistribution {
                     if (moved != 0) {
                         w.printf("%s %.12f%n", b.getId(), moved);
                     }
+                    // ...and PER GENERATOR. A device that reconstructs a generator's own P from its
+                    // bus's total by a fixed proportional share is exact only while the intra-bus
+                    // split stays proportional, which per-generator clamping breaks. That is
+                    // invisible in the per-bus line and plain here.
+                    for (LfGenerator g : b.getGenerators()) {
+                        if (g.isParticipating() && g.getTargetP() != g.getInitialTargetP()) {
+                            w.printf("G %s %s %.12f %.12f%n", b.getId(), g.getId(),
+                                    g.getTargetP() - g.getInitialTargetP(), g.getTargetP());
+                        }
+                    }
                 }
             } catch (java.io.IOException e) {
                 throw new java.io.UncheckedIOException(e);
