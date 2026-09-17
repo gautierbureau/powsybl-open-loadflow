@@ -165,7 +165,10 @@ public final class ActivePowerDistribution {
                             .filter(LfGenerator::isParticipating)
                             .mapToDouble(g -> g.getTargetP() - g.getInitialTargetP()).sum();
                     if (moved != 0) {
-                        w.printf("%s %.12f%n", b.getId(), moved);
+                        // ...and the bus's ABSOLUTE P target, which is what a device row target holds.
+                        // Per-generator absolute P is not comparable across implementations (a device
+                        // that water-fills per generator still anchors per BUS), but this is.
+                        w.printf("%s %.12f %.12f%n", b.getId(), moved, b.getTargetP());
                     }
                     // ...and PER GENERATOR. A device that reconstructs a generator's own P from its
                     // bus's total by a fixed proportional share is exact only while the intra-bus
