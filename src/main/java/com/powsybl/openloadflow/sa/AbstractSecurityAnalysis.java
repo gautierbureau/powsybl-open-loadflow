@@ -826,6 +826,12 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             propagatedContingency.getContingency(), securityAnalysisParameters, contingencyLoadFlowParameters, postContSimReportNode);
 
         long tSim = System.nanoTime();
+        if (System.getenv("OLF_NR_TRACE") != null) {
+            // Which contingency the NR_ENTER/NR_ITER/NR_EXIT lines that follow belong to. Without it
+            // a multi-contingency run's traces cannot be attributed at all, and comparing the two
+            // arms' SOLVE SEQUENCES - not their final quantities - is how a divergence gets located.
+            System.err.println("CPU_CTG ctg=" + propagatedContingency.getContingency().getId());
+        }
         var postContingencyResult = runPostContingencySimulation(lfNetwork, context, propagatedContingency.getContingency(),
             lfContingency, preContingencyLimitViolationManager,
             securityAnalysisParameters,
