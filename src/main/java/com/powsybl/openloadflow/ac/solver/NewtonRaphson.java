@@ -50,6 +50,37 @@ public class NewtonRaphson extends AbstractAcSolver {
     }
 
     private static boolean dxDumped;
+    private static boolean eqDumped;
+
+    /** OLF_EQ_DUMP=&lt;path&gt;: the equation system OLF is about to solve, as text, once per JVM.
+     *  The device's row layout is a per-scenario overlay on a single base system, so "which equation
+     *  is at this row" is the one question a residual cannot answer on its own — and OLF will simply
+     *  print it. Inactive equations included: a row the device assembles and OLF has deactivated is
+     *  exactly the kind of mismatch this is for. */
+    private void dumpEquations(String path) {
+        eqDumped = true;
+        try (java.io.PrintWriter w = new java.io.PrintWriter(new java.io.FileWriter(path))) {
+            w.println("=== variables (row -> variable)");
+            for (var v : equationSystem.getIndex().getSortedVariablesToFind()) {
+                w.printf("var row=%d type=%s elementNum=%d%n", v.getRow(), v.getType(), v.getElementNum());
+            }
+            w.println("=== equations (column -> equation)");
+            int nCols = equationSystem.getIndex().getSortedVariablesToFind().size();
+            for (int c = 0; c < nCols; c++) {
+                var eq = equationSystem.getIndex().getEquationAtColumn(c);
+                var el = eq == null ? null
+                        : network.getElement(eq.getType().getElementType(), eq.getElementNum());
+                w.printf("eq col=%d type=%s elementNum=%d id=%s%n", c,
+                        eq == null ? "?" : eq.getType().toString(),
+                        eq == null ? -1 : eq.getElementNum(), el == null ? "?" : el.getId());
+            }
+            w.println("=== writeToString(true)");
+            w.println(equationSystem.writeToString(true));
+        } catch (java.io.IOException e) {
+            System.err.println("OLF_EQ_DUMP failed: " + e);
+        }
+        System.err.println("OLF_EQ_DUMP wrote " + path);
+    }
 
     private void dumpFirstStep(String path, double[] fx, double[] dx) {
         com.powsybl.math.matrix.Matrix m = j.getMatrix();
@@ -150,6 +181,9 @@ public class NewtonRaphson extends AbstractAcSolver {
 
     @Override
     public AcSolverResult run(VoltageInitializer voltageInitializer, ReportNode reportNode) {
+        if (System.getenv("OLF_EQ_DUMP") != null && !eqDumped) {
+            dumpEquations(System.getenv("OLF_EQ_DUMP"));
+        }
         // initialize state vector
         AcSolverUtil.initStateVector(network, equationSystem, voltageInitializer);
 
@@ -213,8 +247,30 @@ public class NewtonRaphson extends AbstractAcSolver {
                                 dp == null ? -1 : dp.getRow());
                     }
                 }
-                System.err.printf("NR_ITER it=%d ||F||2=%.17e ||F||inf=%.17e%s%n",
-                        iterations.getValue(), Math.sqrt(ssq), inf, probe);
+                // The WORST row's identity, not just its magnitude. A solve that enters at a
+                // residual the other arm does not have is carrying a target the other arm did not
+                // set, and the only way to say WHICH is to name the equation and its element.
+                int argw = -1;
+                double[] fa = equationVector.getArray();
+                for (int i = 0; i < fa.length; i++) {
+                    if (Math.abs(fa[i]) >= inf) {
+                        argw = i;
+                        break;
+                    }
+                }
+                String worst = "";
+                if (argw >= 0) {
+                    var eqw = equationSystem.getIndex().getEquationAtColumn(argw);
+                    var elw = eqw == null ? null
+                            : network.getElement(eqw.getType().getElementType(), eqw.getElementNum());
+                    worst = String.format(" worstRow=%d eq=%s elem=%d id=%s target=%.17e", argw,
+                            eqw == null ? "?" : eqw.getType().toString(),
+                            eqw == null ? -1 : eqw.getElementNum(),
+                            elw == null ? "?" : elw.getId(),
+                            targetVector.getArray()[argw]);
+                }
+                System.err.printf("NR_ITER it=%d ||F||2=%.17e ||F||inf=%.17e%s%s%n",
+                        iterations.getValue(), Math.sqrt(ssq), inf, probe, worst);
             }
             AcSolverStatus newStatus = runIteration(svScaling, iterations, reportNode);
             if (newStatus != null) {
