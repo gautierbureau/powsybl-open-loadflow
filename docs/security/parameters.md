@@ -53,6 +53,23 @@ The thread pool used for getting threads is the one provided by the `Computation
 
 The default value is 1.
 
+(param-secu-operator-strategy-parallelization)=
+### operatorStrategyParallelization
+The `operatorStrategyParallelization` property changes the way work is split between the `threadCount` threads.
+By default the split is done on the contingencies only: each thread owns a subset of the contingencies and runs all
+their operator strategies. This gives no speed-up when the analysis has few contingencies but many operator strategies
+(in the extreme, a single contingency carrying many operator strategies, where all the work stays on a single thread).
+
+When `operatorStrategyParallelization` is set to `true`, the operator strategies of a given contingency can be spread
+over several threads to balance such a workload. A contingency may then be simulated by several threads (each one
+re-computes its post-contingency state before evaluating the operator strategies assigned to it), so this is a trade-off
+between a better balancing and some redundant post-contingency computations; it is worthwhile when the number of operator
+strategies per contingency is large. This balancing is only applied when every operator strategy targets a specific
+contingency; otherwise the analysis falls back to the contingency-level parallelization. It has no effect when
+`threadCount` is 1. The results are identical to a single threaded run.
+
+The default value is `false`.
+
 (param-secu-dc-fast-mode)=
 ### dcFastMode
 The `dcFastMode` property allows to use fast DC security analysis, based on Woodbury's formula for calculating post-contingency states, 
@@ -108,6 +125,7 @@ open-security-analysis-default-parameters:
   contingencyPropagation: true
   createResultExtension: false
   threadCount: 1
+  operatorStrategyParallelization: false
   dcFastMode: false
   contingencyActivePowerLossDistribution: Default
 ```
