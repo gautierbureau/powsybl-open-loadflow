@@ -831,16 +831,6 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             // a multi-contingency run's traces cannot be attributed at all, and comparing the two
             // arms' SOLVE SEQUENCES - not their final quantities - is how a divergence gets located.
             System.err.println("CPU_CTG ctg=" + propagatedContingency.getContingency().getId());
-            // What OLF's own contingency DISABLED: the buses and branches its connectivity pass removed.
-            // The device derives the same set from its own pass on its own topology; a bus present
-            // here and absent there is a control whose death the device never learned about.
-            if (lfContingency != null) {
-                System.err.println("CPU_CTG_DISABLED ctg=" + propagatedContingency.getContingency().getId()
-                        + " buses=" + lfContingency.getDisabledNetwork().getBuses().stream()
-                                .map(com.powsybl.openloadflow.network.LfBus::getId).sorted().toList()
-                        + " branches=" + lfContingency.getDisabledNetwork().getBranchesStatus().keySet().stream()
-                                .map(com.powsybl.openloadflow.network.LfBranch::getId).sorted().toList());
-            }
         }
         var postContingencyResult = runPostContingencySimulation(lfNetwork, context, propagatedContingency.getContingency(),
             lfContingency, preContingencyLimitViolationManager,
