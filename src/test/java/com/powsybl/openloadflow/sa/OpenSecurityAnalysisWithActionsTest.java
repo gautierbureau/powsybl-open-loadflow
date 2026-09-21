@@ -2373,6 +2373,7 @@ class OpenSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnalysisTe
      *  loaded into the bus aggregate at section 0, and the action restores its section count.
      *  Cross-check: the strategy state must EQUAL the post-contingency state of the same network
      *  with the shunt connected at base — identical equations, so 1e-6. */
+    @SuppressWarnings("checkstyle:LambdaBodyLength")
     @Test
     void testReconnectBaseOpenShuntAction() {
         java.util.function.Function<Boolean, Network> build = connectShunt -> {
