@@ -117,7 +117,6 @@ public class LfTopoConfig {
         return shuntIdsToClose.contains(shuntId);
     }
 
-
     public Set<String> getBranchIdsOpenableSide1() {
         return branchIdsOpenableSide1;
     }
