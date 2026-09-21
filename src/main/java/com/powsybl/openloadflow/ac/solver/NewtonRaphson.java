@@ -271,23 +271,6 @@ public class NewtonRaphson extends AbstractAcSolver {
                 }
                 System.err.printf("NR_ITER it=%d ||F||2=%.17e ||F||inf=%.17e%s%s%n",
                         iterations.getValue(), Math.sqrt(ssq), inf, probe, worst);
-                // The eight worst rows with their identities: the device prints the same list by
-                // index, and the two lists side by side say which EQUATIONS carry a residual on one
-                // arm only.
-                Integer[] ord = new Integer[fa.length];
-                for (int i = 0; i < fa.length; i++) {
-                    ord[i] = i;
-                }
-                java.util.Arrays.sort(ord, (a, b) -> Double.compare(Math.abs(fa[b]), Math.abs(fa[a])));
-                StringBuilder top = new StringBuilder("NR_TOP it=" + iterations.getValue() + " :");
-                for (int k = 0; k < Math.min(8, ord.length); k++) {
-                    var eqk = equationSystem.getIndex().getEquationAtColumn(ord[k]);
-                    var elk = eqk == null ? null
-                            : network.getElement(eqk.getType().getElementType(), eqk.getElementNum());
-                    top.append(String.format(" [%d]=%.9e %s(%s)", ord[k], fa[ord[k]],
-                            eqk == null ? "?" : eqk.getType().toString(), elk == null ? "?" : elk.getId()));
-                }
-                System.err.println(top);
             }
             AcSolverStatus newStatus = runIteration(svScaling, iterations, reportNode);
             if (newStatus != null) {
