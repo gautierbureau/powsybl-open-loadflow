@@ -435,6 +435,46 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
         List<ControllerBusToPqBus> reactiveControllerBusesToPqBuses = new ArrayList<>();
         MutableInt remainingBusWithReactivePowerControlCount = new MutableInt();
 
+        // OLF_RL_PROBE_BUS=<id>[,<id>]: does this outer loop even LOOK at that bus, and with what
+        // numbers? A GPU/CPU pin mismatch cannot be told apart from a q mismatch without knowing
+        // whether OLF reached checkControllerBus at all - a bus that is not a GENERATOR controller
+        // element, or whose control is disabled, is never checked and so never pinned, which looks
+        // identical from outside to "its q is within limits".
+        String rlProbe = System.getenv("OLF_RL_PROBE_BUS");
+        java.util.Set<String> rlProbeIds = rlProbe == null ? java.util.Set.of()
+                : java.util.Set.of(rlProbe.split(","));
+        if (!rlProbeIds.isEmpty()) {
+            java.util.Set<String> seen = new java.util.HashSet<>();
+            context.getNetwork().<LfBus>getControllerElements(VoltageControl.Type.GENERATOR)
+                    .forEach(b -> seen.add(b.getId()));
+            for (String id : rlProbeIds) {
+                LfBus b = context.getNetwork().getBusById(id);
+                System.err.printf("RL_PROBE bus=%s isGenVcControllerElement=%s vcEnabled=%s"
+                        + " disabled=%s q=%s loadQ=%s minQ=%s maxQ=%s tol=%s%n",
+                        id, seen.contains(id),
+                        b == null ? "?" : Boolean.toString(b.isGeneratorVoltageControlEnabled()),
+                        b == null ? "?" : Boolean.toString(b.isDisabled()),
+                        b == null ? "?" : Double.toString(b.getQ().eval()),
+                        b == null ? "?" : Double.toString(b.getLoadTargetQ()),
+                        b == null ? "?" : Double.toString(b.getMinQ()),
+                        b == null ? "?" : Double.toString(b.getMaxQ()),
+                        Double.toString(maxReactivePowerMismatch));
+                // Per-BRANCH decomposition of that bus q. The device builds the same quantity from
+                // its own table (remoteMemberQPack), so a term-by-term diff is the only way to say
+                // WHICH term the two disagree on - the totals alone cannot.
+                if (b != null) {
+                    for (LfBranch br : b.getBranches()) {
+                        boolean side1 = br.getBus1() == b;
+                        var term = side1 ? br.getQ1() : br.getQ2();
+                        System.err.printf("RL_PROBE_BR bus=%s branch=%s num=%d side=%d disabled=%s"
+                                + " b1=%s b2=%s q=%s%n", id, br.getId(), br.getNum(), side1 ? 0 : 1,
+                                br.isDisabled(), Double.toString(br.getPiModel().getB1()),
+                                Double.toString(br.getPiModel().getB2()),
+                                term == null ? "null" : Double.toString(term.eval()));
+                    }
+                }
+            }
+        }
         context.getNetwork().<LfBus>getControllerElements(VoltageControl.Type.GENERATOR).forEach(bus -> {
             if (bus.isGeneratorVoltageControlEnabled()) {
                 checkControllerBus(bus, pvToPqBuses, remainingPvBusCount);
