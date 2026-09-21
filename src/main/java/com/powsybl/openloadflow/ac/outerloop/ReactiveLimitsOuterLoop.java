@@ -459,6 +459,29 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
                         b == null ? "?" : Double.toString(b.getMinQ()),
                         b == null ? "?" : Double.toString(b.getMaxQ()),
                         Double.toString(maxReactivePowerMismatch));
+                if (b != null) {
+                    // The DISTR_Q participation, per group member. OLF RECREATES the distribution
+                    // equations when the group changes (recreateReactivePowerDistributionEquations),
+                    // so these percents are not necessarily the base ones; a device that keeps the
+                    // base percents solves a DIFFERENT sharing equation while every other equation
+                    // still matches.
+                    b.getGeneratorVoltageControl().ifPresent(vc -> {
+                        for (LfBus m : vc.getMergedControllerElements()) {
+                            System.err.printf("RL_PROBE_QPCT probe=%s member=%s qPercent=%s enabled=%s"
+                                    + " disabled=%s distrQ=%s q=%s%n", id, m.getId(),
+                                    Double.toString(m.getRemoteControlReactivePercent()),
+                                    vc.isControllerEnabled(m), m.isDisabled(),
+                                    Boolean.toString(m.getGeneratorVoltageControl().isPresent()),
+                                    Double.toString(m.getQ().eval()));
+                        }
+                    });
+                    // What a PINNED bus is actually solved against. The device carries its own copy
+                    // of this into every post-contingency scenario, so a carried target that differs
+                    // moves the whole solve while the BASE states still agree bit for bit.
+                    System.err.printf("RL_PROBE_TGT bus=%s genTargetQ=%s vcEnabled=%s v=%s%n",
+                            id, Double.toString(b.getGenerationTargetQ()),
+                            b.isGeneratorVoltageControlEnabled(), Double.toString(b.getV()));
+                }
                 // Per-BRANCH decomposition of that bus q. The device builds the same quantity from
                 // its own table (remoteMemberQPack), so a term-by-term diff is the only way to say
                 // WHICH term the two disagree on - the totals alone cannot.
