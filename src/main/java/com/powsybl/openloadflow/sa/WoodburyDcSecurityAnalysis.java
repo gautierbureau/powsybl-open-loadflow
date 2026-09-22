@@ -140,6 +140,7 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 .toList();
         List<ComputedElement> actionElements = operatorStrategyLfActions.stream()
                 .map(actionElementByLfAction::get)
+                .filter(Objects::nonNull) // generator and load actions modify the target vector and have no element
                 .flatMap(Collection::stream)
                 .filter(actionElement -> !elementsToReconnect.contains(actionElement.getLfBranch().getId()))
                 .toList();
@@ -200,16 +201,27 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
         lfContingency.apply(loadFlowContext.getParameters().getBalanceType());
 
-        // update post contingency network result
-        var postContingencyNetworkResult = new PostContingencyNetworkResult(lfNetwork, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex),
-                woodburyContext.createResultExtension, preContingencyNetworkResult, contingency,
-                LoadFlowModel.DC, woodburyContext.dcLoadFlowContext().getParameters().getEquationSystemCreationParameters().getDcPowerFactor(),
-                woodburyContext.modifiedMonitoredElementsParameters());
-        postContingencyNetworkResult.update(isBranchDisabledDueToContingency);
+        double dcPowerFactor = woodburyContext.dcLoadFlowContext().getParameters().getEquationSystemCreationParameters().getDcPowerFactor();
 
         // detect violations
         var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, woodburyContext.limitReductions, woodburyContext.violationsParameters);
         postContingencyLimitViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency);
+
+        NetworkResult networkResult;
+        if (monitorAllBranches) {
+            // vectorized: stream all branch flows to the partition writer, keep no network result in memory
+            streamAllBranchFlows(lfNetwork, contingency.getId(), "", PostContingencyComputationStatus.CONVERGED.name(),
+                    LoadFlowModel.DC, dcPowerFactor, currentPartitionWriter(), isBranchDisabledDueToContingency);
+            networkResult = EMPTY_NETWORK_RESULT;
+        } else {
+            var postContingencyNetworkResult = new PostContingencyNetworkResult(lfNetwork, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex),
+                    woodburyContext.createResultExtension, preContingencyNetworkResult, contingency,
+                    LoadFlowModel.DC, dcPowerFactor, woodburyContext.modifiedMonitoredElementsParameters());
+            postContingencyNetworkResult.update(isBranchDisabledDueToContingency);
+            networkResult = new NetworkResult(postContingencyNetworkResult.getBranchResults(),
+                    postContingencyNetworkResult.getBusResults(),
+                    postContingencyNetworkResult.getThreeWindingsTransformerResults());
+        }
 
         // connectivity result due to the contingency
         var connectivityResult = new ConnectivityResult(
@@ -222,9 +234,7 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 contingency,
                 PostContingencyComputationStatus.CONVERGED,
                 new LimitViolationsResult(postContingencyLimitViolationManager.getLimitViolations()),
-                new NetworkResult(postContingencyNetworkResult.getBranchResults(),
-                postContingencyNetworkResult.getBusResults(),
-                postContingencyNetworkResult.getThreeWindingsTransformerResults()),
+                networkResult,
                 connectivityResult,
                 Double.NaN  // TODO: report distributed active power in Fast DC SA
         );
@@ -245,34 +255,46 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         DcLoadFlowContext loadFlowContext = woodburyContext.dcLoadFlowContext;
         LfNetwork lfNetwork = loadFlowContext.getNetwork();
 
+        // apply modifications first, so that branch flows (which, in the vectorized equation system, are
+        // computed on state vector update) are evaluated on the final network topology and tap positions
+        lfContingency.apply(loadFlowContext.getParameters().getBalanceType());
+        LfActionUtils.applyListOfActions(operatorStrategyLfActions, lfNetwork, lfContingency, loadFlowContext.getParameters().getNetworkParameters());
+
         // update network state with post contingency and post operator strategy states
         loadFlowContext.getEquationSystem().getStateVector().set(postContingencyAndOperatorStrategyStates);
         updateNetwork(lfNetwork, loadFlowContext.getEquationSystem(), postContingencyAndOperatorStrategyStates);
 
-        // apply modifications to compute results
-        lfContingency.apply(loadFlowContext.getParameters().getBalanceType());
-        LfActionUtils.applyListOfActions(operatorStrategyLfActions, lfNetwork, lfContingency, loadFlowContext.getParameters().getNetworkParameters());
 
-        // update network result
-        var postActionsNetworkResult = new PostContingencyNetworkResult(lfNetwork, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex),
-                woodburyContext.createResultExtension, preContingencyNetworkResult, contingency, LoadFlowModel.DC,
-                loadFlowContext.getParameters().getEquationSystemCreationParameters().getDcPowerFactor(),
-                woodburyContext.modifiedMonitoredElementsParameters);
-        postActionsNetworkResult.update(isBranchDisabledDueToContingency);
+        double dcPowerFactor = loadFlowContext.getParameters().getEquationSystemCreationParameters().getDcPowerFactor();
 
         // detect violations
         var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager,
                 woodburyContext.limitReductions, woodburyContext.violationsParameters);
         postActionsViolationManager.detectViolations(lfNetwork, isBranchDisabledDueToContingency);
 
+        NetworkResult networkResult;
+        if (monitorAllBranches) {
+            // vectorized: stream all operator-strategy branch flows (tagged with the operator strategy id), keep no
+            // network result in memory
+            streamAllBranchFlows(lfNetwork, contingency.getId(), operatorStrategy.getId(), PostContingencyComputationStatus.CONVERGED.name(),
+                    LoadFlowModel.DC, dcPowerFactor, currentPartitionWriter(), isBranchDisabledDueToContingency);
+            networkResult = EMPTY_NETWORK_RESULT;
+        } else {
+            var postActionsNetworkResult = new PostContingencyNetworkResult(lfNetwork, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex),
+                    woodburyContext.createResultExtension, preContingencyNetworkResult, contingency, LoadFlowModel.DC,
+                    dcPowerFactor, woodburyContext.modifiedMonitoredElementsParameters);
+            postActionsNetworkResult.update(isBranchDisabledDueToContingency);
+            networkResult = new NetworkResult(postActionsNetworkResult.getBranchResults(),
+                    postActionsNetworkResult.getBusResults(),
+                    postActionsNetworkResult.getThreeWindingsTransformerResults());
+        }
+
         return new OperatorStrategyResult(operatorStrategy,
             List.of(
                 new OperatorStrategyResult.ConditionalActionsResult(
                     operatorStrategy.getId(), PostContingencyComputationStatus.CONVERGED,
                     new LimitViolationsResult(postActionsViolationManager.getLimitViolations()),
-                    new NetworkResult(postActionsNetworkResult.getBranchResults(),
-                        postActionsNetworkResult.getBusResults(),
-                        postActionsNetworkResult.getThreeWindingsTransformerResults()),
+                    networkResult,
                     Double.NaN) // TODO: report distributed active power in Fast DC SA
             )
         );
@@ -425,9 +447,19 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
             // update network result
             List<StateMonitor> zeroImpedanceStateMonitors = extractZeroImpedanceStateMonitors(lfNetwork);
             this.zeroImpedanceMonitoredIndex = new StateMonitorIndex(zeroImpedanceStateMonitors);
+            double dcPowerFactor = securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor();
             var preContingencyNetworkResult = new PreContingencyNetworkResult(lfNetwork, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex),
-                createResultExtension, LoadFlowModel.DC, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor());
-            preContingencyNetworkResult.update();
+                createResultExtension, LoadFlowModel.DC, dcPowerFactor);
+            if (monitorAllBranches) {
+                // vectorized: stream all base-case branch flows directly, skip building the in-memory network result
+                // (only partition 0 writes the base case, to avoid duplicating it across partitions)
+                if (isPartitionWritingPreContingency()) {
+                    streamAllBranchFlows(lfNetwork, "", "", LoadFlowResult.ComponentResult.Status.CONVERGED.name(), LoadFlowModel.DC,
+                            dcPowerFactor, currentPartitionWriter(), LfBranch::isDisabled);
+                }
+            } else {
+                preContingencyNetworkResult.update();
+            }
 
             // detect violations
             var preContingencyLimitViolationManager = new LimitViolationManager(limitReductions);
@@ -440,7 +472,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
             ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivityBreakAnalysisResults = ConnectivityBreakAnalysis.run(context, propagatedContingencies);
 
             // the map is indexed by lf actions as different kind of actions can be given on the same branch
-            Map<LfAction, List<ComputedElement>> actionElementsIndexByLfAction = ComputedElement.createActionElementsIndexByLfAction(lfActionById, context.getEquationSystem());
+            Map<LfAction, List<ComputedElement>> actionElementsIndexByLfAction = ComputedElement.createActionElementsIndexByLfAction(lfActionById, context.getEquationSystem(),
+                    context.getParameters().getEquationSystemCreationParameters());
 
             // compute states with +1 -1 to model the actions in Woodbury engine
             // note that the number of columns in the matrix depends on the number of distinct branches affected by the action elements

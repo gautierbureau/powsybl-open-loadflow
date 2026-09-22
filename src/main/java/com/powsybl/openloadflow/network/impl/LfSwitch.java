@@ -367,6 +367,12 @@ public class LfSwitch extends AbstractLfBranch {
     }
 
     @Override
+    public void emitBranchResults(double preContingencyBranchP1, double preContingencyBranchOfContingencyP1,
+                                  Map<String, LfBranchResults> zeroImpedanceFlows, LoadFlowModel loadFlowModel, BranchFlowConsumer consumer) {
+        // switches are not reported as branch results
+    }
+
+    @Override
     public List<LfLimitsGroup> getLimits1(final LimitType type, LimitReductionManager limitReductionManager) {
         return Collections.emptyList();
     }

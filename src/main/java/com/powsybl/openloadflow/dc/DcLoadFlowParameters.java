@@ -37,8 +37,21 @@ public class DcLoadFlowParameters extends AbstractLoadFlowParameters<DcLoadFlowP
 
     private double areaInterchangePMaxMismatch = OpenLoadFlowParameters.AREA_INTERCHANGE_P_MAX_MISMATCH_DEFAULT_VALUE;
 
+    static boolean vectorizedDefaultValue = true; // package-private value for test purpose (TODO: to remove)
+
+    private boolean vectorized = vectorizedDefaultValue;
+
     public DcEquationSystemCreationParameters getEquationSystemCreationParameters() {
         return equationSystemCreationParameters;
+    }
+
+    public boolean isVectorized() {
+        return vectorized;
+    }
+
+    public DcLoadFlowParameters setVectorized(boolean vectorized) {
+        this.vectorized = vectorized;
+        return this;
     }
 
     public DcLoadFlowParameters setEquationSystemCreationParameters(DcEquationSystemCreationParameters equationSystemCreationParameters) {
@@ -119,6 +132,7 @@ public class DcLoadFlowParameters extends AbstractLoadFlowParameters<DcLoadFlowP
                 ", balanceType=" + balanceType +
                 ", setVToNan=" + setVToNan +
                 ", maxOuterLoopIterations=" + maxOuterLoopIterations +
+                ", vectorized=" + vectorized +
                 ')';
     }
 }

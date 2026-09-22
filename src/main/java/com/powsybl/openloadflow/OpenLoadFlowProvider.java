@@ -26,6 +26,7 @@ import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowResult;
 import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.dc.DcLoadFlowEngine;
+import com.powsybl.openloadflow.dc.DcLoadFlowParameters;
 import com.powsybl.openloadflow.dc.DcLoadFlowResult;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
@@ -210,6 +211,14 @@ public class OpenLoadFlowProvider implements LoadFlowProvider {
         }
     }
 
+    /**
+     * The DC engine run on every component of the network (no network cache): the seam an
+     * alternative DC engine (another linear solver, a device) plugs into.
+     */
+    protected List<DcLoadFlowResult> runDcEngine(Network network, DcLoadFlowParameters dcParameters, ReportNode reportNode) {
+        return DcLoadFlowEngine.run(network, new LfNetworkLoaderImpl(), dcParameters, reportNode);
+    }
+
     private LoadFlowResult runDc(Network network, LoadFlowParameters parameters, OpenLoadFlowParameters parametersExt, ReportNode reportNode) {
 
         var dcParameters = OpenLoadFlowParameters.createDcParameters(network, parameters, parametersExt, matrixFactory, connectivityFactory, forcePhaseControlOffAndAddAngle1Var);
@@ -224,7 +233,7 @@ public class OpenLoadFlowProvider implements LoadFlowProvider {
                     .run();
             NetworkCache.DC_LF_INSTANCE.findEntry(network).orElseThrow().setPause(true);
         } else {
-            results = DcLoadFlowEngine.run(network, new LfNetworkLoaderImpl(), dcParameters, reportNode);
+            results = runDcEngine(network, dcParameters, reportNode);
             Networks.resetState(network);
         }
 

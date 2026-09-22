@@ -217,13 +217,22 @@ public class OpenSensitivityAnalysisProvider implements SensitivityAnalysisProvi
 
         AbstractSensitivityAnalysis<?, ?> analysis;
         if (loadFlowParameters.isDc()) {
-            analysis = new DcSensitivityAnalysis(matrixFactory, selectedConnectivityFactory, sensitivityAnalysisParameters);
+            analysis = createDcSensitivityAnalysis(selectedConnectivityFactory, sensitivityAnalysisParameters);
         } else {
             analysis = new AcSensitivityAnalysis(matrixFactory, selectedConnectivityFactory, sensitivityAnalysisParameters);
         }
         analysis.analyse(network, workingVariantId, contingencies, operatorStrategies, actions, creationParameters, variableSets,
                 decoratedFactorReader, resultWriter, sensiReportNode, sensitivityAnalysisParametersExt, computationManager.getExecutor());
         return null;
+    }
+
+    /**
+     * The DC sensitivity analysis engine. An alternative engine (a device one) is installed by
+     * overriding this.
+     */
+    protected AbstractSensitivityAnalysis<?, ?> createDcSensitivityAnalysis(GraphConnectivityFactory<LfBus, LfBranch> selectedConnectivityFactory,
+                                                                            SensitivityAnalysisParameters sensitivityAnalysisParameters) {
+        return new DcSensitivityAnalysis(matrixFactory, selectedConnectivityFactory, sensitivityAnalysisParameters);
     }
 
     public CompletableFuture<Void> run(Network network,

@@ -8,12 +8,14 @@
 package com.powsybl.openloadflow.sa;
 
 import com.google.auto.service.AutoService;
+import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.config.PlatformConfig;
 import com.powsybl.commons.extensions.Extension;
 import com.powsybl.commons.extensions.ExtensionJsonSerializer;
 import com.powsybl.contingency.ContingenciesProvider;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
+import com.powsybl.loadflow.resultswriter.NetworkResultWriterFactory;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
@@ -83,9 +85,19 @@ public class OpenSecurityAnalysisProvider implements SecurityAnalysisProvider {
             selectedConnectivityFactory = new NaiveGraphConnectivityFactory<>(LfBus::getNum);
         }
 
+        OpenSecurityAnalysisParameters openSecurityAnalysisParameters =
+                OpenSecurityAnalysisParameters.getOrDefault(runParameters.getSecurityAnalysisParameters());
+
+        NetworkResultWriterFactory resultWriterFactory = runParameters.getResultWriterFactory();
+        boolean monitorAllBranches = openSecurityAnalysisParameters.isMonitorAllBranches();
+        if (monitorAllBranches && resultWriterFactory == NetworkResultWriterFactory.NO_OP) {
+            throw new PowsyblException("monitorAllBranches requires a result writer factory to stream the flows "
+                    + "(set SecurityAnalysisRunParameters.resultWriterFactory)");
+        }
+
         AbstractSecurityAnalysis<?, ?, ?, ?, ?> securityAnalysis;
         if (loadFlowParameters.isDc()) {
-            if (OpenSecurityAnalysisParameters.getOrDefault(runParameters.getSecurityAnalysisParameters()).isDcFastMode()) {
+            if (openSecurityAnalysisParameters.isDcFastMode()) {
                 securityAnalysis = new WoodburyDcSecurityAnalysis(network, matrixFactory, selectedConnectivityFactory, runParameters.getMonitors(), runParameters.getReportNode());
             } else {
                 securityAnalysis = new DcSecurityAnalysis(network, matrixFactory, selectedConnectivityFactory, runParameters.getMonitors(), runParameters.getReportNode());
@@ -93,6 +105,11 @@ public class OpenSecurityAnalysisProvider implements SecurityAnalysisProvider {
         } else {
             securityAnalysis = new AcSecurityAnalysis(network, matrixFactory, selectedConnectivityFactory, runParameters.getMonitors(), runParameters.getReportNode());
         }
+
+        // per-partition streaming sinks (default is a no-op factory). Each partition closes its own writer, so writing is
+        // lock-free even when contingencies run on several threads.
+        securityAnalysis.setResultWriterFactory(resultWriterFactory);
+        securityAnalysis.setMonitorAllBranches(monitorAllBranches);
 
         return securityAnalysis.run(workingVariantId, runParameters.getSecurityAnalysisParameters(), contingenciesProvider,
                 runParameters.getComputationManager(), runParameters.getOperatorStrategies(), runParameters.getActions(), runParameters.getLimitReductions());

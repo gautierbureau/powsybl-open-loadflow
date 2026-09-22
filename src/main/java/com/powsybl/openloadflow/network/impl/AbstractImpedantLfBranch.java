@@ -510,15 +510,48 @@ public abstract class AbstractImpedantLfBranch extends AbstractLfBranch {
 
     protected BranchResult buildBranchResult(LoadFlowModel loadFlowModel, Map<String, LfBranchResults> zeroImpedanceFlows, double currentScale1, double currentScale2,
                                              double preContingencyBranchP1, double preContingencyBranchOfContingencyP1) {
-        LfBranchResults lfBranchResults = this.isZeroImpedance(loadFlowModel) ? zeroImpedanceFlows.get(this.getId())
-                : getImpedantLfBranchResults();
+        BranchResult[] holder = new BranchResult[1];
+        emitBranchFlows(loadFlowModel, zeroImpedanceFlows, currentScale1, currentScale2, preContingencyBranchP1, preContingencyBranchOfContingencyP1,
+            (id, p1v, q1v, i1v, p2v, q2v, i2v, flowTransfer) -> holder[0] = new BranchResult(id, p1v, q1v, i1v, p2v, q2v, i2v, flowTransfer));
+        return holder[0];
+    }
 
-        double flowP1 = lfBranchResults.p1() * PerUnit.SB;
-        double flowQ1 = lfBranchResults.q1() * PerUnit.SB;
-        double flowP2 = lfBranchResults.p2() * PerUnit.SB;
-        double flowQ2 = lfBranchResults.q2() * PerUnit.SB;
-        double currentI1 = lfBranchResults.i1() * currentScale1;
-        double currentI2 = lfBranchResults.i2() * currentScale2;
+    /**
+     * Computes this branch's SI flows and passes them to the consumer, allocating nothing. Shared by
+     * {@link #buildBranchResult} (which wraps them in a {@link BranchResult}) and by the streaming path (which forwards
+     * them directly to a writer).
+     */
+    protected void emitBranchFlows(LoadFlowModel loadFlowModel, Map<String, LfBranchResults> zeroImpedanceFlows, double currentScale1, double currentScale2,
+                                   double preContingencyBranchP1, double preContingencyBranchOfContingencyP1, LfBranch.BranchFlowConsumer consumer) {
+        double rawP1;
+        double rawP2;
+        double rawQ1;
+        double rawQ2;
+        double rawI1;
+        double rawI2;
+        if (isZeroImpedance(loadFlowModel)) {
+            LfBranchResults r = zeroImpedanceFlows.get(getId());
+            rawP1 = r.p1();
+            rawP2 = r.p2();
+            rawQ1 = r.q1();
+            rawQ2 = r.q2();
+            rawI1 = r.i1();
+            rawI2 = r.i2();
+        } else {
+            rawP1 = p1.eval();
+            rawP2 = p2.eval();
+            rawQ1 = q1.eval();
+            rawQ2 = q2.eval();
+            rawI1 = i1.eval();
+            rawI2 = i2.eval();
+        }
+
+        double flowP1 = rawP1 * PerUnit.SB;
+        double flowQ1 = rawQ1 * PerUnit.SB;
+        double flowP2 = rawP2 * PerUnit.SB;
+        double flowQ2 = rawQ2 * PerUnit.SB;
+        double currentI1 = rawI1 * currentScale1;
+        double currentI2 = rawI2 * currentScale2;
 
         double flowTransfer = Double.NaN;
         if (!Double.isNaN(preContingencyBranchP1) && !Double.isNaN(preContingencyBranchOfContingencyP1)) {
@@ -529,6 +562,6 @@ public abstract class AbstractImpedantLfBranch extends AbstractLfBranch {
                 flowTransfer = 0.;
             }
         }
-        return new BranchResult(getId(), flowP1, flowQ1, currentI1, flowP2, flowQ2, currentI2, flowTransfer);
+        consumer.accept(getId(), flowP1, flowQ1, currentI1, flowP2, flowQ2, currentI2, flowTransfer);
     }
 }

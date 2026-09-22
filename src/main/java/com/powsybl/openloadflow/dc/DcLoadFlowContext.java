@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.dc;
 import com.powsybl.openloadflow.dc.equations.DcEquationSystemCreator;
 import com.powsybl.openloadflow.dc.equations.DcEquationType;
 import com.powsybl.openloadflow.dc.equations.DcVariableType;
+import com.powsybl.openloadflow.dc.equations.vector.DcVectorizedEquationSystemCreator;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.JacobianMatrix;
 import com.powsybl.openloadflow.equations.TargetVector;
@@ -37,7 +38,7 @@ public class DcLoadFlowContext extends AbstractLoadFlowContext<DcVariableType, D
     @Override
     public JacobianMatrix<DcVariableType, DcEquationType> getJacobianMatrix() {
         if (jacobianMatrix == null) {
-            jacobianMatrix = new JacobianMatrix<>(getEquationSystem(), parameters.getMatrixFactory());
+            jacobianMatrix = new JacobianMatrix<>(getEquationSystem(), parameters.getMatrixFactory(), false);
         }
         return jacobianMatrix;
     }
@@ -45,8 +46,10 @@ public class DcLoadFlowContext extends AbstractLoadFlowContext<DcVariableType, D
     @Override
     public EquationSystem<DcVariableType, DcEquationType> getEquationSystem() {
         if (equationSystem == null) {
-            equationSystem = new DcEquationSystemCreator(network, parameters.getEquationSystemCreationParameters())
-                    .create(withEquationSystemListener);
+            DcEquationSystemCreator creator = parameters.isVectorized()
+                    ? new DcVectorizedEquationSystemCreator(network, parameters.getEquationSystemCreationParameters())
+                    : new DcEquationSystemCreator(network, parameters.getEquationSystemCreationParameters());
+            equationSystem = creator.create(withEquationSystemListener);
         }
         return equationSystem;
     }

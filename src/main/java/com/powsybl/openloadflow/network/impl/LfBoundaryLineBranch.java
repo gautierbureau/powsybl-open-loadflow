@@ -26,6 +26,19 @@ import java.util.stream.Collectors;
  */
 public class LfBoundaryLineBranch extends AbstractImpedantLfBranch {
 
+    private double emitScale = Double.NaN;
+
+    /**
+     * The per-unit current to ampere scale, computed on first use and kept: see {@link LfBranchImpl},
+     * it is a function of the nominal voltage alone, which the pi model already baked in.
+     */
+    private double emitScale() {
+        if (Double.isNaN(emitScale)) {
+            emitScale = PerUnit.ib(getBoundaryLine().getTerminal().getVoltageLevel().getNominalV());
+        }
+        return emitScale;
+    }
+
     private final Ref<BoundaryLine> boundaryLineRef;
 
     protected LfBoundaryLineBranch(LfNetwork network, LfBus bus1, LfBus bus2, PiModel piModel, BoundaryLine boundaryLine,
@@ -77,8 +90,13 @@ public class LfBoundaryLineBranch extends AbstractImpedantLfBranch {
                                                  LoadFlowModel loadFlowModel) {
         // in a security analysis, we don't have any way to monitor the flows at boundary side. So in the branch result,
         // we follow the convention side 1 for network side and side 2 for boundary side.
-        double currentScale = PerUnit.ib(getBoundaryLine().getTerminal().getVoltageLevel().getNominalV());
-        return List.of(buildBranchResult(loadFlowModel, zeroImpedanceFlows, currentScale, currentScale, Double.NaN, Double.NaN));
+        return List.of(buildBranchResult(loadFlowModel, zeroImpedanceFlows, emitScale(), emitScale(), Double.NaN, Double.NaN));
+    }
+
+    @Override
+    public void emitBranchResults(double preContingencyBranchP1, double preContingencyBranchOfContingencyP1,
+                                  Map<String, LfBranchResults> zeroImpedanceFlows, LoadFlowModel loadFlowModel, BranchFlowConsumer consumer) {
+        emitBranchFlows(loadFlowModel, zeroImpedanceFlows, emitScale(), emitScale(), Double.NaN, Double.NaN, consumer);
     }
 
     private <T extends LoadingLimits> Supplier<Map<String, T>> toMapIndexedByOperationalLimitsGroupId(Function<OperationalLimitsGroup, Optional<T>> limitsGetter) {

@@ -27,9 +27,9 @@ public abstract class AbstractHvdcAcEmulationFlowEquationTerm extends AbstractEl
 
     protected final List<Variable<AcVariableType>> variables;
 
-    protected final double k;
+    protected final LfHvdc hvdc;
 
-    protected final double p0;
+    protected final double k;
 
     protected final double r;
 
@@ -39,14 +39,23 @@ public abstract class AbstractHvdcAcEmulationFlowEquationTerm extends AbstractEl
 
     protected AbstractHvdcAcEmulationFlowEquationTerm(LfHvdc hvdc, LfBus bus1, LfBus bus2, VariableSet<AcVariableType> variableSet) {
         super(hvdc);
+        this.hvdc = hvdc;
         ph1Var = variableSet.getVariable(bus1.getNum(), AcVariableType.BUS_PHI);
         ph2Var = variableSet.getVariable(bus2.getNum(), AcVariableType.BUS_PHI);
         variables = List.of(ph1Var, ph2Var);
         k = hvdc.getAcEmulationControl().getDroop() * 180 / Math.PI;
-        p0 = hvdc.getAcEmulationControl().getP0();
         r = hvdc.getR();
         lossFactor1 = hvdc.getConverterStation1().getLossFactor() / 100;
         lossFactor2 = hvdc.getConverterStation2().getLossFactor() / 100;
+    }
+
+    /**
+     * Read live rather than cached: the AC emulation p0 is a plain offset in {@code p0 + k(theta1 - theta2)}, outside
+     * both the Jacobian (its derivative is k) and the target vector ({@code hasRhs()} is false), so a change to it is
+     * picked up by the next solve of a persistent context with no rebuild -- which is what a time-series step needs.
+     */
+    protected double p0() {
+        return hvdc.getAcEmulationControl().getP0();
     }
 
     protected static double rawP(double p0, double k, double ph1, double ph2) {

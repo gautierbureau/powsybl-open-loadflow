@@ -66,9 +66,9 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
             equationSystem.addEquationTerm(termImpl);
             matrixElementIndexes.reset();
             equationSystem.notifyEquationTermChange(termImpl, EquationTermEventType.EQUATION_TERM_ADDED);
-            if (termImpl.hasRhs()) {
-                throw new UnsupportedOperationException("Rhs not supported yet");
-            }
+            // the constant (rhs) part of single terms added to an equation array is accounted for by
+            // EquationArray.getRhs (used by the target vector); no dedicated mismatch handling is required
+            // for the direct DC solve
         }
     }
 
@@ -388,6 +388,35 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
                 }
             }
         }
+    }
+
+    /**
+     * Sum of the right-hand side (constant) contributions of all active terms of the equation of given
+     * element number. Used by the target vector to move constant term parts to the right-hand side,
+     * mirroring {@code SingleEquation.rhs()} for the vectorized path.
+     */
+    public double getRhs(int elementNum) {
+        double rhs = 0;
+        for (EquationTermArray<V, E> termArray : termArrays) {
+            int[] termNumsConcatenatedStartIndices = termArray.getTermNumsConcatenatedStartIndices();
+            var termNums = termArray.getTermNumsConcatenated();
+            int iStart = termNumsConcatenatedStartIndices[elementNum];
+            int iEnd = termNumsConcatenatedStartIndices[elementNum + 1];
+            for (int i = iStart; i < iEnd; i++) {
+                int termNum = termNums.getQuick(i);
+                if (termArray.isTermActive(termNum)) {
+                    rhs += termArray.getEvaluator().rhs(termArray.getTermElementNum(termNum));
+                }
+            }
+        }
+        if (hasSingleEquationTerms[elementNum]) {
+            for (SingleEquationTerm<V, E> singleTerm : singleTermsByEquationElementNum.get(elementNum).terms) {
+                if (singleTerm.isActive() && singleTerm.hasRhs()) {
+                    rhs += singleTerm.rhs();
+                }
+            }
+        }
+        return rhs;
     }
 
     public interface DerHandler {

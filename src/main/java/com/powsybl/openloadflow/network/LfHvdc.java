@@ -26,7 +26,7 @@ public interface LfHvdc extends LfElement {
 
         private final LfHvdc hvdc;
         private final double droop;
-        private final double p0;
+        private double p0;
         private final double pMaxFromCS1toCS2;
         private final double pMaxFromCS2toCS1;
         private AcEmulationStatus acEmulationStatus = AcEmulationStatus.LINEAR_MODE;
@@ -45,6 +45,13 @@ public interface LfHvdc extends LfElement {
 
         public double getP0() {
             return p0;
+        }
+
+        /**
+         * @param p0 the AC emulation power offset, in per unit.
+         */
+        public void setP0(double p0) {
+            this.p0 = p0;
         }
 
         public double getPMaxFromCS1toCS2() {
