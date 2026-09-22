@@ -48,6 +48,19 @@ public class StateVector {
         notifyStateUpdate(true);
     }
 
+    /**
+     * As {@link #setValuesOnly(double[])}, for a caller that will then read the derived values of the given closed
+     * branches only (and the buses), before the next full update: listeners may leave every other branch's derived
+     * values stale.
+     */
+    public void setValuesOnly(double[] array, int[] closedBranchNums) {
+        this.array = Objects.requireNonNull(array);
+        Objects.requireNonNull(closedBranchNums);
+        for (StateVectorListener listener : listeners) {
+            listener.onStateUpdate(closedBranchNums);
+        }
+    }
+
     public double[] get() {
         return array;
     }
