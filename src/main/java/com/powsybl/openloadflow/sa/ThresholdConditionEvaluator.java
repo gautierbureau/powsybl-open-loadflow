@@ -48,9 +48,9 @@ public final class ThresholdConditionEvaluator {
         // InitialTargetP represents the original target of the generator
         // while TargetP represents the target and an additional possible participation to the slack
         if (AbstractThresholdCondition.Variable.TARGET_P.equals(condition.getVariable())) {
-            return evaluateThreshold(gen.getInitialTargetP(), condition.getThreshold(), condition.getComparisonType());
+            return evaluateThreshold(gen.getInitialTargetP() * PerUnit.SB, condition.getThreshold(), condition.getComparisonType());
         } else if (AbstractThresholdCondition.Variable.ACTIVE_POWER.equals(condition.getVariable())) {
-            return evaluateThreshold(gen.getTargetP(), condition.getThreshold(), condition.getComparisonType());
+            return evaluateThreshold(gen.getTargetP() * PerUnit.SB, condition.getThreshold(), condition.getComparisonType());
         } else {
             throw new PowsyblException(String.format("Unsupported variable %s for threshold condition on injection %s", condition.getVariable().name(), condition.getEquipmentId()));
         }

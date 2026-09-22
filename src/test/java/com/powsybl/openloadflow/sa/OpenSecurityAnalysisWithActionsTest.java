@@ -209,12 +209,19 @@ class OpenSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnalysisTe
 
             // Injection condition
             var gen = network.getGenerator("GEN_1");
-            double targetP = lfNetwork.getGeneratorById(gen.getId()).getInitialTargetP();
-            double p = lfNetwork.getGeneratorById(gen.getId()).getTargetP();
+            double targetP = lfNetwork.getGeneratorById(gen.getId()).getInitialTargetP() * PerUnit.SB;
+            double p = lfNetwork.getGeneratorById(gen.getId()).getTargetP() * PerUnit.SB;
             testWithAllComparisonType(lfNetwork, p, (comparisonType, value) ->
                 new InjectionThresholdCondition(gen.getId(), AbstractThresholdCondition.Variable.ACTIVE_POWER, comparisonType, value));
             testWithAllComparisonType(lfNetwork, targetP, (comparisonType, value) ->
                 new InjectionThresholdCondition(gen.getId(), AbstractThresholdCondition.Variable.TARGET_P, comparisonType, value));
+            // Injection thresholds are in MW like the branch and 3WT ones: half the generator's MW is below it
+            // (compared in per-unit, the ~1 pu value never exceeded a threshold of tens of MW).
+            assertTrue(p > 2, "the check needs a generator well above 1 MW: " + p);
+            assertTrue(ThresholdConditionEvaluator.evaluate(lfNetwork, new InjectionThresholdCondition(gen.getId(),
+                AbstractThresholdCondition.Variable.ACTIVE_POWER, AbstractThresholdCondition.ComparisonType.GREATER_THAN, p / 2)));
+            assertTrue(ThresholdConditionEvaluator.evaluate(lfNetwork, new InjectionThresholdCondition(gen.getId(),
+                AbstractThresholdCondition.Variable.TARGET_P, AbstractThresholdCondition.ComparisonType.GREATER_THAN, targetP / 2)));
         }
 
         // Test invalid ids
