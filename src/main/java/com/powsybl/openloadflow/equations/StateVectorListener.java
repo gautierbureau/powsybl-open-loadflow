@@ -24,4 +24,14 @@ public interface StateVectorListener {
     default void onStateUpdate(boolean valuesOnly) {
         onStateUpdate();
     }
+
+    /**
+     * Notified instead of {@link #onStateUpdate(boolean)} for a values-only update whose caller will read derived
+     * values of the listed closed branches ONLY, before the next full update (see
+     * {@link StateVector#setValuesOnly(double[], int[])}). A listener may refresh just those; the default refreshes
+     * everything, as for any values-only update.
+     */
+    default void onStateUpdate(int[] closedBranchNums) {
+        onStateUpdate(true);
+    }
 }
