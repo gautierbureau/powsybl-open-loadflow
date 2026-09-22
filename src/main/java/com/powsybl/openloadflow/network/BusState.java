@@ -108,6 +108,13 @@ public class BusState extends BusDcState {
         return out;
     }
 
+    /** Only the voltage magnitude and angle: what a precomputed state injected into the network moves on a bus
+     *  the contingency did not otherwise touch (see {@link NetworkState#restore(java.util.Collection, java.util.Collection)}). */
+    void restoreVoltage() {
+        element.setAngle(angle);
+        element.setV(voltage);
+    }
+
     @Override
     public void restore() {
         if (PROFILE) {
