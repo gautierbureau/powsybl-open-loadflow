@@ -129,6 +129,14 @@ public class GenerationActivePowerDistributionStep implements ActivePowerDistrib
                         iteration, generator.getId(), generator.getBus().getId(),
                         generator.getBus().getGenerators().size(), targetP, newTargetP, factor);
             }
+            if (DS_TRACE && newTargetP != targetP) {
+                // every generator this pass MOVES, not only the saturating ones: two water-fills that
+                // distribute the same TOTAL can still split it differently, and only the per-generator
+                // deltas say so
+                System.err.printf("DS_GEN iter=%d gen=%s bus=%s factor=%.12e targetP=%.12e newTargetP=%.12e delta=%.12e%n",
+                        iteration, generator.getId(), generator.getBus().getId(), factor, targetP, newTargetP,
+                        newTargetP - targetP);
+            }
             if (newTargetP != targetP) {
                 LOGGER.trace("Rescale '{}' active power target: {} -> {}",
                         generator.getId(), targetP * PerUnit.SB, newTargetP * PerUnit.SB);
