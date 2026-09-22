@@ -351,6 +351,13 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
                 // bus absorb too much reactive power
                 pqToPvBuses.add(new PqToPvBus(controllerCapableBus, LfBus.QLimitType.MIN_Q));
             } else if (qLimitType == LfBus.QLimitType.MIN_Q && Math.abs(minQ - q) > maxReactivePowerMismatch) {
+                if (RL_TRACE) {
+                    // the pinned bus is RE-FROZEN at a limit that MOVED (a reactive-capability curve
+                    // follows the generator's targetP, which the distributed slack moves)
+                    System.err.printf("RL_REFREEZE bus=%s type=MIN_Q frozenQ=%.12f newLimit=%.12f drift=%.3e v=%.9f targetV=%.9f%n",
+                            controllerCapableBus.getId(), q, minQ, minQ - q,
+                            getBusV(controllerCapableBus), getBusTargetV(controllerCapableBus));
+                }
                 LOGGER.trace("PQ bus {} with updated Q limits, previous minQ {} new minQ {}", controllerCapableBus.getId(), q, minQ);
                 controllerCapableBus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(minQ);
                 busesWithUpdatedQLimits.add(controllerCapableBus);
@@ -360,6 +367,11 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
                 // bus produce too much reactive power
                 pqToPvBuses.add(new PqToPvBus(controllerCapableBus, LfBus.QLimitType.MAX_Q));
             } else if (qLimitType == LfBus.QLimitType.MAX_Q && Math.abs(maxQ - q) > maxReactivePowerMismatch) {
+                if (RL_TRACE) {
+                    System.err.printf("RL_REFREEZE bus=%s type=MAX_Q frozenQ=%.12f newLimit=%.12f drift=%.3e v=%.9f targetV=%.9f%n",
+                            controllerCapableBus.getId(), q, maxQ, maxQ - q,
+                            getBusV(controllerCapableBus), getBusTargetV(controllerCapableBus));
+                }
                 LOGGER.trace("PQ bus {} with updated Q limits, previous maxQ {} new maxQ {}", controllerCapableBus.getId(), q, maxQ);
                 controllerCapableBus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(maxQ);
                 busesWithUpdatedQLimits.add(controllerCapableBus);
