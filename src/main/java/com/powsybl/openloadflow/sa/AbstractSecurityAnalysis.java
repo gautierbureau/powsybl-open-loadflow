@@ -801,6 +801,19 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 operatorStrategy.getContingencyContext().getContingencyId(), network, stopwatch.elapsed(TimeUnit.MILLISECONDS));
     }
 
+    /**
+     * Put the network back in its base (pre-contingency) state after a contingency, before the next one is applied.
+     * The default restores every saved bus, branch, HVDC and area state; an implementation that knows what a
+     * contingency's simulation changed may restore less, provided the network ends up identical.
+     *
+     * @param networkState the base state, saved once after the pre-contingency simulation
+     * @param network the network
+     * @param lfContingency the contingency just simulated
+     */
+    protected void restoreBaseState(NetworkState networkState, LfNetwork network, LfContingency lfContingency) {
+        networkState.restore();
+    }
+
     private void processContingency(LfNetwork lfNetwork, SecurityAnalysisParameters securityAnalysisParameters,
                                     List<LimitReduction> limitReductions, ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution,
                                     ReportNode networkReportNode, LfContingency lfContingency, P p, NetworkState networkState,
@@ -898,7 +911,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         if (contingencyIt.hasNext()) {
             // restore base state
             long tRestore = System.nanoTime();
-            networkState.restore();
+            restoreBaseState(networkState, lfNetwork, lfContingency);
             if (SA_PROFILE) {
                 RESTORE_NS.add(System.nanoTime() - tRestore);
             }
