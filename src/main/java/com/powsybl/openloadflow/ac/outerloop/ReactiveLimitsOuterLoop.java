@@ -277,6 +277,16 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
         double maxQ = controllerBus.getMaxQ();
         double q = controllerBus.getQ().eval() + controllerBus.getLoadTargetQ();
 
+        // OLF_RL_TRACE_BUS also covers the PV side: after an unpin, whether the bus pins AGAIN is
+        // decided here, and the only way to compare that decision with another implementation is to
+        // print the q and the limits it was taken at.
+        if (RL_TRACE_BUS != null && java.util.Arrays.stream(RL_TRACE_BUS.split(","))
+                .anyMatch(controllerBus.getId()::startsWith)) {
+            System.err.printf("RL_PVCHECK bus=%s q=%.12f minQ=%.12f maxQ=%.12f v=%.12f tol=%.3e pinMin=%b pinMax=%b%n",
+                    controllerBus.getId(), q, minQ, maxQ, controllerBus.getV(), maxReactivePowerMismatch,
+                    q < minQ - maxReactivePowerMismatch, q > maxQ + maxReactivePowerMismatch);
+        }
+
         boolean remainsPV = true;
         boolean generatorRemoteController = isGeneratorRemoteController(controllerBus);
 
@@ -344,8 +354,21 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
             busesWithUpdatedQLimits, canSwitchPqToPv, qLimitType, minQ, maxQ, q));
     }
 
+    /** OLF_RL_TRACE_BUS=<prefix>[,<prefix>]: every pinned-bus DECISION for the named buses - the
+     *  comparison the switch-back turns on (controlled voltage against the group target, and the
+     *  MARGIN between them) plus the limits and the frozen Q. A pin that ends differently on another
+     *  implementation is only "the last bits" if that margin is at the noise floor. */
+    private static final String RL_TRACE_BUS = System.getenv("OLF_RL_TRACE_BUS");
+
     private void checkPqBusWithQLimitType(LfBus controllerCapableBus, List<PqToPvBus> pqToPvBuses, List<LfBus> busesWithUpdatedQLimits,
                                           boolean canSwitchPqToPv, LfBus.QLimitType qLimitType, double minQ, double maxQ, double q) {
+        if (RL_TRACE_BUS != null && java.util.Arrays.stream(RL_TRACE_BUS.split(","))
+                .anyMatch(controllerCapableBus.getId()::startsWith)) {
+            double v = getBusV(controllerCapableBus);
+            double vt = getBusTargetV(controllerCapableBus);
+            System.err.printf("RL_DECIDE bus=%s type=%s q=%.12f minQ=%.12f maxQ=%.12f v=%.12f vt=%.12f margin=%.3e canSwitch=%b%n",
+                    controllerCapableBus.getId(), qLimitType, q, minQ, maxQ, v, vt, v - vt, canSwitchPqToPv);
+        }
         if (qLimitType.isMinLimit()) {
             if (getBusV(controllerCapableBus) < getBusTargetV(controllerCapableBus) && canSwitchPqToPv) {
                 // bus absorb too much reactive power
