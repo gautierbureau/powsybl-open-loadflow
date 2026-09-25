@@ -668,6 +668,23 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         // restart LF on post contingency equation system
         R result = createLoadFlowEngine(context).run();
         PostContingencyComputationStatus status = postContingencyStatusFromLoadFlowResult(result);
+        // OLF_RL_FINAL_TRACE: the pin state this contingency ENDED on, per controller bus. The
+        // residual of another implementation's answer is taken against the targets the equation
+        // system holds when that answer is injected - BEFORE these outer loops run - so it flags
+        // every row the loops legitimately move and cannot say whether the two arms ended on the
+        // same pins. This can: it is the FINAL state, printed once per contingency.
+        if (System.getenv("OLF_RL_FINAL_TRACE") != null) {
+            String want = System.getenv("OLF_RL_FINAL_TRACE");
+            network.<LfBus>getControllerElements(VoltageControl.Type.GENERATOR).forEach(bus -> {
+                if (!"all".equals(want) && !bus.getId().startsWith(want)) {
+                    return;
+                }
+                System.err.printf("RL_FINAL ctg=%s bus=%s qLimitType=%s vcEnabled=%b genTargetQ=%.12f v=%.12f%n",
+                        contingency.getId(), bus.getId(),
+                        bus.getQLimitType().map(Enum::name).orElse("none"),
+                        bus.isGeneratorVoltageControlEnabled(), bus.getGenerationTargetQ(), bus.getV());
+            });
+        }
         var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions, securityAnalysisParameters.getIncreasedViolationsParameters());
 
         LoadFlowModel loadFlowModel = securityAnalysisParameters.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC;
