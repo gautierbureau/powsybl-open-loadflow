@@ -666,14 +666,46 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         Stopwatch stopwatch = Stopwatch.createStarted();
 
         // restart LF on post contingency equation system
-        R result = createLoadFlowEngine(context).run();
+        // Tag the distributed-slack pass trace with this contingency (OLF_DS_TRACE): the DS loop
+        // stops on a 1 MW band, so the operating point depends on the SEQUENCE of passes, and a
+        // sequence is only comparable against another implementation's once it can be attributed.
+        R result;
+        com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop.CURRENT_CONTINGENCY.set(contingency.getId());
+        try {
+            result = createLoadFlowEngine(context).run();
+        } finally {
+            com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop.CURRENT_CONTINGENCY.remove();
+        }
         PostContingencyComputationStatus status = postContingencyStatusFromLoadFlowResult(result);
+        // OLF_LF_STEPS_TRACE=<id>[,<id>]|all: how many steps this contingency took. Two
+        // implementations that solve the same system in the same number of iterations agree to
+        // machine precision; when they do not, the first thing to establish is whether the SEQUENCE
+        // differed, not by how much the answers do. The distributed-slack loop stops on a 1 MW band,
+        // so one pass more or less is worth ~0.1 MW of distributed power while every voltage still
+        // looks converged.
+        if (System.getenv("OLF_LF_STEPS_TRACE") != null && result instanceof com.powsybl.openloadflow.ac.AcLoadFlowResult acr) {
+            String want = System.getenv("OLF_LF_STEPS_TRACE");
+            boolean show = "all".equals(want);
+            if (!show) {
+                for (String w : want.split(",")) {
+                    show = show || w.trim().equals(contingency.getId());
+                }
+            }
+            if (show) {
+                System.err.printf("LF_STEPS ctg=%s solverIterations=%d outerLoopIterations=%d "
+                        + "status=%s distributedActivePower=%s slackMismatch=%s%n",
+                        contingency.getId(), acr.getSolverIterations(), acr.getOuterLoopIterations(),
+                        acr.getSolverStatus(), acr.getDistributedActivePower(),
+                        acr.getSlackBusActivePowerMismatch());
+            }
+        }
         // OLF_RL_FINAL_TRACE: the pin state this contingency ENDED on, per controller bus. The
         // residual of another implementation's answer is taken against the targets the equation
         // system holds when that answer is injected - BEFORE these outer loops run - so it flags
         // every row the loops legitimately move and cannot say whether the two arms ended on the
         // same pins. This can: it is the FINAL state, printed once per contingency.
-        if (System.getenv("OLF_RL_FINAL_TRACE") != null) {
+        if (System.getenv("OLF_RL_FINAL_TRACE") != null
+                && matchesCtgFilter("OLF_RL_FINAL_TRACE_CTG", contingency.getId())) {
             String want = System.getenv("OLF_RL_FINAL_TRACE");
             network.<LfBus>getControllerElements(VoltageControl.Type.GENERATOR).forEach(bus -> {
                 if (!"all".equals(want) && !bus.getId().startsWith(want)) {
@@ -940,4 +972,20 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         }
 
     }
+    /** {@code <VAR>=<id>[,<id>]} restricts a per-contingency trace to those ids; unset means all.
+     *  A security analysis prints these for every contingency it runs, which on a 10540-contingency
+     *  scope is millions of lines for the handful that are under the lens. */
+    protected static boolean matchesCtgFilter(String var, String contingencyId) {
+        String want = System.getenv(var);
+        if (want == null || want.isEmpty()) {
+            return true;
+        }
+        for (String w : want.split(",")) {
+            if (w.trim().equals(contingencyId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
 }
