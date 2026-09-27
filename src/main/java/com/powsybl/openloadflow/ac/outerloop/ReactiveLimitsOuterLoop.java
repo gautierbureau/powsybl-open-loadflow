@@ -36,6 +36,22 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
      *  invisible — and they are exactly what a GPU port has to reproduce. */
     private static final boolean RL_TRACE = System.getenv("OLF_RL_TRACE") != null;
 
+    /** Every RL_* line carries the contingency whose solve is running (see
+     *  DistributedSlackOuterLoop.CURRENT_CONTINGENCY), and {@code OLF_RL_TRACE_CTG=<id>[,<id>]}
+     *  restricts the lines to those contingencies: a security analysis runs this loop for every
+     *  contingency, and the switch SEQUENCE of one group under one contingency is what another
+     *  implementation has to reproduce. */
+    private static final String RL_TRACE_CTG = System.getenv("OLF_RL_TRACE_CTG");
+
+    private static void rlPrintf(String fmt, Object... args) {
+        String ctg = DistributedSlackOuterLoop.CURRENT_CONTINGENCY.get();
+        if (RL_TRACE_CTG != null && ctg != null
+                && java.util.Arrays.stream(RL_TRACE_CTG.split(",")).map(String::trim).noneMatch(ctg::equals)) {
+            return;
+        }
+        System.err.printf("ctg=" + (ctg == null ? "base" : ctg) + " " + fmt, args);
+    }
+
     public static final String NAME = "ReactiveLimits";
 
     private static final double REALISTIC_VOLTAGE_MARGIN = 1.02;
@@ -183,10 +199,10 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
         }
 
         if (RL_TRACE) {
-            System.err.printf("RL_PASS switchPvPq candidates=%d remainingPvBusCount=%d%n",
+            rlPrintf("RL_PASS switchPvPq candidates=%d remainingPvBusCount=%d%n",
                     pvToPqBuses.size(), remainingPvBusCount);
             for (ControllerBusToPqBus b : pvToPqBuses) {
-                System.err.printf("RL_SWITCH PV->PQ bus=%s q=%.9f qLimit=%.9f limitType=%s%n",
+                rlPrintf("RL_SWITCH PV->PQ bus=%s q=%.9f qLimit=%.9f limitType=%s%n",
                         b.controllerBus.getId(), b.q, b.qLimit, b.limitType);
             }
         }
@@ -208,7 +224,7 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
     private static boolean switchPqPv(List<PqToPvBus> pqToPvBuses, ContextData contextData, ReportNode reportNode, int maxPqPvSwitch) {
         if (RL_TRACE) {
             for (PqToPvBus b : pqToPvBuses) {
-                System.err.printf("RL_SWITCH PQ->PV bus=%s limitType=%s%n", b.controllerBus.getId(), b.limitType);
+                rlPrintf("RL_SWITCH PQ->PV bus=%s limitType=%s%n", b.controllerBus.getId(), b.limitType);
             }
         }
         int pqPvSwitchCount = 0;
@@ -282,7 +298,7 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
         // print the q and the limits it was taken at.
         if (RL_TRACE_BUS != null && java.util.Arrays.stream(RL_TRACE_BUS.split(","))
                 .anyMatch(controllerBus.getId()::startsWith)) {
-            System.err.printf("RL_PVCHECK bus=%s q=%.12f minQ=%.12f maxQ=%.12f v=%.12f tol=%.3e pinMin=%b pinMax=%b%n",
+            rlPrintf("RL_PVCHECK bus=%s q=%.12f minQ=%.12f maxQ=%.12f v=%.12f tol=%.3e pinMin=%b pinMax=%b%n",
                     controllerBus.getId(), q, minQ, maxQ, controllerBus.getV(), maxReactivePowerMismatch,
                     q < minQ - maxReactivePowerMismatch, q > maxQ + maxReactivePowerMismatch);
         }
@@ -366,7 +382,7 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
                 .anyMatch(controllerCapableBus.getId()::startsWith)) {
             double v = getBusV(controllerCapableBus);
             double vt = getBusTargetV(controllerCapableBus);
-            System.err.printf("RL_DECIDE bus=%s type=%s q=%.12f minQ=%.12f maxQ=%.12f v=%.12f vt=%.12f margin=%.3e canSwitch=%b%n",
+            rlPrintf("RL_DECIDE bus=%s type=%s q=%.12f minQ=%.12f maxQ=%.12f v=%.12f vt=%.12f margin=%.3e canSwitch=%b%n",
                     controllerCapableBus.getId(), qLimitType, q, minQ, maxQ, v, vt, v - vt, canSwitchPqToPv);
         }
         if (qLimitType.isMinLimit()) {
@@ -377,7 +393,7 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
                 if (RL_TRACE) {
                     // the pinned bus is RE-FROZEN at a limit that MOVED (a reactive-capability curve
                     // follows the generator's targetP, which the distributed slack moves)
-                    System.err.printf("RL_REFREEZE bus=%s type=MIN_Q frozenQ=%.12f newLimit=%.12f drift=%.3e v=%.9f targetV=%.9f%n",
+                    rlPrintf("RL_REFREEZE bus=%s type=MIN_Q frozenQ=%.12f newLimit=%.12f drift=%.3e v=%.9f targetV=%.9f%n",
                             controllerCapableBus.getId(), q, minQ, minQ - q,
                             getBusV(controllerCapableBus), getBusTargetV(controllerCapableBus));
                 }
@@ -391,7 +407,7 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
                 pqToPvBuses.add(new PqToPvBus(controllerCapableBus, LfBus.QLimitType.MAX_Q));
             } else if (qLimitType == LfBus.QLimitType.MAX_Q && Math.abs(maxQ - q) > maxReactivePowerMismatch) {
                 if (RL_TRACE) {
-                    System.err.printf("RL_REFREEZE bus=%s type=MAX_Q frozenQ=%.12f newLimit=%.12f drift=%.3e v=%.9f targetV=%.9f%n",
+                    rlPrintf("RL_REFREEZE bus=%s type=MAX_Q frozenQ=%.12f newLimit=%.12f drift=%.3e v=%.9f targetV=%.9f%n",
                             controllerCapableBus.getId(), q, maxQ, maxQ - q,
                             getBusV(controllerCapableBus), getBusTargetV(controllerCapableBus));
                 }
