@@ -117,17 +117,20 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
             outerLoopContext.setOuterLoopTotalIterations(runningContext.outerLoopTotalIterations);
             outerLoopContext.setLastSolverResult(runningContext.lastSolverResult);
             outerLoopResult = outerLoop.check(outerLoopContext, olReportNode);
-            if (System.getenv("OLF_OL_TRACE") != null) {
-                System.err.printf("OL_CHECK %-34s iter=%d -> %s%n",
-                        outerLoop.getName(), outerLoopContext.getIteration(), outerLoopResult.status());
-            }
             runningContext.lastOuterLoopResult = outerLoopResult;
             if (OL_TRACE) {
                 // Which loop reports UNSTABLE, and therefore how many times the solver is re-run, IS the
                 // trajectory: two implementations that agree on every loop's DECISION still diverge if one
-                // of them performs a different number of re-solves.
-                System.err.printf("OL_CHECK loop=%s iteration=%d status=%s%n",
-                        outerLoop.getName(), outerLoopContext.getIteration(), outerLoopResult.status());
+                // of them performs a different number of re-solves. Tagged with the contingency whose
+                // solve is running and filtered by OLF_RL_TRACE_CTG like the reactive-limit trace.
+                String ctg = com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop.CURRENT_CONTINGENCY.get();
+                String want = System.getenv("OLF_RL_TRACE_CTG");
+                if (want == null || ctg == null
+                        || java.util.Arrays.stream(want.split(",")).map(String::trim).anyMatch(ctg::equals)) {
+                    System.err.printf("ctg=%s OL_CHECK loop=%s iteration=%d status=%s%n",
+                            ctg == null ? "base" : ctg, outerLoop.getName(), outerLoopContext.getIteration(),
+                            outerLoopResult.status());
+                }
             }
 
             if (outerLoopResult.status() == OuterLoopStatus.UNSTABLE) {
