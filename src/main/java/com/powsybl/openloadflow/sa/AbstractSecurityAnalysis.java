@@ -884,6 +884,10 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         lfContingency.apply(loadFlowParameters.getBalanceType());
 
         long tLoss = System.nanoTime();
+        // The loss pre-distribution is an ActivePowerDistribution run like the slack loop's, and its
+        // SPLIT across generators is what the first post-contingency solve sees: tag it with the
+        // contingency too (the tag is set again, harmlessly, around the load flow run below).
+        com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop.CURRENT_CONTINGENCY.set(propagatedContingency.getContingency().getId());
         double preDistributedActivePower = contingencyActivePowerLossDistribution.run(lfNetwork, lfContingency,
             propagatedContingency.getContingency(), securityAnalysisParameters, contingencyLoadFlowParameters, postContSimReportNode);
 
