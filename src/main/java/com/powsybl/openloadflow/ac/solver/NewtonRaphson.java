@@ -202,7 +202,7 @@ public class NewtonRaphson extends AbstractAcSolver {
             reportAndLogLargestMismatchByAcEquationType(initialReportNode, equationSystem, equationVector.getArray(), LOGGER);
         }
 
-        if (System.getenv("OLF_NR_TRACE") != null) {
+        if (System.getenv("OLF_NR_TRACE") != null && nrTraced()) {
             // The residual this solve STARTS from, before any step. Two implementations that agree on
             // the base state, the contingency and the pre-distribution must enter the first
             // post-contingency solve at the SAME initial mismatch; a difference here is a difference in
@@ -213,7 +213,7 @@ public class NewtonRaphson extends AbstractAcSolver {
                 ssq0 += v * v;
                 inf0 = Math.max(inf0, Math.abs(v));
             }
-            System.err.printf("NR_ENTER ||F||2=%.17e ||F||inf=%.17e%n", Math.sqrt(ssq0), inf0);
+            System.err.printf("ctg=" + nrCtgTag() + " NR_ENTER ||F||2=%.17e ||F||inf=%.17e%n", Math.sqrt(ssq0), inf0);
         }
         // start iterations
         AcSolverStatus status = AcSolverStatus.NO_CALCULATION;
@@ -287,7 +287,7 @@ public class NewtonRaphson extends AbstractAcSolver {
             AcSolverUtil.updateNetwork(network, equationSystem);
         }
 
-        if (System.getenv("OLF_NR_TRACE") != null) {
+        if (System.getenv("OLF_NR_TRACE") != null && nrTraced()) {
             // How DEEP this solve converged, not just that it did. The slack bus absorbs the
             // network's ACCUMULATED imbalance, so two states that both satisfy the criterion can
             // still report slack mismatches an order of magnitude apart.
@@ -297,7 +297,7 @@ public class NewtonRaphson extends AbstractAcSolver {
                 ssq += v * v;
                 inf = Math.max(inf, Math.abs(v));
             }
-            System.err.printf("NR_EXIT iters=%d status=%s ||F||2=%.17e ||F||inf=%.17e%n",
+            System.err.printf("ctg=" + nrCtgTag() + " NR_EXIT iters=%d status=%s ||F||2=%.17e ||F||inf=%.17e%n",
                     iterations.getValue(), status, Math.sqrt(ssq), inf);
         }
         Map<Integer, Double> slackBusActivePowerMismatch = new TreeMap<>();
@@ -306,5 +306,27 @@ public class NewtonRaphson extends AbstractAcSolver {
         }
 
         return new AcSolverResult(status, iterations.getValue(), slackBusActivePowerMismatch);
+    }
+    /** The NR_ENTER / NR_EXIT lines carry the contingency whose solve is running and
+     *  {@code OLF_RL_TRACE_CTG=<id>[,<id>]} restricts them, like the reactive-limit trace: the
+     *  per-solve iteration count and residual are what another implementation's per-solve counts
+     *  line up against, and a security analysis runs thousands of solves. */
+    private static boolean nrTraced() {
+        String want = System.getenv("OLF_RL_TRACE_CTG");
+        String ctg = com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop.CURRENT_CONTINGENCY.get();
+        if (want == null || ctg == null) {
+            return true;
+        }
+        for (String w : want.split(",")) {
+            if (w.trim().equals(ctg)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String nrCtgTag() {
+        String ctg = com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop.CURRENT_CONTINGENCY.get();
+        return ctg == null ? "base" : ctg;
     }
 }
