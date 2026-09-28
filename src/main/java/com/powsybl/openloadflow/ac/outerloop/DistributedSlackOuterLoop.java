@@ -141,9 +141,16 @@ public class DistributedSlackOuterLoop
         boolean shouldDistributeSlack = absMismatch > slackBusPMaxMismatch / PerUnit.SB && absMismatch > ActivePowerDistribution.P_RESIDUE_EPS;
 
         if (traced()) {
-            System.err.printf("DS_PASS ctg=%s sc=%d mismatch=%.12f threshold=%.12f distribute=%b%n",
+            // ...and the two halves of the mismatch per slack bus: the evaluated P and the target, so
+            // a gate that reads differently on another implementation for the same state can be
+            // split into "P differs" and "target differs".
+            StringBuilder halves = new StringBuilder();
+            for (var sb : lfScNetwork.getSlackBuses()) {
+                halves.append(String.format(" slack=%s p=%.12f targetP=%.12f", sb.getId(), sb.getP().eval(), sb.getTargetP()));
+            }
+            System.err.printf("DS_PASS ctg=%s sc=%d mismatch=%.12f threshold=%.12f distribute=%b%s%n",
                     ctgTag(), lfScNetwork.getNumSC(), slackBusActivePowerMismatch,
-                    slackBusPMaxMismatch / PerUnit.SB, shouldDistributeSlack);
+                    slackBusPMaxMismatch / PerUnit.SB, shouldDistributeSlack, halves);
         }
         if (!shouldDistributeSlack) {
             LOGGER.debug("Already balanced");
