@@ -130,7 +130,10 @@ public class NewtonRaphson extends AbstractAcSolver {
             // (varRow, eqCol, dF_eqCol/dx_varRow); the device stores the transpose of that. dx is
             // indexed by variable and compares term by term across the arms with no mapping at all.
             double[] dumpF = null;
-            boolean doDump = System.getenv("OLF_NR_DX_DUMP") != null && iterations.intValue() == 0 && !dxDumped;
+            boolean doDump = (System.getenv("OLF_NR_DX_DUMP") != null && iterations.intValue() == 0 && !dxDumped) && nrTraced()
+                    // with a contingency filter, the BASE load flow (no tag) must not spend the once-only dump
+                    && (System.getenv("OLF_RL_TRACE_CTG") == null
+                        || com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop.CURRENT_CONTINGENCY.get() != null);
             if (doDump) {
                 dumpF = equationVector.getArray().clone();
             }
