@@ -122,14 +122,14 @@ public final class ActivePowerDistribution {
         var participatingBuses = filterParticipatingBuses(buses);
         PreviousStateInfo previousStateInfo = step.resetToInitialState(participatingBuses, referenceGenerator);
         double remainingMismatch = activePowerMismatch + previousStateInfo.previousMismatch();
-        if (System.getenv("OLF_DS_TRACE") != null) {
+        if (System.getenv("OLF_DS_TRACE") != null && dsTraced()) {
             // resetToInitialState puts every participant back to its INITIAL targetP -- the value from
             // the ORIGINAL network, NOT the base-converged one -- and previousMismatch adds back
             // whatever that undid. So the amount actually water-filled is the contingency mismatch PLUS
             // everything the base load flow had distributed, re-derived from the original anchor. With
             // clamping, that is not the same function as filling the contingency mismatch alone.
-            System.err.printf("DS_RUN mismatch=%.9f previousMismatch=%.9f effective=%.9f participants=%d%n",
-                    activePowerMismatch, previousStateInfo.previousMismatch(), remainingMismatch,
+            System.err.printf("DS_RUN ctg=%s mismatch=%.9f previousMismatch=%.9f effective=%.9f participants=%d%n",
+                    dsCtgTag(), activePowerMismatch, previousStateInfo.previousMismatch(), remainingMismatch,
                     participatingBuses.size());
         }
         List<ParticipatingElement> participatingElements = step.getParticipatingElements(participatingBuses, remainingMismatch);
@@ -154,10 +154,10 @@ public final class ActivePowerDistribution {
         // a difference in the SPLIT shows up here even when the cumulative TOTAL agrees (measured: it
         // does, to 5e-05 pu, on rte6515 GEN-6172).
         String splitFile = System.getenv("OLF_DS_SPLIT");
-        if (splitFile != null) {
+        if (splitFile != null && dsTraced()) {
             try (java.io.PrintWriter w = new java.io.PrintWriter(new java.io.FileWriter(splitFile, true))) {
-                w.printf("# DS_SPLIT mismatch=%.9f previousMismatch=%.9f effectiveIn=%.9f "
-                        + "remaining=%.9f iterations=%d%n",
+                w.printf("# DS_SPLIT ctg=%s mismatch=%.9f previousMismatch=%.9f effectiveIn=%.9f "
+                        + "remaining=%.9f iterations=%d%n", dsCtgTag(),
                         activePowerMismatch, previousStateInfo.previousMismatch(),
                         activePowerMismatch + previousStateInfo.previousMismatch(), remainingMismatch, iteration);
                 for (LfBus b : participatingBuses) {
@@ -186,6 +186,27 @@ public final class ActivePowerDistribution {
             }
         }
         return new Result(iteration, remainingMismatch, previousStateInfo.moved());
+    }
+
+    /** {@code OLF_DS_TRACE_CTG=<id>[,<id>]}: restrict the DS_RUN / DS_GEN / DS_SAT prints and the
+     *  OLF_DS_SPLIT file to those contingencies; the base load flow (no tag) is always included. */
+    static boolean dsTraced() {
+        String want = System.getenv("OLF_DS_TRACE_CTG");
+        String ctg = com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop.CURRENT_CONTINGENCY.get();
+        if (want == null || ctg == null) {
+            return true;
+        }
+        for (String w : want.split(",")) {
+            if (w.trim().equals(ctg)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static String dsCtgTag() {
+        String ctg = com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop.CURRENT_CONTINGENCY.get();
+        return ctg == null ? "base" : ctg;
     }
 
     public static ActivePowerDistribution create(LoadFlowParameters.BalanceType balanceType, boolean loadPowerFactorConstant, boolean useActiveLimits) {

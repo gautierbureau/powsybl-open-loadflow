@@ -124,12 +124,12 @@ public class GenerationActivePowerDistributionStep implements ActivePowerDistrib
                 it.remove();
             }
 
-            if (DS_TRACE && newTargetP != targetP && (newTargetP == maxTargetP || newTargetP == minTargetP)) {
+            if (DS_TRACE && ActivePowerDistribution.dsTraced() && newTargetP != targetP && (newTargetP == maxTargetP || newTargetP == minTargetP)) {
                 System.err.printf("DS_SAT iter=%d gen=%s bus=%s gensOnBus=%d targetP=%.9f newTargetP=%.9f factor=%.9f%n",
                         iteration, generator.getId(), generator.getBus().getId(),
                         generator.getBus().getGenerators().size(), targetP, newTargetP, factor);
             }
-            if (DS_TRACE && newTargetP != targetP) {
+            if (DS_TRACE && ActivePowerDistribution.dsTraced() && newTargetP != targetP) {
                 // every generator this pass MOVES, not only the saturating ones: two water-fills that
                 // distribute the same TOTAL can still split it differently, and only the per-generator
                 // deltas say so
