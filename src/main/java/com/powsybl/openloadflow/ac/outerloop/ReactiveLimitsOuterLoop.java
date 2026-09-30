@@ -183,10 +183,10 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
         }
 
         if (RL_TRACE) {
-            System.err.printf("RL_PASS switchPvPq candidates=%d remainingPvBusCount=%d%n",
+            System.err.printf("RL_PASS ctg=" + com.powsybl.openloadflow.util.OlfTraceScope.current() + " switchPvPq candidates=%d remainingPvBusCount=%d%n",
                     pvToPqBuses.size(), remainingPvBusCount);
             for (ControllerBusToPqBus b : pvToPqBuses) {
-                System.err.printf("RL_SWITCH PV->PQ bus=%s q=%.9f qLimit=%.9f limitType=%s%n",
+                System.err.printf("RL_SWITCH ctg=" + com.powsybl.openloadflow.util.OlfTraceScope.current() + " PV->PQ bus=%s q=%.9f qLimit=%.9f limitType=%s%n",
                         b.controllerBus.getId(), b.q, b.qLimit, b.limitType);
             }
         }
@@ -208,7 +208,7 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
     private static boolean switchPqPv(List<PqToPvBus> pqToPvBuses, ContextData contextData, ReportNode reportNode, int maxPqPvSwitch) {
         if (RL_TRACE) {
             for (PqToPvBus b : pqToPvBuses) {
-                System.err.printf("RL_SWITCH PQ->PV bus=%s limitType=%s%n", b.controllerBus.getId(), b.limitType);
+                System.err.printf("RL_SWITCH ctg=" + com.powsybl.openloadflow.util.OlfTraceScope.current() + " PQ->PV bus=%s limitType=%s%n", b.controllerBus.getId(), b.limitType);
             }
         }
         int pqPvSwitchCount = 0;

@@ -128,7 +128,8 @@ public final class ActivePowerDistribution {
             // whatever that undid. So the amount actually water-filled is the contingency mismatch PLUS
             // everything the base load flow had distributed, re-derived from the original anchor. With
             // clamping, that is not the same function as filling the contingency mismatch alone.
-            System.err.printf("DS_RUN mismatch=%.9f previousMismatch=%.9f effective=%.9f participants=%d%n",
+            System.err.printf("DS_RUN ctg=%s mismatch=%.9f previousMismatch=%.9f effective=%.9f participants=%d%n",
+                    com.powsybl.openloadflow.util.OlfTraceScope.current(),
                     activePowerMismatch, previousStateInfo.previousMismatch(), remainingMismatch,
                     participatingBuses.size());
         }
@@ -154,10 +155,14 @@ public final class ActivePowerDistribution {
         // a difference in the SPLIT shows up here even when the cumulative TOTAL agrees (measured: it
         // does, to 5e-05 pu, on rte6515 GEN-6172).
         String splitFile = System.getenv("OLF_DS_SPLIT");
-        if (splitFile != null) {
+        // OLF_TRACE_CTG=<id> keeps ONLY that contingency's section: this dump is one line per moved
+        // generator, so over 6667 contingencies it is millions of lines and the section that matters
+        // cannot even be located (the header carries no id). With the filter it is a few hundred.
+        if (splitFile != null && com.powsybl.openloadflow.util.OlfTraceScope.wanted()) {
             try (java.io.PrintWriter w = new java.io.PrintWriter(new java.io.FileWriter(splitFile, true))) {
-                w.printf("# DS_SPLIT mismatch=%.9f previousMismatch=%.9f effectiveIn=%.9f "
+                w.printf("# DS_SPLIT ctg=%s mismatch=%.9f previousMismatch=%.9f effectiveIn=%.9f "
                         + "remaining=%.9f iterations=%d%n",
+                        com.powsybl.openloadflow.util.OlfTraceScope.current(),
                         activePowerMismatch, previousStateInfo.previousMismatch(),
                         activePowerMismatch + previousStateInfo.previousMismatch(), remainingMismatch, iteration);
                 for (LfBus b : participatingBuses) {

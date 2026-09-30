@@ -110,7 +110,8 @@ public class DistributedSlackOuterLoop
         boolean shouldDistributeSlack = absMismatch > slackBusPMaxMismatch / PerUnit.SB && absMismatch > ActivePowerDistribution.P_RESIDUE_EPS;
 
         if (DS_TRACE) {
-            System.err.printf("DS_PASS sc=%d mismatch=%.9f threshold=%.9f distribute=%b%n",
+            System.err.printf("DS_PASS ctg=%s sc=%d mismatch=%.9f threshold=%.9f distribute=%b%n",
+                    com.powsybl.openloadflow.util.OlfTraceScope.current(),
                     lfScNetwork.getNumSC(), slackBusActivePowerMismatch,
                     slackBusPMaxMismatch / PerUnit.SB, shouldDistributeSlack);
         }
@@ -130,7 +131,7 @@ public class DistributedSlackOuterLoop
         double remainingMismatch = resultWbh.remainingMismatch();
         double distributedActivePower = slackBusActivePowerMismatch - remainingMismatch;
         if (DS_TRACE) {
-            System.err.printf("DS_DIST sc=%d distributed=%.9f remaining=%.9f movedBuses=%b iterations=%d%n",
+            System.err.printf("DS_DIST ctg=" + com.powsybl.openloadflow.util.OlfTraceScope.current() + " sc=%d distributed=%.9f remaining=%.9f movedBuses=%b iterations=%d%n",
                     lfScNetwork.getNumSC(), distributedActivePower, remainingMismatch,
                     resultWbh.movedBuses(), result.iteration());
         }

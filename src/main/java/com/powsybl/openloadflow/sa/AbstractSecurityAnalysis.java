@@ -661,6 +661,25 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                                                                  SecurityAnalysisParameters securityAnalysisParameters,
                                                                  PreContingencyNetworkResult preContingencyNetworkResult, boolean createResultExtension,
                                                                  List<LimitReduction> limitReductions, double preDistributedActivePower) {
+        // Label every debug trace below with the contingency it belongs to (OlfTraceScope): DS_RUN /
+        // DS_SPLIT / DS_SAT / DS_PASS / RL_SWITCH carry no id otherwise, so in a thousand-contingency
+        // run none of them can be attributed.
+        com.powsybl.openloadflow.util.OlfTraceScope.enter(contingency.getId());
+        try {
+            return runPostContingencySimulationTraced(network, context, contingency, lfContingency,
+                    preContingencyLimitViolationManager, securityAnalysisParameters,
+                    preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
+        } finally {
+            com.powsybl.openloadflow.util.OlfTraceScope.leave();
+        }
+    }
+
+    private PostContingencyResult runPostContingencySimulationTraced(LfNetwork network, C context, Contingency contingency,
+                                                                 LfContingency lfContingency,
+                                                                 LimitViolationManager preContingencyLimitViolationManager,
+                                                                 SecurityAnalysisParameters securityAnalysisParameters,
+                                                                 PreContingencyNetworkResult preContingencyNetworkResult, boolean createResultExtension,
+                                                                 List<LimitReduction> limitReductions, double preDistributedActivePower) {
         logPostContingencyStart(network, lfContingency);
 
         Stopwatch stopwatch = Stopwatch.createStarted();
