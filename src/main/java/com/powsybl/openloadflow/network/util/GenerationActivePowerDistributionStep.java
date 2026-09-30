@@ -125,7 +125,8 @@ public class GenerationActivePowerDistributionStep implements ActivePowerDistrib
             }
 
             if (DS_TRACE && newTargetP != targetP && (newTargetP == maxTargetP || newTargetP == minTargetP)) {
-                System.err.printf("DS_SAT iter=%d gen=%s bus=%s gensOnBus=%d targetP=%.9f newTargetP=%.9f factor=%.9f%n",
+                System.err.printf("DS_SAT ctg=%s iter=%d gen=%s bus=%s gensOnBus=%d targetP=%.9f newTargetP=%.9f factor=%.9f%n",
+                        com.powsybl.openloadflow.util.OlfTraceScope.current(),
                         iteration, generator.getId(), generator.getBus().getId(),
                         generator.getBus().getGenerators().size(), targetP, newTargetP, factor);
             }
