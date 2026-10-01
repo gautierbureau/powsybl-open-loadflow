@@ -666,11 +666,67 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         // run none of them can be attributed.
         com.powsybl.openloadflow.util.OlfTraceScope.enter(contingency.getId());
         try {
-            return runPostContingencySimulationTraced(network, context, contingency, lfContingency,
+            PostContingencyResult r = runPostContingencySimulationTraced(network, context, contingency, lfContingency,
                     preContingencyLimitViolationManager, securityAnalysisParameters,
                     preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
+            dumpEquationOnlyVariables(context, network);
+            return r;
         } finally {
             com.powsybl.openloadflow.util.OlfTraceScope.leave();
+        }
+    }
+
+    /**
+     * {@code OLF_DUMMY_DUMP=<file>}: the CONVERGED value of every equation-only variable — the
+     * zero-impedance couplers' {@code DUMMY_P}/{@code DUMMY_Q} — after this contingency's solve,
+     * labelled by contingency and filtered by {@code OLF_TRACE_CTG}.
+     *
+     * <p>These are the only state variables {@code NetworkState}/{@code BusState} do NOT save, so
+     * {@code restore()} between contingencies leaves them holding the PREVIOUS contingency's values:
+     * measured on rte6515 BUS-4467_BBS as DISTR_Q terms evaluating to 519 pu at the post-contingency
+     * start, which is a ~780 pu dummy and no physical coupler flow. Harmless for this solver, which
+     * re-converges them — but it means the two arms of a GPU comparison enter each scenario from
+     * DIFFERENT dummy values (a device that tiles the base state starts from the base's), and if the
+     * dummy subsystem is underdetermined they can converge to different points of its null space.
+     * Bus voltages would still agree while a DISTR_Q that REFERENCES a dummy enforces a different
+     * reactive split. This dump is the test: do the converged dummies differ or not.
+     */
+    private void dumpEquationOnlyVariables(C context, LfNetwork network) {
+        // OLF_DUMMY_DUMP: the equation-only variables alone. OLF_VAR_DUMP: EVERY state variable, keyed
+        // by ELEMENT ID rather than element num, so the file joins directly against a device-side dump
+        // without a row legend — which is what localizing a ~2e-08 state difference needs (an aggregate
+        // norm says only that one exists; see tasks #66).
+        String path = System.getenv("OLF_VAR_DUMP") != null
+                ? System.getenv("OLF_VAR_DUMP") : System.getenv("OLF_DUMMY_DUMP");
+        boolean all = System.getenv("OLF_VAR_DUMP") != null;
+        if (path == null || !com.powsybl.openloadflow.util.OlfTraceScope.wanted()) {
+            return;
+        }
+        try (java.io.Writer w = new java.io.FileWriter(path, true)) {
+            var es = context.getEquationSystem();
+            var sv = es.getStateVector();
+            w.write("# VARS ctg=" + com.powsybl.openloadflow.util.OlfTraceScope.current()
+                    + (all ? " all" : " dummyOnly") + "\n");
+            for (com.powsybl.openloadflow.equations.Variable<V> v : es.getIndex().getSortedVariablesToFind()) {
+                String t = v.getType().name();
+                if (!all && !t.startsWith("DUMMY_")) {
+                    continue;
+                }
+                String id;
+                try {
+                    id = switch (v.getType().getElementType()) {
+                        case BUS -> network.getBus(v.getElementNum()).getId();
+                        case BRANCH -> network.getBranch(v.getElementNum()).getId();
+                        case SHUNT_COMPENSATOR -> network.getShunt(v.getElementNum()).getId();
+                        default -> "#" + v.getElementNum();
+                    };
+                } catch (RuntimeException e) {
+                    id = "#" + v.getElementNum();
+                }
+                w.write(t + " " + id + " " + sv.get(v.getRow()) + "\n");
+            }
+        } catch (java.io.IOException | RuntimeException e) {
+            LOGGER.warn("variable dump failed: {}", e.toString());
         }
     }
 
