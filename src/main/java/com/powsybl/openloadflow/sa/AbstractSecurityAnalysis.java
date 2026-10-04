@@ -725,6 +725,42 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 }
                 w.write(t + " " + id + " " + sv.get(v.getRow()) + "\n");
             }
+            // ...and, AT THE SAME POINT, every active equation's VALUE and TARGET. Both are read here,
+            // post-solve: the equation vector was invalidated by the solve's state updates so getArray()
+            // re-evaluates at the converged state, and the target vector carries the targets as the
+            // reactive-limits loop and the DISTR_Q maintenance left them. That matters because a
+            // BUS_TARGET_Q target is NOT constant through a solve -- a pin rewrites it with
+            // setGenerationTargetQ(limit). Computing a residual from the PRE-solve targets printed by
+            // EQ_DUMP_CTG's F0 section against a POST-solve state is meaningless, and doing exactly that
+            // produced a false conclusion that this solver leaves 4.2e-03 on its own equations
+            // (retracted, tasks #66). One point, one file, both quantities.
+            if (all) {
+                // A FRESH EquationVector rather than the context's: getEquationVector() is on the AC
+                // context, not the generic one, and a fresh vector evaluates at the CURRENT (converged)
+                // state, which is the point this dump is about. AutoCloseable -- it deregisters its
+                // index listener, so it leaves the system exactly as it found it.
+                double[] tg = context.getTargetVector().getArray();
+                try (var ev = new com.powsybl.openloadflow.equations.EquationVector<>(context.getEquationSystem())) {
+                double[] fx = ev.getArray();
+                for (int c = 0; c < fx.length; c++) {
+                    var eq = context.getEquationSystem().getIndex().getEquationAtColumn(c);
+                    String id;
+                    try {
+                        id = switch (eq.getType().getElementType()) {
+                            case BUS -> network.getBus(eq.getElementNum()).getId();
+                            case BRANCH -> network.getBranch(eq.getElementNum()).getId();
+                            case SHUNT_COMPENSATOR -> network.getShunt(eq.getElementNum()).getId();
+                            default -> "#" + eq.getElementNum();
+                        };
+                    } catch (RuntimeException ex) {
+                        id = "#" + eq.getElementNum();
+                    }
+                    double tv = c < tg.length ? tg[c] : 0.0;
+                    w.write("EQ " + eq.getType() + " " + id + " " + fx[c] + " " + tv
+                            + " " + (fx[c] - tv) + "\n");
+                }
+                }
+            }
         } catch (java.io.IOException | RuntimeException e) {
             LOGGER.warn("variable dump failed: {}", e.toString());
         }

@@ -32,6 +32,8 @@ public class MaxVoltageChangeStateVectorScaling implements StateVectorScaling {
     public static final double DEFAULT_MAX_DV = 0.1;
     public static final double DEFAULT_MAX_DPHI = Math.toRadians(10);
 
+    private static final boolean STEP_TRACE = System.getenv("OLF_STEP_TRACE") != null;
+
     private final double maxDv;
     private final double maxDphi;
 
@@ -69,6 +71,30 @@ public class MaxVoltageChangeStateVectorScaling implements StateVectorScaling {
                 default:
                     break;
             }
+        }
+        // OLF_STEP_TRACE=1 (+ OLF_TRACE_CTG=<id> to scope it): the step size OLF actually applies, with
+        // the variable that binds it. The GPU side prints the same thing (OLF_GPU_STEP_TRACE), and the
+        // comparison is what splits "the device's step is throttled where OLF's is not" from "both are
+        // throttled and the device's iterates still differ" — the open question on the 108
+        // non-converging batched scenarios (powsybl-open-loadflow-gpu docs/tasks.md #67). Diagnostic only.
+        if (STEP_TRACE && com.powsybl.openloadflow.util.OlfTraceScope.wanted()) {
+            double mdv = 0;
+            double mdphi = 0;
+            String av = "-";
+            String ap = "-";
+            for (var variable : equationSystem.getIndex().getSortedVariablesToFind()) {
+                double a2 = Math.abs(dx[variable.getRow()]);
+                if (variable.getType() == AcVariableType.BUS_V && a2 > mdv) {
+                    mdv = a2;
+                    av = "row" + variable.getRow() + "/elem" + variable.getElementNum();
+                } else if (variable.getType() == AcVariableType.BUS_PHI && a2 > mdphi) {
+                    mdphi = a2;
+                    ap = "row" + variable.getRow() + "/elem" + variable.getElementNum();
+                }
+            }
+            System.err.printf("OLF_STEP ctg=%s f=%.9g maxDv=%.6g at=%s maxDphi=%.6g at=%s vCut=%d phiCut=%d%n",
+                    com.powsybl.openloadflow.util.OlfTraceScope.current(), stepSize, mdv, av, mdphi, ap,
+                    vCutCount, phiCutCount);
         }
         if (vCutCount > 0 || phiCutCount > 0) {
             LOGGER.debug("Step size: {} ({} dv and {} dphi changes outside thresholds)", stepSize, vCutCount, phiCutCount);
