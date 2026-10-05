@@ -33,13 +33,27 @@ public abstract class AbstractHvdcAcEmulationLimitsOuterLoop<V extends Enum<V> &
     protected static boolean checkAcEmulationMode(LfHvdc hvdc, boolean computeLoss, Logger logger, ReportNode reportNode) {
         LfHvdc.AcEmulationControl acEmulationControl = hvdc.getAcEmulationControl();
 
-        return switch (acEmulationControl.getAcEmulationStatus()) {
+        // OLF_HVDC_TRACE=1 (+ OLF_TRACE_CTG=<id>): every AC-emulation limit check, with the flows it decided on
+        // and the status before/after — the GPU side prints the same (OLF_GPU_HVDC_TRACE=<slot>). Diagnostic only.
+        LfHvdc.AcEmulationControl.AcEmulationStatus before = acEmulationControl.getAcEmulationStatus();
+        double tp1 = HVDC_TRACE ? hvdc.getP1().eval() : 0.0;
+        double tp2 = HVDC_TRACE ? hvdc.getP2().eval() : 0.0;
+        boolean changed = switch (acEmulationControl.getAcEmulationStatus()) {
             case LINEAR_MODE -> checkLinearMode(hvdc, computeLoss, logger, reportNode);
             case SATURATION_MODE_FROM_CS1_TO_CS2, SATURATION_MODE_FROM_CS2_TO_CS1 ->
                 checkSaturationMode(hvdc, computeLoss, logger, reportNode);
             default -> false;
         };
+        if (HVDC_TRACE && com.powsybl.openloadflow.util.OlfTraceScope.wanted()) {
+            System.err.printf("HVDC_CHECK ctg=%s id=%s before=%s p1=%.12f p2=%.12f pmax12=%.9f pmax21=%.9f after=%s changed=%b%n",
+                    com.powsybl.openloadflow.util.OlfTraceScope.current(), hvdc.getId(), before, tp1, tp2,
+                    acEmulationControl.getPMaxFromCS1toCS2(), acEmulationControl.getPMaxFromCS2toCS1(),
+                    acEmulationControl.getAcEmulationStatus(), changed);
+        }
+        return changed;
     }
+
+    private static final boolean HVDC_TRACE = System.getenv("OLF_HVDC_TRACE") != null;
 
     private static boolean checkLinearMode(LfHvdc hvdc, boolean computeLoss, Logger logger, ReportNode reportNode) {
         // If the HVDC was in linear mode but overpasses P_max -> switching to saturated mode
