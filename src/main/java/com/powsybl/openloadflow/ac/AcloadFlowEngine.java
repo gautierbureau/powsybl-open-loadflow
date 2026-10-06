@@ -70,6 +70,10 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         private AcOuterLoop lastUnrealisticStateFixingLoop;
 
         private AcOuterLoop lastUnstableOuterLoop;
+
+        private int firstSolverIterations = -1;                       // OLF_OL_STATS
+
+        private final Map<String, int[]> resolvesByType = new java.util.LinkedHashMap<>();   // name -> {re-solves, NR iterations}
     }
 
     /**
@@ -145,6 +149,11 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
 
                 runningContext.nrTotalIterations.add(runningContext.lastSolverResult.getIterations());
                 runningContext.outerLoopTotalIterations++;
+                if (OL_STATS) {
+                    int[] rs = runningContext.resolvesByType.computeIfAbsent(outerLoop.getName(), k -> new int[2]);
+                    rs[0]++;
+                    rs[1] += runningContext.lastSolverResult.getIterations();
+                }
 
                 outerLoopIteration.increment();
             }
@@ -283,6 +292,7 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         runningContext.lastSolverResult = runAcSolverAndCheckRealisticState(solver, voltageInitializer, reportNode, checkUnrealisticStates, context.getParameters());
 
         runningContext.nrTotalIterations.add(runningContext.lastSolverResult.getIterations());
+        runningContext.firstSolverIterations = runningContext.lastSolverResult.getIterations();
 
         // continue with outer loops only if solver succeed
         if (runningContext.lastSolverResult.getStatus() == AcSolverStatus.CONVERGED) {
@@ -349,7 +359,31 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         return buildAcLoadFlowResult(runningContext, outerLoopFinalResult, distributedActivePowerPerSc);
     }
 
+    /** {@code OLF_OL_STATS}: per run, how much of the Newton work the outer loops cost — the first inner solve's
+     *  iterations, the total, and per outer loop the re-solves it triggered and their iterations. Read by the
+     *  caller through {@link #lastRunStats()} (per thread: partitions run concurrently). */
+    public static final boolean OL_STATS = System.getenv("OLF_OL_STATS") != null;
+
+    private static final ThreadLocal<String> LAST_RUN_STATS = new ThreadLocal<>();
+
+    /** The last run's {@code OLF_OL_STATS} record on this thread, then cleared; null when no run happened. */
+    public static String lastRunStats() {
+        String st = LAST_RUN_STATS.get();
+        LAST_RUN_STATS.remove();
+        return st;
+    }
+
     private AcLoadFlowResult buildAcLoadFlowResult(RunningContext runningContext, OuterLoopResult outerLoopFinalResult, Map<Integer, Double> distributedActivePower) {
+        if (OL_STATS) {
+            StringBuilder sb = new StringBuilder();
+            sb.append("firstNr=").append(runningContext.firstSolverIterations)
+                    .append(" totalNr=").append(runningContext.nrTotalIterations.getValue())
+                    .append(" outer=").append(runningContext.outerLoopTotalIterations)
+                    .append(" status=").append(runningContext.lastSolverResult.getStatus())
+                    .append(" loops=");
+            runningContext.resolvesByType.forEach((k, v) -> sb.append(k.replace(' ', '_')).append(':').append(v[0]).append('/').append(v[1]).append(','));
+            LAST_RUN_STATS.set(sb.toString());
+        }
         AcLoadFlowResult result = new AcLoadFlowResult(context.getNetwork(),
                                                        runningContext.outerLoopTotalIterations,
                                                        runningContext.nrTotalIterations.getValue(),
