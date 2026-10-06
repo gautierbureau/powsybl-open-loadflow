@@ -130,7 +130,8 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
                 // Which loop reports UNSTABLE, and therefore how many times the solver is re-run, IS the
                 // trajectory: two implementations that agree on every loop's DECISION still diverge if one
                 // of them performs a different number of re-solves.
-                System.err.printf("OL_CHECK loop=%s iteration=%d status=%s%n",
+                System.err.printf("OL_CHECK ctg=%s loop=%s iteration=%d status=%s%n",
+                        com.powsybl.openloadflow.util.OlfTraceScope.current(),
                         outerLoop.getName(), outerLoopContext.getIteration(), outerLoopResult.status());
             }
 
