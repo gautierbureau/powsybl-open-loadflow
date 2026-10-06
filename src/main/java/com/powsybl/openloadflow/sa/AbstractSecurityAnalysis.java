@@ -956,10 +956,20 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             // arms' SOLVE SEQUENCES - not their final quantities - is how a divergence gets located.
             System.err.println("CPU_CTG ctg=" + propagatedContingency.getContingency().getId());
         }
+        if (com.powsybl.openloadflow.ac.AcloadFlowEngine.OL_STATS) {
+            com.powsybl.openloadflow.ac.AcloadFlowEngine.lastRunStats();   // clear a stale record
+        }
         var postContingencyResult = runPostContingencySimulation(lfNetwork, context, propagatedContingency.getContingency(),
             lfContingency, preContingencyLimitViolationManager,
             securityAnalysisParameters,
             preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
+        if (com.powsybl.openloadflow.ac.AcloadFlowEngine.OL_STATS) {
+            // One line per contingency: did the state come right out of the first inner Newton, or did outer
+            // loops re-solve it, and at what cost. "nosolve" = no load flow ran for it on this path.
+            String st = com.powsybl.openloadflow.ac.AcloadFlowEngine.lastRunStats();
+            System.err.println("CPU_OL_STATS ctg=" + propagatedContingency.getContingency().getId() + " "
+                    + (st != null ? st : "nosolve"));
+        }
         if (System.getenv("OLF_DS_TARGET_DUMP") != null) {
             // Every participating bus's net P target at the END of the contingency, for a direct
             // comparison against the device's distributed targets. Double.toString round-trips.
