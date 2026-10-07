@@ -191,6 +191,9 @@ public final class ActivePowerDistribution {
     /** {@code OLF_DS_TRACE_CTG=<id>[,<id>]}: restrict the DS_RUN / DS_GEN / DS_SAT prints and the
      *  OLF_DS_SPLIT file to those contingencies; the base load flow (no tag) is always included. */
     static boolean dsTraced() {
+        if (!com.powsybl.openloadflow.util.OlfTraceScope.wanted()) {   // OLF_TRACE_CTG filters it too
+            return false;
+        }
         String want = System.getenv("OLF_DS_TRACE_CTG");
         String ctg = com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop.CURRENT_CONTINGENCY.get();
         if (want == null || ctg == null) {

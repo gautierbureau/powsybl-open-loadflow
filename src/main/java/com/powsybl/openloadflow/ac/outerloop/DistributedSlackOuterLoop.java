@@ -70,7 +70,7 @@ public class DistributedSlackOuterLoop
     private static final String DS_TRACE_CTG = System.getenv("OLF_DS_TRACE_CTG");
 
     private static boolean traced() {
-        if (!DS_TRACE) {
+        if (!DS_TRACE || !com.powsybl.openloadflow.util.OlfTraceScope.wanted()) {   // OLF_TRACE_CTG too
             return false;
         }
         String ctg = CURRENT_CONTINGENCY.get();

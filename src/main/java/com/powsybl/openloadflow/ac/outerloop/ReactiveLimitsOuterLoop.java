@@ -44,6 +44,9 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
     private static final String RL_TRACE_CTG = System.getenv("OLF_RL_TRACE_CTG");
 
     private static void rlPrintf(String fmt, Object... args) {
+        if (!com.powsybl.openloadflow.util.OlfTraceScope.wanted()) {   // OLF_TRACE_CTG filters it too
+            return;
+        }
         String ctg = DistributedSlackOuterLoop.CURRENT_CONTINGENCY.get();
         if (RL_TRACE_CTG != null && ctg != null
                 && java.util.Arrays.stream(RL_TRACE_CTG.split(",")).map(String::trim).noneMatch(ctg::equals)) {
