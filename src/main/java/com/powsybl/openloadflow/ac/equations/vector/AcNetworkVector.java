@@ -86,7 +86,8 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         Arrays.fill(branchVector.v2Row, -1);
         Arrays.fill(branchVector.ph2Row, -1);
 
-        for (Variable<AcVariableType> v : equationSystem.getIndex().getSortedVariablesToFind()) {
+        // only the variable rows are read here: do not force the equations-to-solve side of the index too
+        for (Variable<AcVariableType> v : equationSystem.getIndex().getSortedVariablesToFindOnly()) {
             int num = v.getElementNum();
             int row = v.getRow();
             switch (v.getType()) {
