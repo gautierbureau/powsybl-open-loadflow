@@ -31,3 +31,6 @@ build-docs/
 # Python
 __pycache__/
 *.pyc
+
+# GPU-extension build leftovers (OLF has no native code)
+/native/
