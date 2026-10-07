@@ -53,7 +53,23 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
     // tens of thousands of variables, and rebuilding the whole sorted list from the TreeMap each time dominated
     // the per-contingency index cost. The incremental path produces the same list, in the same order, with the
     // same rows as the full rebuild (OLF_VARIDX_CHECK=1 asserts it on every update).
-    private final Set<Variable<V>> touchedVariables = Collections.newSetFromMap(new IdentityHashMap<>());
+    // a LIST, not an identity set: the first full build touches every variable, and an IdentityHashMap keeps that
+    // capacity, so each later clear() cost the whole table (0.6 s on network.xiidm). Duplicates are harmless: the
+    // incremental pass is idempotent per variable. Past the limit it stops recording and the update is a full one.
+    private final List<Variable<V>> touchedVariables = new ArrayList<>();
+
+    private boolean touchedOverflow = false;
+
+    // what the LAST variables update changed, for a consumer that keeps its own copy of the rows: its generation, the
+    // first row whose variable may differ from the previous update's (0 after a full rebuild) and the variables it
+    // removed (rows now -1)
+    private long variablesUpdateGeneration = 0;
+
+    private int lastFirstChangedRow = 0;
+
+    private List<Variable<V>> lastRemovedVariables = Collections.emptyList();
+
+    private boolean lastUpdateIncremental = false;
 
     private boolean variablesEverBuilt = false;
 
@@ -153,9 +169,40 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
         updateVariablesToFind(null);
     }
 
+    private void touch(Variable<V> variable) {
+        if (!touchedOverflow) {
+            if (touchedVariables.size() >= INCREMENTAL_VARIABLES_MAX) {
+                touchedOverflow = true;
+                touchedVariables.clear();
+            } else {
+                touchedVariables.add(variable);
+            }
+        }
+    }
+
+    /** Generation of the last variables update (incremented by every one, full or incremental). */
+    public long getVariablesUpdateGeneration() {
+        return variablesUpdateGeneration;
+    }
+
+    /** True when the last variables update was incremental: then {@link #getLastFirstChangedRow()} and
+     *  {@link #getLastRemovedVariables()} describe everything it changed relative to the previous one. */
+    public boolean isLastVariablesUpdateIncremental() {
+        return lastUpdateIncremental;
+    }
+
+    public int getLastFirstChangedRow() {
+        return lastFirstChangedRow;
+    }
+
+    public List<Variable<V>> getLastRemovedVariables() {
+        return lastRemovedVariables;
+    }
+
     private boolean updateVariablesToFindIncrementally() {
         List<Variable<V>> list = new ArrayList<>(sortedVariablesToFind);
         int minPos = list.size();
+        List<Variable<V>> removed = new ArrayList<>();
         for (Variable<V> v : touchedVariables) {
             int pos = Collections.binarySearch(list, v);
             boolean present = sortedMapVariablesToFindRefCount.containsKey(v);
@@ -164,6 +211,7 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
                 list.add(pos, v);
             } else if (!present && pos >= 0) {
                 list.remove(pos);
+                removed.add(v);
             } else if (pos < 0) {
                 pos = -pos - 1;                              // added then removed again: absent before and after
             }
@@ -176,6 +224,8 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
         }
         sortedVariablesToFind = Collections.unmodifiableList(list);
         rowCount = list.size();
+        lastFirstChangedRow = minPos;
+        lastRemovedVariables = removed;
         if (VARIABLES_INDEX_CHECK) {
             List<Variable<V>> full = sortedMapVariablesToFindRefCount.keySet().stream().sorted().toList();
             if (!full.equals(sortedVariablesToFind)) {
@@ -192,14 +242,20 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
     }
 
     private void updateVariablesToFind(Predicate<V> isSeparatedInFirstPart) {
+        variablesUpdateGeneration++;
         if (isSeparatedInFirstPart == null && variablesEverBuilt && !lastVariablesUpdateSeparated
-                && touchedVariables.size() <= INCREMENTAL_VARIABLES_MAX && updateVariablesToFindIncrementally()) {
+                && !touchedOverflow && updateVariablesToFindIncrementally()) {
             touchedVariables.clear();
+            lastUpdateIncremental = true;
             variablesIndexValid = true;
             LOGGER.debug("Variables index updated incrementally ({} rows)", rowCount);
             return;
         }
         touchedVariables.clear();
+        touchedOverflow = false;
+        lastUpdateIncremental = false;
+        lastFirstChangedRow = 0;
+        lastRemovedVariables = Collections.emptyList();
         variablesEverBuilt = true;
         lastVariablesUpdateSeparated = isSeparatedInFirstPart != null;
         sortedVariablesToFind = sortedMapVariablesToFindRefCount.keySet().stream().sorted().toList();
@@ -252,7 +308,7 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
                 variableRefCount = new MutableInt(1);
                 sortedMapVariablesToFindRefCount.put(variable, variableRefCount);
                 variablesIndexValid = false;
-                touchedVariables.add(variable);
+                touch(variable);
                 notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.ADDED);
             } else {
                 variableRefCount.increment();
@@ -285,7 +341,7 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
                     variable.setRow(-1);
                     sortedMapVariablesToFindRefCount.remove(variable);
                     variablesIndexValid = false;
-                    touchedVariables.add(variable);
+                    touch(variable);
                     notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.REMOVED);
                 }
             }

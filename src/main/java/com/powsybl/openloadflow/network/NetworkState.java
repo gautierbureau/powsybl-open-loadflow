@@ -80,6 +80,15 @@ public class NetworkState {
      * @param branches the branches to restore
      */
     public void restore(Collection<LfBus> buses, Collection<LfBranch> branches) {
+        restore(buses, branches, true);
+    }
+
+    /**
+     * As {@link #restore(Collection, Collection)}; with {@code voltages} false the voltage magnitude and angle of the
+     * buses NOT listed are left as they are - for a caller that overwrites them before anything reads them, and that
+     * restores the rest itself ({@link #restoreVoltages()}, {@link #restoreVoltages(Collection)}) otherwise.
+     */
+    public void restore(Collection<LfBus> buses, Collection<LfBranch> branches, boolean voltages) {
         Objects.requireNonNull(buses);
         Objects.requireNonNull(branches);
         LOGGER.trace("Restoring network state of {} buses and {} branches", buses.size(), branches.size());
@@ -92,7 +101,7 @@ public class NetworkState {
             BusState state = busStates.get(num);
             if (busListed[num]) {
                 state.restore();
-            } else {
+            } else if (voltages) {
                 state.restoreVoltage();
             }
         }
@@ -112,6 +121,21 @@ public class NetworkState {
         int num = element.getNum();
         if (num < 0 || num >= states.size() || states.get(num).element != element) {
             throw new IllegalArgumentException("Element " + element.getId() + " is not part of the saved network state");
+        }
+    }
+
+    /** Restores the saved voltage magnitude and angle of every bus, and nothing else. */
+    public void restoreVoltages() {
+        for (BusState state : busStates) {
+            state.restoreVoltage();
+        }
+    }
+
+    /** Restores the saved voltage magnitude and angle of the given buses, and nothing else. */
+    public void restoreVoltages(Collection<LfBus> buses) {
+        for (LfBus bus : buses) {
+            checkSaved(busStates, bus);
+            busStates.get(bus.getNum()).restoreVoltage();
         }
     }
 }
