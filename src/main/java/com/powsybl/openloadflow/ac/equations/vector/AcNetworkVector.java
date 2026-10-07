@@ -18,6 +18,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
@@ -38,6 +39,11 @@ public class AcNetworkVector extends AbstractLfNetworkListener
     private final AcBusVector busVector;
     private final AcBranchVector branchVector;
     private boolean variablesInvalid = true;
+
+    // the variables-index generation these row arrays were last synced to (-1: never)
+    private long syncedVariablesGeneration = -1;
+
+    private static final boolean VARIABLES_CHECK = System.getenv("OLF_VARIDX_CHECK") != null;
 
     public AcNetworkVector(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem,
                            AcEquationSystemCreationParameters creationParameters) {
@@ -77,6 +83,62 @@ public class AcNetworkVector extends AbstractLfNetworkListener
 
         Stopwatch stopwatch = Stopwatch.createStarted();
 
+        // only the variable rows are read here: do not force the equations-to-solve side of the index too
+        var index = equationSystem.getIndex();
+        List<Variable<AcVariableType>> variables = index.getSortedVariablesToFindOnly();
+        long generation = index.getVariablesUpdateGeneration();
+        if (syncedVariablesGeneration >= 0 && generation == syncedVariablesGeneration + 1
+                && index.isLastVariablesUpdateIncremental()) {
+            // exactly one incremental update since the last sync: only the removed variables and the rows from the
+            // first changed position on can differ (a contingency removes a handful of the tens of thousands)
+            for (Variable<AcVariableType> v : index.getLastRemovedVariables()) {
+                setRow(v, -1);
+            }
+            for (int i = index.getLastFirstChangedRow(); i < variables.size(); i++) {
+                Variable<AcVariableType> v = variables.get(i);
+                setRow(v, v.getRow());
+            }
+            if (VARIABLES_CHECK) {
+                checkRowsAgainstFullWalk(variables);
+            }
+        } else {
+            fullRowWalk(variables);
+        }
+        syncedVariablesGeneration = generation;
+
+        copyVariablesToBranches();
+
+        stopwatch.stop();
+        LOGGER.debug("AC variable vector update in {} us", stopwatch.elapsed(TimeUnit.MICROSECONDS));
+
+        variablesInvalid = false;
+    }
+
+    private void setRow(Variable<AcVariableType> v, int row) {
+        int num = v.getElementNum();
+        switch (v.getType()) {
+            case BUS_V:
+                busVector.vRow[num] = row;
+                break;
+
+            case BUS_PHI:
+                busVector.phRow[num] = row;
+                break;
+
+            case BRANCH_ALPHA1:
+                branchVector.a1Row[num] = branchVector.deriveA1[num] ? row : -1;
+                break;
+
+            case BRANCH_RHO1:
+                branchVector.r1Row[num] = branchVector.deriveR1[num] ? row : -1;
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    private void fullRowWalk(List<Variable<AcVariableType>> variables) {
         Arrays.fill(busVector.vRow, -1);
         Arrays.fill(busVector.phRow, -1);
         Arrays.fill(branchVector.a1Row, -1);
@@ -85,38 +147,21 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         Arrays.fill(branchVector.ph1Row, -1);
         Arrays.fill(branchVector.v2Row, -1);
         Arrays.fill(branchVector.ph2Row, -1);
-
-        for (Variable<AcVariableType> v : equationSystem.getIndex().getSortedVariablesToFind()) {
-            int num = v.getElementNum();
-            int row = v.getRow();
-            switch (v.getType()) {
-                case BUS_V:
-                    busVector.vRow[num] = row;
-                    break;
-
-                case BUS_PHI:
-                    busVector.phRow[num] = row;
-                    break;
-
-                case BRANCH_ALPHA1:
-                    branchVector.a1Row[num] = branchVector.deriveA1[num] ? row : -1;
-                    break;
-
-                case BRANCH_RHO1:
-                    branchVector.r1Row[num] = branchVector.deriveR1[num] ? row : -1;
-                    break;
-
-                default:
-                    break;
-            }
+        for (Variable<AcVariableType> v : variables) {
+            setRow(v, v.getRow());
         }
+    }
 
-        copyVariablesToBranches();
-
-        stopwatch.stop();
-        LOGGER.debug("AC variable vector update in {} us", stopwatch.elapsed(TimeUnit.MICROSECONDS));
-
-        variablesInvalid = false;
+    private void checkRowsAgainstFullWalk(List<Variable<AcVariableType>> variables) {
+        int[] v = busVector.vRow.clone();
+        int[] ph = busVector.phRow.clone();
+        int[] a1 = branchVector.a1Row.clone();
+        int[] r1 = branchVector.r1Row.clone();
+        fullRowWalk(variables);
+        if (!Arrays.equals(v, busVector.vRow) || !Arrays.equals(ph, busVector.phRow)
+                || !Arrays.equals(a1, branchVector.a1Row) || !Arrays.equals(r1, branchVector.r1Row)) {
+            throw new IllegalStateException("Incremental AcNetworkVector rows differ from the full walk");
+        }
     }
 
     public void copyVariablesToBranches() {

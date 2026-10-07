@@ -661,6 +661,117 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                                                                  SecurityAnalysisParameters securityAnalysisParameters,
                                                                  PreContingencyNetworkResult preContingencyNetworkResult, boolean createResultExtension,
                                                                  List<LimitReduction> limitReductions, double preDistributedActivePower) {
+        // Label every debug trace below with the contingency it belongs to (OlfTraceScope): DS_RUN /
+        // DS_SPLIT / DS_SAT / DS_PASS / RL_SWITCH carry no id otherwise, so in a thousand-contingency
+        // run none of them can be attributed.
+        com.powsybl.openloadflow.util.OlfTraceScope.enter(contingency.getId());
+        try {
+            PostContingencyResult r = runPostContingencySimulationTraced(network, context, contingency, lfContingency,
+                    preContingencyLimitViolationManager, securityAnalysisParameters,
+                    preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
+            dumpEquationOnlyVariables(context, network);
+            return r;
+        } finally {
+            com.powsybl.openloadflow.util.OlfTraceScope.leave();
+        }
+    }
+
+    /**
+     * {@code OLF_DUMMY_DUMP=<file>}: the CONVERGED value of every equation-only variable — the
+     * zero-impedance couplers' {@code DUMMY_P}/{@code DUMMY_Q} — after this contingency's solve,
+     * labelled by contingency and filtered by {@code OLF_TRACE_CTG}.
+     *
+     * <p>These are the only state variables {@code NetworkState}/{@code BusState} do NOT save, so
+     * {@code restore()} between contingencies leaves them holding the PREVIOUS contingency's values:
+     * measured on rte6515 BUS-4467_BBS as DISTR_Q terms evaluating to 519 pu at the post-contingency
+     * start, which is a ~780 pu dummy and no physical coupler flow. Harmless for this solver, which
+     * re-converges them — but it means the two arms of a GPU comparison enter each scenario from
+     * DIFFERENT dummy values (a device that tiles the base state starts from the base's), and if the
+     * dummy subsystem is underdetermined they can converge to different points of its null space.
+     * Bus voltages would still agree while a DISTR_Q that REFERENCES a dummy enforces a different
+     * reactive split. This dump is the test: do the converged dummies differ or not.
+     */
+    private void dumpEquationOnlyVariables(C context, LfNetwork network) {
+        // OLF_DUMMY_DUMP: the equation-only variables alone. OLF_VAR_DUMP: EVERY state variable, keyed
+        // by ELEMENT ID rather than element num, so the file joins directly against a device-side dump
+        // without a row legend — which is what localizing a ~2e-08 state difference needs (an aggregate
+        // norm says only that one exists; see tasks #66).
+        String path = System.getenv("OLF_VAR_DUMP") != null
+                ? System.getenv("OLF_VAR_DUMP") : System.getenv("OLF_DUMMY_DUMP");
+        boolean all = System.getenv("OLF_VAR_DUMP") != null;
+        if (path == null || !com.powsybl.openloadflow.util.OlfTraceScope.wanted()) {
+            return;
+        }
+        try (java.io.Writer w = new java.io.FileWriter(path, true)) {
+            var es = context.getEquationSystem();
+            var sv = es.getStateVector();
+            w.write("# VARS ctg=" + com.powsybl.openloadflow.util.OlfTraceScope.current()
+                    + (all ? " all" : " dummyOnly") + "\n");
+            for (com.powsybl.openloadflow.equations.Variable<V> v : es.getIndex().getSortedVariablesToFind()) {
+                String t = v.getType().name();
+                if (!all && !t.startsWith("DUMMY_")) {
+                    continue;
+                }
+                String id;
+                try {
+                    id = switch (v.getType().getElementType()) {
+                        case BUS -> network.getBus(v.getElementNum()).getId();
+                        case BRANCH -> network.getBranch(v.getElementNum()).getId();
+                        case SHUNT_COMPENSATOR -> network.getShunt(v.getElementNum()).getId();
+                        default -> "#" + v.getElementNum();
+                    };
+                } catch (RuntimeException e) {
+                    id = "#" + v.getElementNum();
+                }
+                w.write(t + " " + id + " " + sv.get(v.getRow()) + "\n");
+            }
+            // ...and, AT THE SAME POINT, every active equation's VALUE and TARGET. Both are read here,
+            // post-solve: the equation vector was invalidated by the solve's state updates so getArray()
+            // re-evaluates at the converged state, and the target vector carries the targets as the
+            // reactive-limits loop and the DISTR_Q maintenance left them. That matters because a
+            // BUS_TARGET_Q target is NOT constant through a solve -- a pin rewrites it with
+            // setGenerationTargetQ(limit). Computing a residual from the PRE-solve targets printed by
+            // EQ_DUMP_CTG's F0 section against a POST-solve state is meaningless, and doing exactly that
+            // produced a false conclusion that this solver leaves 4.2e-03 on its own equations
+            // (retracted, tasks #66). One point, one file, both quantities.
+            if (all) {
+                // A FRESH EquationVector rather than the context's: getEquationVector() is on the AC
+                // context, not the generic one, and a fresh vector evaluates at the CURRENT (converged)
+                // state, which is the point this dump is about. AutoCloseable -- it deregisters its
+                // index listener, so it leaves the system exactly as it found it.
+                double[] tg = context.getTargetVector().getArray();
+                try (var ev = new com.powsybl.openloadflow.equations.EquationVector<>(context.getEquationSystem())) {
+                double[] fx = ev.getArray();
+                for (int c = 0; c < fx.length; c++) {
+                    var eq = context.getEquationSystem().getIndex().getEquationAtColumn(c);
+                    String id;
+                    try {
+                        id = switch (eq.getType().getElementType()) {
+                            case BUS -> network.getBus(eq.getElementNum()).getId();
+                            case BRANCH -> network.getBranch(eq.getElementNum()).getId();
+                            case SHUNT_COMPENSATOR -> network.getShunt(eq.getElementNum()).getId();
+                            default -> "#" + eq.getElementNum();
+                        };
+                    } catch (RuntimeException ex) {
+                        id = "#" + eq.getElementNum();
+                    }
+                    double tv = c < tg.length ? tg[c] : 0.0;
+                    w.write("EQ " + eq.getType() + " " + id + " " + fx[c] + " " + tv
+                            + " " + (fx[c] - tv) + "\n");
+                }
+                }
+            }
+        } catch (java.io.IOException | RuntimeException e) {
+            LOGGER.warn("variable dump failed: {}", e.toString());
+        }
+    }
+
+    private PostContingencyResult runPostContingencySimulationTraced(LfNetwork network, C context, Contingency contingency,
+                                                                 LfContingency lfContingency,
+                                                                 LimitViolationManager preContingencyLimitViolationManager,
+                                                                 SecurityAnalysisParameters securityAnalysisParameters,
+                                                                 PreContingencyNetworkResult preContingencyNetworkResult, boolean createResultExtension,
+                                                                 List<LimitReduction> limitReductions, double preDistributedActivePower) {
         logPostContingencyStart(network, lfContingency);
 
         Stopwatch stopwatch = Stopwatch.createStarted();
@@ -898,10 +1009,20 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             // arms' SOLVE SEQUENCES - not their final quantities - is how a divergence gets located.
             System.err.println("CPU_CTG ctg=" + propagatedContingency.getContingency().getId());
         }
+        if (com.powsybl.openloadflow.ac.AcloadFlowEngine.OL_STATS) {
+            com.powsybl.openloadflow.ac.AcloadFlowEngine.lastRunStats();   // clear a stale record
+        }
         var postContingencyResult = runPostContingencySimulation(lfNetwork, context, propagatedContingency.getContingency(),
             lfContingency, preContingencyLimitViolationManager,
             securityAnalysisParameters,
             preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
+        if (com.powsybl.openloadflow.ac.AcloadFlowEngine.OL_STATS) {
+            // One line per contingency: did the state come right out of the first inner Newton, or did outer
+            // loops re-solve it, and at what cost. "nosolve" = no load flow ran for it on this path.
+            String st = com.powsybl.openloadflow.ac.AcloadFlowEngine.lastRunStats();
+            System.err.println("CPU_OL_STATS ctg=" + propagatedContingency.getContingency().getId() + " "
+                    + (st != null ? st : "nosolve"));
+        }
         if (System.getenv("OLF_DS_TARGET_DUMP") != null) {
             // Every participating bus's net P target at the END of the contingency, for a direct
             // comparison against the device's distributed targets. Double.toString round-trips.

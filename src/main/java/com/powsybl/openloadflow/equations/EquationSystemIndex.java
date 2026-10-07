@@ -48,6 +48,37 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
 
     private boolean variablesIndexValid = false;
 
+    // Incremental variables update: the variables whose membership changed since the last variables update. A
+    // security analysis applies and restores one contingency at a time, which adds or removes a handful of the
+    // tens of thousands of variables, and rebuilding the whole sorted list from the TreeMap each time dominated
+    // the per-contingency index cost. The incremental path produces the same list, in the same order, with the
+    // same rows as the full rebuild (OLF_VARIDX_CHECK=1 asserts it on every update).
+    // a LIST, not an identity set: the first full build touches every variable, and an IdentityHashMap keeps that
+    // capacity, so each later clear() cost the whole table (0.6 s on network.xiidm). Duplicates are harmless: the
+    // incremental pass is idempotent per variable. Past the limit it stops recording and the update is a full one.
+    private final List<Variable<V>> touchedVariables = new ArrayList<>();
+
+    private boolean touchedOverflow = false;
+
+    // what the LAST variables update changed, for a consumer that keeps its own copy of the rows: its generation, the
+    // first row whose variable may differ from the previous update's (0 after a full rebuild) and the variables it
+    // removed (rows now -1)
+    private long variablesUpdateGeneration = 0;
+
+    private int lastFirstChangedRow = 0;
+
+    private List<Variable<V>> lastRemovedVariables = Collections.emptyList();
+
+    private boolean lastUpdateIncremental = false;
+
+    private boolean variablesEverBuilt = false;
+
+    private boolean lastVariablesUpdateSeparated = false;
+
+    private static final int INCREMENTAL_VARIABLES_MAX = 256;
+
+    private static final boolean VARIABLES_INDEX_CHECK = System.getenv("OLF_VARIDX_CHECK") != null;
+
     private final List<EquationSystemIndexListener<V, E>> listeners = new ArrayList<>();
 
     public EquationSystemIndex(EquationSystem<V, E> equationSystem) {
@@ -138,7 +169,95 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
         updateVariablesToFind(null);
     }
 
+    private void touch(Variable<V> variable) {
+        if (!touchedOverflow) {
+            if (touchedVariables.size() >= INCREMENTAL_VARIABLES_MAX) {
+                touchedOverflow = true;
+                touchedVariables.clear();
+            } else {
+                touchedVariables.add(variable);
+            }
+        }
+    }
+
+    /** Generation of the last variables update (incremented by every one, full or incremental). */
+    public long getVariablesUpdateGeneration() {
+        return variablesUpdateGeneration;
+    }
+
+    /** True when the last variables update was incremental: then {@link #getLastFirstChangedRow()} and
+     *  {@link #getLastRemovedVariables()} describe everything it changed relative to the previous one. */
+    public boolean isLastVariablesUpdateIncremental() {
+        return lastUpdateIncremental;
+    }
+
+    public int getLastFirstChangedRow() {
+        return lastFirstChangedRow;
+    }
+
+    public List<Variable<V>> getLastRemovedVariables() {
+        return lastRemovedVariables;
+    }
+
+    private boolean updateVariablesToFindIncrementally() {
+        List<Variable<V>> list = new ArrayList<>(sortedVariablesToFind);
+        int minPos = list.size();
+        List<Variable<V>> removed = new ArrayList<>();
+        for (Variable<V> v : touchedVariables) {
+            int pos = Collections.binarySearch(list, v);
+            boolean present = sortedMapVariablesToFindRefCount.containsKey(v);
+            if (present && pos < 0) {
+                pos = -pos - 1;
+                list.add(pos, v);
+            } else if (!present && pos >= 0) {
+                list.remove(pos);
+                removed.add(v);
+            } else if (pos < 0) {
+                pos = -pos - 1;                              // added then removed again: absent before and after
+            }
+            // a variable removed and re-added keeps its place but had its row reset to -1: rows from here on are
+            // re-assigned, which also covers every row an insertion or removal at this position shifts
+            minPos = Math.min(minPos, pos);
+        }
+        for (int i = minPos; i < list.size(); i++) {
+            list.get(i).setRow(i);
+        }
+        sortedVariablesToFind = Collections.unmodifiableList(list);
+        rowCount = list.size();
+        lastFirstChangedRow = minPos;
+        lastRemovedVariables = removed;
+        if (VARIABLES_INDEX_CHECK) {
+            List<Variable<V>> full = sortedMapVariablesToFindRefCount.keySet().stream().sorted().toList();
+            if (!full.equals(sortedVariablesToFind)) {
+                throw new IllegalStateException("Incremental variables index differs from the full rebuild");
+            }
+            for (int i = 0; i < full.size(); i++) {
+                if (full.get(i).getRow() != i) {
+                    throw new IllegalStateException("Incremental variables index: row of " + full.get(i) + " is "
+                            + full.get(i).getRow() + ", expected " + i);
+                }
+            }
+        }
+        return true;
+    }
+
     private void updateVariablesToFind(Predicate<V> isSeparatedInFirstPart) {
+        variablesUpdateGeneration++;
+        if (isSeparatedInFirstPart == null && variablesEverBuilt && !lastVariablesUpdateSeparated
+                && !touchedOverflow && updateVariablesToFindIncrementally()) {
+            touchedVariables.clear();
+            lastUpdateIncremental = true;
+            variablesIndexValid = true;
+            LOGGER.debug("Variables index updated incrementally ({} rows)", rowCount);
+            return;
+        }
+        touchedVariables.clear();
+        touchedOverflow = false;
+        lastUpdateIncremental = false;
+        lastFirstChangedRow = 0;
+        lastRemovedVariables = Collections.emptyList();
+        variablesEverBuilt = true;
+        lastVariablesUpdateSeparated = isSeparatedInFirstPart != null;
         sortedVariablesToFind = sortedMapVariablesToFindRefCount.keySet().stream().sorted().toList();
         rowCount = 0;
         if (isSeparatedInFirstPart == null) {
@@ -189,6 +308,7 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
                 variableRefCount = new MutableInt(1);
                 sortedMapVariablesToFindRefCount.put(variable, variableRefCount);
                 variablesIndexValid = false;
+                touch(variable);
                 notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.ADDED);
             } else {
                 variableRefCount.increment();
@@ -221,6 +341,7 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
                     variable.setRow(-1);
                     sortedMapVariablesToFindRefCount.remove(variable);
                     variablesIndexValid = false;
+                    touch(variable);
                     notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.REMOVED);
                 }
             }
@@ -399,6 +520,19 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
             equationsFromArrayExplored += equationArray.getLength();
         }
         throw new PowsyblException("Equation of column " + column + " not found");
+    }
+
+    /**
+     * The sorted variables to find, bringing only the VARIABLE side of the index up to date (rows assigned).
+     * For a caller that writes a state and reads values through variable rows but never solves: the equation
+     * side stays as it is and is brought up to date by the next caller that needs equation columns, exactly
+     * as it would have been after {@link #getSortedVariablesToFind()} - the two sides are independent.
+     */
+    public List<Variable<V>> getSortedVariablesToFindOnly() {
+        if (!variablesIndexValid) {
+            updateVariablesToFind();
+        }
+        return sortedVariablesToFind;
     }
 
     public List<Variable<V>> getSortedVariablesToFind() {

@@ -70,6 +70,16 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         private AcOuterLoop lastUnrealisticStateFixingLoop;
 
         private AcOuterLoop lastUnstableOuterLoop;
+
+        private int firstSolverIterations = -1;                       // OLF_OL_STATS
+
+        private final Map<String, int[]> resolvesByType = new java.util.LinkedHashMap<>();   // name -> {re-solves, NR iterations}
+
+        private long firstSolveNs;                                    // OLF_OL_STATS timings
+
+        private long runStartNs;
+
+        private final Map<String, long[]> nsByType = new java.util.LinkedHashMap<>();   // name -> {re-solve ns, check ns}
     }
 
     /**
@@ -116,21 +126,23 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
             outerLoopContext.setIteration(outerLoopIteration.getValue());
             outerLoopContext.setOuterLoopTotalIterations(runningContext.outerLoopTotalIterations);
             outerLoopContext.setLastSolverResult(runningContext.lastSolverResult);
+            long tCheck0 = OL_STATS ? System.nanoTime() : 0;
             outerLoopResult = outerLoop.check(outerLoopContext, olReportNode);
+            if (OL_STATS) {
+                runningContext.nsByType.computeIfAbsent(outerLoop.getName(), k -> new long[2])[1] += System.nanoTime() - tCheck0;
+            }
+            if (System.getenv("OLF_OL_TRACE") != null) {
+                System.err.printf("OL_CHECK %-34s iter=%d -> %s%n",
+                        outerLoop.getName(), outerLoopContext.getIteration(), outerLoopResult.status());
+            }
             runningContext.lastOuterLoopResult = outerLoopResult;
             if (OL_TRACE) {
                 // Which loop reports UNSTABLE, and therefore how many times the solver is re-run, IS the
                 // trajectory: two implementations that agree on every loop's DECISION still diverge if one
-                // of them performs a different number of re-solves. Tagged with the contingency whose
-                // solve is running and filtered by OLF_RL_TRACE_CTG like the reactive-limit trace.
-                String ctg = com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop.CURRENT_CONTINGENCY.get();
-                String want = System.getenv("OLF_RL_TRACE_CTG");
-                if (want == null || ctg == null
-                        || java.util.Arrays.stream(want.split(",")).map(String::trim).anyMatch(ctg::equals)) {
-                    System.err.printf("ctg=%s OL_CHECK loop=%s iteration=%d status=%s%n",
-                            ctg == null ? "base" : ctg, outerLoop.getName(), outerLoopContext.getIteration(),
-                            outerLoopResult.status());
-                }
+                // of them performs a different number of re-solves.
+                System.err.printf("OL_CHECK ctg=%s loop=%s iteration=%d status=%s%n",
+                        com.powsybl.openloadflow.util.OlfTraceScope.current(),
+                        outerLoop.getName(), outerLoopContext.getIteration(), outerLoopResult.status());
             }
 
             if (outerLoopResult.status() == OuterLoopStatus.UNSTABLE) {
@@ -143,11 +155,20 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
                 runningContext.lastUnstableOuterLoop = outerLoop;
 
                 // if not yet stable, restart solver
+                long tSolve0 = OL_STATS ? System.nanoTime() : 0;
                 runningContext.lastSolverResult = runAcSolverAndCheckRealisticState(solver, new PreviousValueVoltageInitializer(), reportNode, checkUnrealistic,
                         outerLoopContext.getLoadFlowContext().getParameters());
+                if (OL_STATS) {
+                    runningContext.nsByType.computeIfAbsent(outerLoop.getName(), k -> new long[2])[0] += System.nanoTime() - tSolve0;
+                }
 
                 runningContext.nrTotalIterations.add(runningContext.lastSolverResult.getIterations());
                 runningContext.outerLoopTotalIterations++;
+                if (OL_STATS) {
+                    int[] rs = runningContext.resolvesByType.computeIfAbsent(outerLoop.getName(), k -> new int[2]);
+                    rs[0]++;
+                    rs[1] += runningContext.lastSolverResult.getIterations();
+                }
 
                 outerLoopIteration.increment();
             }
@@ -230,6 +251,7 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         );
 
         RunningContext runningContext = new RunningContext();
+        runningContext.runStartNs = OL_STATS ? System.nanoTime() : 0;
         Map<Integer, Double> distributedActivePowerPerSc = new TreeMap<>();
         context.getNetwork().getSynchronousNetworks().forEach(lfScNetwork -> distributedActivePowerPerSc.put(lfScNetwork.getNumSC(), 0.0));
 
@@ -283,9 +305,14 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         boolean checkUnrealisticStates = runningContext.lastUnrealisticStateFixingLoop == null;
 
         // initial solver run
+        long tFirst0 = OL_STATS ? System.nanoTime() : 0;
         runningContext.lastSolverResult = runAcSolverAndCheckRealisticState(solver, voltageInitializer, reportNode, checkUnrealisticStates, context.getParameters());
+        if (OL_STATS) {
+            runningContext.firstSolveNs = System.nanoTime() - tFirst0;
+        }
 
         runningContext.nrTotalIterations.add(runningContext.lastSolverResult.getIterations());
+        runningContext.firstSolverIterations = runningContext.lastSolverResult.getIterations();
 
         // continue with outer loops only if solver succeed
         if (runningContext.lastSolverResult.getStatus() == AcSolverStatus.CONVERGED) {
@@ -352,7 +379,36 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         return buildAcLoadFlowResult(runningContext, outerLoopFinalResult, distributedActivePowerPerSc);
     }
 
+    /** {@code OLF_OL_STATS}: per run, how much of the Newton work the outer loops cost — the first inner solve's
+     *  iterations, the total, and per outer loop the re-solves it triggered and their iterations. Read by the
+     *  caller through {@link #lastRunStats()} (per thread: partitions run concurrently). */
+    public static final boolean OL_STATS = System.getenv("OLF_OL_STATS") != null;
+
+    private static final ThreadLocal<String> LAST_RUN_STATS = new ThreadLocal<>();
+
+    /** The last run's {@code OLF_OL_STATS} record on this thread, then cleared; null when no run happened. */
+    public static String lastRunStats() {
+        String st = LAST_RUN_STATS.get();
+        LAST_RUN_STATS.remove();
+        return st;
+    }
+
     private AcLoadFlowResult buildAcLoadFlowResult(RunningContext runningContext, OuterLoopResult outerLoopFinalResult, Map<Integer, Double> distributedActivePower) {
+        if (OL_STATS) {
+            StringBuilder sb = new StringBuilder();
+            sb.append("firstNr=").append(runningContext.firstSolverIterations)
+                    .append(" totalNr=").append(runningContext.nrTotalIterations.getValue())
+                    .append(" outer=").append(runningContext.outerLoopTotalIterations)
+                    .append(" status=").append(runningContext.lastSolverResult.getStatus())
+                    .append(" loops=");
+            runningContext.resolvesByType.forEach((k, v) -> sb.append(k.replace(' ', '_')).append(':').append(v[0]).append('/').append(v[1]).append(','));
+            // times in microseconds: the first solve, the whole engine run, and per loop re-solve/check
+            sb.append(" firstUs=").append(runningContext.firstSolveNs / 1000)
+                    .append(" runUs=").append((System.nanoTime() - runningContext.runStartNs) / 1000)
+                    .append(" loopUs=");
+            runningContext.nsByType.forEach((k, v) -> sb.append(k.replace(' ', '_')).append(':').append(v[0] / 1000).append('/').append(v[1] / 1000).append(','));
+            LAST_RUN_STATS.set(sb.toString());
+        }
         AcLoadFlowResult result = new AcLoadFlowResult(context.getNetwork(),
                                                        runningContext.outerLoopTotalIterations,
                                                        runningContext.nrTotalIterations.getValue(),
