@@ -74,6 +74,12 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         private int firstSolverIterations = -1;                       // OLF_OL_STATS
 
         private final Map<String, int[]> resolvesByType = new java.util.LinkedHashMap<>();   // name -> {re-solves, NR iterations}
+
+        private long firstSolveNs;                                    // OLF_OL_STATS timings
+
+        private long runStartNs;
+
+        private final Map<String, long[]> nsByType = new java.util.LinkedHashMap<>();   // name -> {re-solve ns, check ns}
     }
 
     /**
@@ -120,7 +126,11 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
             outerLoopContext.setIteration(outerLoopIteration.getValue());
             outerLoopContext.setOuterLoopTotalIterations(runningContext.outerLoopTotalIterations);
             outerLoopContext.setLastSolverResult(runningContext.lastSolverResult);
+            long tCheck0 = OL_STATS ? System.nanoTime() : 0;
             outerLoopResult = outerLoop.check(outerLoopContext, olReportNode);
+            if (OL_STATS) {
+                runningContext.nsByType.computeIfAbsent(outerLoop.getName(), k -> new long[2])[1] += System.nanoTime() - tCheck0;
+            }
             if (System.getenv("OLF_OL_TRACE") != null) {
                 System.err.printf("OL_CHECK %-34s iter=%d -> %s%n",
                         outerLoop.getName(), outerLoopContext.getIteration(), outerLoopResult.status());
@@ -145,8 +155,12 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
                 runningContext.lastUnstableOuterLoop = outerLoop;
 
                 // if not yet stable, restart solver
+                long tSolve0 = OL_STATS ? System.nanoTime() : 0;
                 runningContext.lastSolverResult = runAcSolverAndCheckRealisticState(solver, new PreviousValueVoltageInitializer(), reportNode, checkUnrealistic,
                         outerLoopContext.getLoadFlowContext().getParameters());
+                if (OL_STATS) {
+                    runningContext.nsByType.computeIfAbsent(outerLoop.getName(), k -> new long[2])[0] += System.nanoTime() - tSolve0;
+                }
 
                 runningContext.nrTotalIterations.add(runningContext.lastSolverResult.getIterations());
                 runningContext.outerLoopTotalIterations++;
@@ -237,6 +251,7 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         );
 
         RunningContext runningContext = new RunningContext();
+        runningContext.runStartNs = OL_STATS ? System.nanoTime() : 0;
         Map<Integer, Double> distributedActivePowerPerSc = new TreeMap<>();
         context.getNetwork().getSynchronousNetworks().forEach(lfScNetwork -> distributedActivePowerPerSc.put(lfScNetwork.getNumSC(), 0.0));
 
@@ -290,7 +305,11 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         boolean checkUnrealisticStates = runningContext.lastUnrealisticStateFixingLoop == null;
 
         // initial solver run
+        long tFirst0 = OL_STATS ? System.nanoTime() : 0;
         runningContext.lastSolverResult = runAcSolverAndCheckRealisticState(solver, voltageInitializer, reportNode, checkUnrealisticStates, context.getParameters());
+        if (OL_STATS) {
+            runningContext.firstSolveNs = System.nanoTime() - tFirst0;
+        }
 
         runningContext.nrTotalIterations.add(runningContext.lastSolverResult.getIterations());
         runningContext.firstSolverIterations = runningContext.lastSolverResult.getIterations();
@@ -383,6 +402,11 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
                     .append(" status=").append(runningContext.lastSolverResult.getStatus())
                     .append(" loops=");
             runningContext.resolvesByType.forEach((k, v) -> sb.append(k.replace(' ', '_')).append(':').append(v[0]).append('/').append(v[1]).append(','));
+            // times in microseconds: the first solve, the whole engine run, and per loop re-solve/check
+            sb.append(" firstUs=").append(runningContext.firstSolveNs / 1000)
+                    .append(" runUs=").append((System.nanoTime() - runningContext.runStartNs) / 1000)
+                    .append(" loopUs=");
+            runningContext.nsByType.forEach((k, v) -> sb.append(k.replace(' ', '_')).append(':').append(v[0] / 1000).append('/').append(v[1] / 1000).append(','));
             LAST_RUN_STATS.set(sb.toString());
         }
         AcLoadFlowResult result = new AcLoadFlowResult(context.getNetwork(),
