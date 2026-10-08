@@ -76,16 +76,60 @@ public class LimitViolationManager {
     public void detectViolations(LfNetwork network, Predicate<LfBranch> isBranchDisabled) {
         Objects.requireNonNull(network);
 
+        long tBranch = PROFILE ? System.nanoTime() : 0;
         // Detect violation limits on branches
         network.getBranches().stream().filter(b -> !isBranchDisabled.test(b)).forEach(this::detectBranchViolations);
 
+        long tBus = PROFILE ? System.nanoTime() : 0;
         // Detect violation limits on buses
         network.getBuses().stream().filter(b -> !b.isDisabled()).forEach(this::detectBusViolations);
 
-        // Detect voltage angle limits
+        detectVoltageAngleViolations(network);
+        if (PROFILE) {
+            BRANCH_NS.add(tBus - tBranch);
+            BUS_NS.add(System.nanoTime() - tBus);
+        }
+    }
+
+    /** Detect the voltage-angle limit violations. A handful per network and they need only bus angles,
+     *  so an accelerated branch/bus detector leaves them here rather than reproducing them. */
+    public void detectVoltageAngleViolations(LfNetwork network) {
         network.getVoltageAngleLimits().stream()
                 .filter(limit -> !limit.getFrom().isDisabled() && !limit.getTo().isDisabled())
                 .forEach(this::detectVoltageAngleLimitViolations);
+    }
+
+    /** {@code OLF_LVM_PROFILE=1}: split violation detection into the SCAN (walking every branch's
+     *  limit groups and comparing) and the REPORT (building the LimitViolation and filtering it
+     *  against the reference manager). The scan is what a device kernel can take over; the report is
+     *  what stays on the host either way, so the split is what sizes that move. Read with
+     *  {@link #profile()}. Off by default and read once, so the timers cost nothing normally. */
+    private static final boolean PROFILE = System.getenv("OLF_LVM_PROFILE") != null;
+
+    private static final java.util.concurrent.atomic.LongAdder BRANCH_NS = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.LongAdder BUS_NS = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.LongAdder REPORT_NS = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.LongAdder REPORTED = new java.util.concurrent.atomic.LongAdder();
+
+    /** "branches=X ms buses=Y ms | of which report=Z ms | reported=N", then resets. */
+    public static String profile() {
+        String out = "branches=" + BRANCH_NS.sum() / 1_000_000 + " ms"
+                + " buses=" + BUS_NS.sum() / 1_000_000 + " ms"
+                + " | of which report(build+filter)=" + REPORT_NS.sum() / 1_000_000 + " ms"
+                + " | violationsReported=" + REPORTED.sum();
+        BRANCH_NS.reset();
+        BUS_NS.reset();
+        REPORT_NS.reset();
+        REPORTED.reset();
+        return out;
+    }
+
+    /** Close a build-and-filter timed from {@code t} — the half that stays on the host either way. */
+    private static void reported(long t) {
+        if (PROFILE) {
+            REPORT_NS.add(System.nanoTime() - t);
+            REPORTED.increment();
+        }
     }
 
     private static Pair<String, ThreeSides> getSubjectIdSide(LimitViolation limitViolation) {
@@ -103,11 +147,16 @@ public class LimitViolationManager {
         }
     }
 
-    private void addBranchLimitViolation(LimitViolation limitViolation) {
+    /** Feed in a branch violation detected elsewhere — same key, same reference filtering as
+     *  {@link #detectViolations}. An accelerated detector (the GPU security analysis scans the limits
+     *  as flat arrays, and eventually on the device) still reports through this manager, so the
+     *  increased-violations filtering is never a second implementation. */
+    public void addBranchLimitViolation(LimitViolation limitViolation) {
         addLimitViolation(limitViolation, Pair.of(getSubjectIdSide(limitViolation), limitViolation.getOperationalLimitsGroupId()));
     }
 
-    private void addBusLimitViolation(LimitViolation limitViolation, LfBus bus) {
+    /** Feed in a bus violation detected elsewhere. See {@link #addBranchLimitViolation}. */
+    public void addBusLimitViolation(LimitViolation limitViolation, LfBus bus) {
         addLimitViolation(limitViolation, Pair.of(bus.getId(), limitViolation.getOperationalLimitsGroupId()));
     }
 
@@ -121,7 +170,9 @@ public class LimitViolationManager {
         double i = iGetter.apply(branch).eval();
         for (LfBranch.LfLimit temporaryLimit : limits) {
             if (i > temporaryLimit.getReducedValue()) {
+                long t = PROFILE ? System.nanoTime() : 0;
                 addBranchLimitViolation(createLimitViolation(branch, operationalLimitsGroupId, temporaryLimit, LimitViolationType.CURRENT, PerUnit.ib(bus.getNominalV()), i, side));
+                reported(t);
                 break;
             }
         }
@@ -133,7 +184,9 @@ public class LimitViolationManager {
         double p = pGetter.apply(branch).eval();
         for (LfBranch.LfLimit temporaryLimit : limits) {
             if (Math.abs(p) > temporaryLimit.getReducedValue()) {
+                long t = PROFILE ? System.nanoTime() : 0;
                 addBranchLimitViolation(createLimitViolation(branch, operationalLimitsGroupId, temporaryLimit, LimitViolationType.ACTIVE_POWER, PerUnit.SB, p, side));
+                reported(t);
                 break;
             }
         }
@@ -147,7 +200,9 @@ public class LimitViolationManager {
         if (!Double.isNaN(s)) {
             for (LfBranch.LfLimit temporaryLimit : limits) {
                 if (s > temporaryLimit.getReducedValue()) {
+                    long t = PROFILE ? System.nanoTime() : 0;
                     addBranchLimitViolation(createLimitViolation(branch, operationalLimitsGroupId, temporaryLimit, LimitViolationType.APPARENT_POWER, PerUnit.SB, s, side));
+                    reported(t);
                     break;
                 }
             }
@@ -192,7 +247,10 @@ public class LimitViolationManager {
         }
     }
 
-    private static LimitViolation createLimitViolation(LfBranch branch, String operationalLimitsGroupId, LfBranch.LfLimit temporaryLimit,
+    /** Build the violation an exceeded branch limit reports. Every field except {@code value} comes
+     *  from the branch and the limit, which is what lets an accelerated detector carry only
+     *  {@code (limit entry, value)} and rebuild the violation here rather than re-implement it. */
+    public static LimitViolation createLimitViolation(LfBranch branch, String operationalLimitsGroupId, LfBranch.LfLimit temporaryLimit,
                                                        LimitViolationType type, double scale, double value,
                                                        TwoSides side) {
         return new LimitViolationBuilder()
@@ -217,25 +275,29 @@ public class LimitViolationManager {
         double scale = bus.getNominalV();
         double busV = bus.getV();
         if (!Double.isNaN(bus.getHighVoltageLimit()) && busV > bus.getHighVoltageLimit()) {
-            LimitViolation limitViolationHigh = new LimitViolationBuilder()
-                    .subject(bus.getVoltageLevelId())
-                    .type(LimitViolationType.HIGH_VOLTAGE)
-                    .limit(bus.getHighVoltageLimit() * scale)
-                    .value(busV * scale)
-                    .violationLocation(bus.getViolationLocation())
-                    .build();
-            addBusLimitViolation(limitViolationHigh, bus);
+            long t = PROFILE ? System.nanoTime() : 0;
+            addBusLimitViolation(createBusLimitViolation(bus, LimitViolationType.HIGH_VOLTAGE,
+                    bus.getHighVoltageLimit() * scale, busV * scale), bus);
+            reported(t);
         }
         if (!Double.isNaN(bus.getLowVoltageLimit()) && busV < bus.getLowVoltageLimit()) {
-            LimitViolation limitViolationLow = new LimitViolationBuilder()
-                    .subject(bus.getVoltageLevelId())
-                    .type(LimitViolationType.LOW_VOLTAGE)
-                    .limit(bus.getLowVoltageLimit() * scale)
-                    .value(busV * scale)
-                    .violationLocation(bus.getViolationLocation())
-                    .build();
-            addBusLimitViolation(limitViolationLow, bus);
+            long t = PROFILE ? System.nanoTime() : 0;
+            addBusLimitViolation(createBusLimitViolation(bus, LimitViolationType.LOW_VOLTAGE,
+                    bus.getLowVoltageLimit() * scale, busV * scale), bus);
+            reported(t);
         }
+    }
+
+    /** Build the violation an exceeded bus voltage limit reports — the bus counterpart of
+     *  {@link #createLimitViolation}, with the limit and value already scaled to nominal V. */
+    public static LimitViolation createBusLimitViolation(LfBus bus, LimitViolationType type, double limit, double value) {
+        return new LimitViolationBuilder()
+                .subject(bus.getVoltageLevelId())
+                .type(type)
+                .limit(limit)
+                .value(value)
+                .violationLocation(bus.getViolationLocation())
+                .build();
     }
 
     /**
@@ -281,19 +343,41 @@ public class LimitViolationManager {
             if (violation2.getLimit() == violation1.getLimit()) {
                 // the limit violated is the same: we consider the violations equivalent if the new value is close to previous one.
                 if (isFlowViolation(violation2)) {
-                    return Math.abs(violation2.getValue()) <= Math.abs(violation1.getValue()) * (1 + violationsParameters.getFlowProportionalThreshold());
+                    return Math.abs(violation2.getValue()) <= Math.abs(violation1.getValue())
+                            * (1 + violationsParameters.getFlowProportionalThreshold() + EQUALITY_EPSILON);
                 } else if (violation2.getLimitType() == LimitViolationType.HIGH_VOLTAGE) {
                     double value = Math.min(violationsParameters.getHighVoltageAbsoluteThreshold(), violation1.getValue() * violationsParameters.getHighVoltageProportionalThreshold());
-                    return violation2.getValue() <= violation1.getValue() + value;
+                    return violation2.getValue() <= violation1.getValue() + value + equalityMargin(violation1.getValue());
                 } else if (violation2.getLimitType() == LimitViolationType.LOW_VOLTAGE) {
                     return violation2.getValue() >= violation1.getValue() - Math.min(violationsParameters.getLowVoltageAbsoluteThreshold(),
-                        violation1.getValue() * violationsParameters.getLowVoltageProportionalThreshold());
+                        violation1.getValue() * violationsParameters.getLowVoltageProportionalThreshold()) - equalityMargin(violation1.getValue());
                 } else {
                     return false;
                 }
             }
         }
         return false;
+    }
+
+    /**
+     * Relative tolerance below which a post-contingency value counts as EQUAL to its
+     * pre-contingency reference rather than as an increase.
+     *
+     * <p>The increased-violations thresholds default to 0.0 for voltage, which turns the
+     * comparisons above into exact floating-point equality tests: a post-contingency value one ULP
+     * below its base value is reported as an increased LOW_VOLTAGE violation. For a contingency
+     * whose outage is electrically far from the bus, whether the last bit lands above or below the
+     * base value is decided by the order of operations in the load flow, not by the network — so
+     * the same case reported by two solvers, or by the same solver after an unrelated change,
+     * flips. 1e-12 relative is far below any meaningful voltage difference and far above the
+     * accumulated rounding of a converged load flow, so it separates "the same value" from "a
+     * smaller value" without weakening any real comparison: a genuine 1e-9 relative difference
+     * still reports.
+     */
+    private static final double EQUALITY_EPSILON = 1e-12;
+
+    private static double equalityMargin(double referenceValue) {
+        return Math.abs(referenceValue) * EQUALITY_EPSILON;
     }
 
     private static boolean isFlowViolation(LimitViolation limit) {

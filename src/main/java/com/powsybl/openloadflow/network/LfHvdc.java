@@ -94,6 +94,15 @@ public interface LfHvdc extends LfElement {
         public void switchToFrozenState(boolean computeLoss) {
             double p1 = hvdc.getP1().eval();
             double p2 = hvdc.getP2().eval();
+            if (System.getenv("OLF_HVDC_FREEZE_TRACE") != null) {
+                // who freezes this emulation, at which flow: the caller chain names the outer loop or hook
+                StringBuilder sb = new StringBuilder();
+                StackTraceElement[] st = Thread.currentThread().getStackTrace();
+                for (int i = 2; i < Math.min(st.length, 9); i++) {
+                    sb.append(" <- ").append(st[i].getClassName().replaceAll(".*\\.", "")).append('.').append(st[i].getMethodName());
+                }
+                System.err.printf("HVDC_FREEZE_CALL hvdc=%s p1=%.9f p2=%.9f%s%n", hvdc.getId(), p1, p2, sb);
+            }
             // Checking if linear mode overpasses operating limits
             if (p1 > getPMaxFromCS1toCS2()) {
                 setVscTargetP(getPMaxFromCS1toCS2(), hvdc.getConverterStation1(), hvdc.getConverterStation2(), hvdc.getR(), computeLoss);

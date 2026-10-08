@@ -52,6 +52,54 @@ public class DistributedSlackOuterLoop
         return NAME;
     }
 
+    /** {@code OLF_DS_TRACE}: print the mismatch this loop sees and the amount it distributes on
+     *  every pass, to stderr. The stopping rule is a TOLERANCE (slackBusPMaxMismatch, 1 MW by
+     *  default), so the converged operating point depends on the sequence of passes, not only on
+     *  the network — and that sequence is exactly what another implementation has to reproduce.
+     *  The test logging config attaches no appender to this logger. */
+    private static final boolean DS_TRACE = System.getenv("OLF_DS_TRACE") != null;
+
+    /** The contingency whose post-contingency solve is running on this thread, so the pass sequence
+     *  printed below can be attributed. A full security analysis runs this loop for every
+     *  contingency; without the tag the passes of 10540 of them are one undifferentiated stream.
+     *  Set by AbstractSecurityAnalysis around the post-contingency run. */
+    public static final ThreadLocal<String> CURRENT_CONTINGENCY = new ThreadLocal<>();
+
+    /** {@code OLF_DS_TRACE_CTG=<id>[,<id>]}: restrict the trace to these contingencies (the base
+     *  load flow, which has no id, prints as {@code base} and is always included). */
+    private static final String DS_TRACE_CTG = System.getenv("OLF_DS_TRACE_CTG");
+
+    private static boolean traced() {
+        if (!DS_TRACE || !com.powsybl.openloadflow.util.OlfTraceScope.wanted()) {   // OLF_TRACE_CTG too
+            return false;
+        }
+        String ctg = CURRENT_CONTINGENCY.get();
+        if (DS_TRACE_CTG == null || ctg == null) {
+            return true;
+        }
+        for (String want : DS_TRACE_CTG.split(",")) {
+            if (want.trim().equals(ctg)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String ctgTag() {
+        String ctg = CURRENT_CONTINGENCY.get();
+        return ctg == null ? "base" : ctg;
+    }
+
+    /** The band this loop distributes outside of, in MW. Exposed so an alternative engine can drive
+     *  the same loop with the run's own tolerance rather than a guessed one. */
+    public ActivePowerDistribution getActivePowerDistribution() {
+        return activePowerDistribution;
+    }
+
+    public double getSlackBusPMaxMismatch() {
+        return slackBusPMaxMismatch;
+    }
+
     @Override
     public void initialize(AcOuterLoopContext context) {
         context.setData(new DistributedSlackContextData());
@@ -92,6 +140,18 @@ public class DistributedSlackOuterLoop
         double absMismatch = Math.abs(slackBusActivePowerMismatch);
         boolean shouldDistributeSlack = absMismatch > slackBusPMaxMismatch / PerUnit.SB && absMismatch > ActivePowerDistribution.P_RESIDUE_EPS;
 
+        if (traced()) {
+            // ...and the two halves of the mismatch per slack bus: the evaluated P and the target, so
+            // a gate that reads differently on another implementation for the same state can be
+            // split into "P differs" and "target differs".
+            StringBuilder halves = new StringBuilder();
+            for (var sb : lfScNetwork.getSlackBuses()) {
+                halves.append(String.format(" slack=%s p=%.12f targetP=%.12f", sb.getId(), sb.getP().eval(), sb.getTargetP()));
+            }
+            System.err.printf("DS_PASS ctg=%s sc=%d mismatch=%.12f threshold=%.12f distribute=%b%s%n",
+                    ctgTag(), lfScNetwork.getNumSC(), slackBusActivePowerMismatch,
+                    slackBusPMaxMismatch / PerUnit.SB, shouldDistributeSlack, halves);
+        }
         if (!shouldDistributeSlack) {
             LOGGER.debug("Already balanced");
             return new OuterLoopResult(this, OuterLoopStatus.STABLE);
@@ -107,6 +167,11 @@ public class DistributedSlackOuterLoop
         );
         double remainingMismatch = resultWbh.remainingMismatch();
         double distributedActivePower = slackBusActivePowerMismatch - remainingMismatch;
+        if (traced()) {
+            System.err.printf("DS_DIST ctg=%s sc=%d distributed=%.12f remaining=%.12f movedBuses=%b iterations=%d%n",
+                    ctgTag(), lfScNetwork.getNumSC(), distributedActivePower, remainingMismatch,
+                    resultWbh.movedBuses(), result.iteration());
+        }
         if (Math.abs(remainingMismatch) > slackBusPMaxMismatch / PerUnit.SB) {
             Reports.reportMismatchDistributionFailure(iterationReportNode, remainingMismatch * PerUnit.SB);
         } else {

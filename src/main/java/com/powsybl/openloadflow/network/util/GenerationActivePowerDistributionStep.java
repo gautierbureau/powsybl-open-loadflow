@@ -26,6 +26,12 @@ public class GenerationActivePowerDistributionStep implements ActivePowerDistrib
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GenerationActivePowerDistributionStep.class);
 
+    /** {@code OLF_DS_TRACE}: report every generator this step CLAMPS at a limit (and how many
+     *  generators share its bus). OLF clamps and removes each GENERATOR individually and
+     *  renormalizes over the survivors, so a port that aggregates a bus's generators into one
+     *  participant diverges exactly when some but not all of a bus's generators saturate. */
+    private static final boolean DS_TRACE = System.getenv("OLF_DS_TRACE") != null;
+
     public enum ParticipationType {
         MAX,
         TARGET,
@@ -118,6 +124,20 @@ public class GenerationActivePowerDistributionStep implements ActivePowerDistrib
                 it.remove();
             }
 
+            if (DS_TRACE && ActivePowerDistribution.dsTraced() && newTargetP != targetP && (newTargetP == maxTargetP || newTargetP == minTargetP)) {
+                System.err.printf("DS_SAT ctg=%s iter=%d gen=%s bus=%s gensOnBus=%d targetP=%.9f newTargetP=%.9f factor=%.9f%n",
+                        ActivePowerDistribution.dsCtgTag(),
+                        iteration, generator.getId(), generator.getBus().getId(),
+                        generator.getBus().getGenerators().size(), targetP, newTargetP, factor);
+            }
+            if (DS_TRACE && ActivePowerDistribution.dsTraced() && newTargetP != targetP) {
+                // every generator this pass MOVES, not only the saturating ones: two water-fills that
+                // distribute the same TOTAL can still split it differently, and only the per-generator
+                // deltas say so
+                System.err.printf("DS_GEN iter=%d gen=%s bus=%s factor=%.12e targetP=%.12e newTargetP=%.12e delta=%.12e%n",
+                        iteration, generator.getId(), generator.getBus().getId(), factor, targetP, newTargetP,
+                        newTargetP - targetP);
+            }
             if (newTargetP != targetP) {
                 LOGGER.trace("Rescale '{}' active power target: {} -> {}",
                         generator.getId(), targetP * PerUnit.SB, newTargetP * PerUnit.SB);

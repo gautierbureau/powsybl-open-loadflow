@@ -138,6 +138,10 @@ public final class Networks {
             branch.getTerminal2().connect();
             closedBranchesOrSwitches.add(branch.getId());
         }); // in order to be present in the network.
+        // Closable shunts: connect so they enter the bus's shunt aggregate; the loader initializes
+        // them at section 0 (electrically identical to disconnected), no topology restore needed.
+        topoConfig.getShuntIdsToClose().stream().map(network::getShuntCompensator)
+                .forEach(shunt -> shunt.getTerminal().connect());
         return closedBranchesOrSwitches;
     }
 
@@ -233,7 +237,8 @@ public final class Networks {
         } else {
             modifiedTopoConfig = topoConfig;
         }
-        if (!modifiedTopoConfig.isBreaker() && modifiedTopoConfig.getBranchIdsToClose().isEmpty()) {
+        if (!modifiedTopoConfig.isBreaker() && modifiedTopoConfig.getBranchIdsToClose().isEmpty()
+                && modifiedTopoConfig.getShuntIdsToClose().isEmpty()) {
             return new LfNetworkList(load(network, topoConfig, networkParameters, reportNode));
         } else {
             if (!networkParameters.isBreakers() && modifiedTopoConfig.isBreaker()) {

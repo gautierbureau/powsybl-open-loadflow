@@ -74,6 +74,19 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
     protected static final Logger LOGGER = LoggerFactory.getLogger(AbstractSecurityAnalysis.class);
 
+    /** {@code OLF_SA_PROFILE=1}: split the per-contingency wall time into the four things the engine
+     *  does around the simulation itself — building the LfContingency (which runs the connectivity
+     *  analysis), applying it, pre-distributing the lost active power, and restoring the base network
+     *  state. Printed once per component after the contingency loop. Off by default and read once, so
+     *  the timers cost nothing normally. */
+    private static final boolean SA_PROFILE = System.getenv("OLF_SA_PROFILE") != null;
+
+    private static final java.util.concurrent.atomic.LongAdder TO_LF_NS = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.LongAdder APPLY_NS = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.LongAdder LOSS_NS = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.LongAdder SIM_NS = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.LongAdder RESTORE_NS = new java.util.concurrent.atomic.LongAdder();
+
     protected final Network network;
 
     protected final MatrixFactory matrixFactory;
@@ -160,6 +173,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         Actions.addAllRtcToOperate(topoConfig, actions);
         // try to find all shunts which section can change through actions.
         Actions.addAllShuntsToOperate(topoConfig, actions);
+        // try to find disconnected shunts that a terminals connection action may reconnect.
+        Actions.addAllShuntsToClose(topoConfig, network, actions);
 
         // try to find branches (lines and two windings transformers).
         // tie lines and three windings transformers missing.
@@ -563,7 +578,12 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 Iterator<PropagatedContingency> contingencyIt = propagatedContingencies.iterator();
                 while (contingencyIt.hasNext() && !Thread.currentThread().isInterrupted()) {
                     PropagatedContingency propagatedContingency = contingencyIt.next();
-                    propagatedContingency.toLfContingency(lfNetwork)
+                    long tToLf = System.nanoTime();
+                    Optional<LfContingency> lfContingencyOpt = propagatedContingency.toLfContingency(lfNetwork);
+                    if (SA_PROFILE) {
+                        TO_LF_NS.add(System.nanoTime() - tToLf);
+                    }
+                    lfContingencyOpt
                             .ifPresent(lfContingency -> processContingency(lfNetwork, securityAnalysisParameters,
                                 limitReductions, contingencyActivePowerLossDistribution,
                                 networkReportNode, lfContingency, p, networkState,
@@ -573,6 +593,14 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                                 preContingencyNetworkResult, postContingencyResults,
                                 contingencyParametersResetter, operatorStrategiesByContingencyId,
                                 operatorStrategyResults, contingencyIt));
+                }
+
+                if (SA_PROFILE) {
+                    System.err.printf("SA_PROFILE toLfContingency=%d ms apply=%d ms lossDistribution=%d ms "
+                                    + "runPostContingencySimulation=%d ms networkState.restore=%d ms%n",
+                            TO_LF_NS.sum() / 1_000_000, APPLY_NS.sum() / 1_000_000, LOSS_NS.sum() / 1_000_000,
+                            SIM_NS.sum() / 1_000_000, RESTORE_NS.sum() / 1_000_000);
+                    System.err.println("SA_PROFILE detectViolations " + LimitViolationManager.profile());
                 }
 
                 // Restore parameters in case they are used for another component
@@ -633,13 +661,173 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                                                                  SecurityAnalysisParameters securityAnalysisParameters,
                                                                  PreContingencyNetworkResult preContingencyNetworkResult, boolean createResultExtension,
                                                                  List<LimitReduction> limitReductions, double preDistributedActivePower) {
+        // Label every debug trace below with the contingency it belongs to (OlfTraceScope): DS_RUN /
+        // DS_SPLIT / DS_SAT / DS_PASS / RL_SWITCH carry no id otherwise, so in a thousand-contingency
+        // run none of them can be attributed.
+        com.powsybl.openloadflow.util.OlfTraceScope.enter(contingency.getId());
+        try {
+            PostContingencyResult r = runPostContingencySimulationTraced(network, context, contingency, lfContingency,
+                    preContingencyLimitViolationManager, securityAnalysisParameters,
+                    preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
+            dumpEquationOnlyVariables(context, network);
+            return r;
+        } finally {
+            com.powsybl.openloadflow.util.OlfTraceScope.leave();
+        }
+    }
+
+    /**
+     * {@code OLF_DUMMY_DUMP=<file>}: the CONVERGED value of every equation-only variable — the
+     * zero-impedance couplers' {@code DUMMY_P}/{@code DUMMY_Q} — after this contingency's solve,
+     * labelled by contingency and filtered by {@code OLF_TRACE_CTG}.
+     *
+     * <p>These are the only state variables {@code NetworkState}/{@code BusState} do NOT save, so
+     * {@code restore()} between contingencies leaves them holding the PREVIOUS contingency's values:
+     * measured on rte6515 BUS-4467_BBS as DISTR_Q terms evaluating to 519 pu at the post-contingency
+     * start, which is a ~780 pu dummy and no physical coupler flow. Harmless for this solver, which
+     * re-converges them — but it means the two arms of a GPU comparison enter each scenario from
+     * DIFFERENT dummy values (a device that tiles the base state starts from the base's), and if the
+     * dummy subsystem is underdetermined they can converge to different points of its null space.
+     * Bus voltages would still agree while a DISTR_Q that REFERENCES a dummy enforces a different
+     * reactive split. This dump is the test: do the converged dummies differ or not.
+     */
+    private void dumpEquationOnlyVariables(C context, LfNetwork network) {
+        // OLF_DUMMY_DUMP: the equation-only variables alone. OLF_VAR_DUMP: EVERY state variable, keyed
+        // by ELEMENT ID rather than element num, so the file joins directly against a device-side dump
+        // without a row legend — which is what localizing a ~2e-08 state difference needs (an aggregate
+        // norm says only that one exists; see tasks #66).
+        String path = System.getenv("OLF_VAR_DUMP") != null
+                ? System.getenv("OLF_VAR_DUMP") : System.getenv("OLF_DUMMY_DUMP");
+        boolean all = System.getenv("OLF_VAR_DUMP") != null;
+        if (path == null || !com.powsybl.openloadflow.util.OlfTraceScope.wanted()) {
+            return;
+        }
+        try (java.io.Writer w = new java.io.FileWriter(path, true)) {
+            var es = context.getEquationSystem();
+            var sv = es.getStateVector();
+            w.write("# VARS ctg=" + com.powsybl.openloadflow.util.OlfTraceScope.current()
+                    + (all ? " all" : " dummyOnly") + "\n");
+            for (com.powsybl.openloadflow.equations.Variable<V> v : es.getIndex().getSortedVariablesToFind()) {
+                String t = v.getType().name();
+                if (!all && !t.startsWith("DUMMY_")) {
+                    continue;
+                }
+                String id;
+                try {
+                    id = switch (v.getType().getElementType()) {
+                        case BUS -> network.getBus(v.getElementNum()).getId();
+                        case BRANCH -> network.getBranch(v.getElementNum()).getId();
+                        case SHUNT_COMPENSATOR -> network.getShunt(v.getElementNum()).getId();
+                        default -> "#" + v.getElementNum();
+                    };
+                } catch (RuntimeException e) {
+                    id = "#" + v.getElementNum();
+                }
+                w.write(t + " " + id + " " + sv.get(v.getRow()) + "\n");
+            }
+            // ...and, AT THE SAME POINT, every active equation's VALUE and TARGET. Both are read here,
+            // post-solve: the equation vector was invalidated by the solve's state updates so getArray()
+            // re-evaluates at the converged state, and the target vector carries the targets as the
+            // reactive-limits loop and the DISTR_Q maintenance left them. That matters because a
+            // BUS_TARGET_Q target is NOT constant through a solve -- a pin rewrites it with
+            // setGenerationTargetQ(limit). Computing a residual from the PRE-solve targets printed by
+            // EQ_DUMP_CTG's F0 section against a POST-solve state is meaningless, and doing exactly that
+            // produced a false conclusion that this solver leaves 4.2e-03 on its own equations
+            // (retracted, tasks #66). One point, one file, both quantities.
+            if (all) {
+                // A FRESH EquationVector rather than the context's: getEquationVector() is on the AC
+                // context, not the generic one, and a fresh vector evaluates at the CURRENT (converged)
+                // state, which is the point this dump is about. AutoCloseable -- it deregisters its
+                // index listener, so it leaves the system exactly as it found it.
+                double[] tg = context.getTargetVector().getArray();
+                try (var ev = new com.powsybl.openloadflow.equations.EquationVector<>(context.getEquationSystem())) {
+                double[] fx = ev.getArray();
+                for (int c = 0; c < fx.length; c++) {
+                    var eq = context.getEquationSystem().getIndex().getEquationAtColumn(c);
+                    String id;
+                    try {
+                        id = switch (eq.getType().getElementType()) {
+                            case BUS -> network.getBus(eq.getElementNum()).getId();
+                            case BRANCH -> network.getBranch(eq.getElementNum()).getId();
+                            case SHUNT_COMPENSATOR -> network.getShunt(eq.getElementNum()).getId();
+                            default -> "#" + eq.getElementNum();
+                        };
+                    } catch (RuntimeException ex) {
+                        id = "#" + eq.getElementNum();
+                    }
+                    double tv = c < tg.length ? tg[c] : 0.0;
+                    w.write("EQ " + eq.getType() + " " + id + " " + fx[c] + " " + tv
+                            + " " + (fx[c] - tv) + "\n");
+                }
+                }
+            }
+        } catch (java.io.IOException | RuntimeException e) {
+            LOGGER.warn("variable dump failed: {}", e.toString());
+        }
+    }
+
+    private PostContingencyResult runPostContingencySimulationTraced(LfNetwork network, C context, Contingency contingency,
+                                                                 LfContingency lfContingency,
+                                                                 LimitViolationManager preContingencyLimitViolationManager,
+                                                                 SecurityAnalysisParameters securityAnalysisParameters,
+                                                                 PreContingencyNetworkResult preContingencyNetworkResult, boolean createResultExtension,
+                                                                 List<LimitReduction> limitReductions, double preDistributedActivePower) {
         logPostContingencyStart(network, lfContingency);
 
         Stopwatch stopwatch = Stopwatch.createStarted();
 
         // restart LF on post contingency equation system
-        R result = createLoadFlowEngine(context).run();
+        // Tag the distributed-slack pass trace with this contingency (OLF_DS_TRACE): the DS loop
+        // stops on a 1 MW band, so the operating point depends on the SEQUENCE of passes, and a
+        // sequence is only comparable against another implementation's once it can be attributed.
+        R result;
+        com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop.CURRENT_CONTINGENCY.set(contingency.getId());
+        try {
+            result = createLoadFlowEngine(context).run();
+        } finally {
+            com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop.CURRENT_CONTINGENCY.remove();
+        }
         PostContingencyComputationStatus status = postContingencyStatusFromLoadFlowResult(result);
+        // OLF_LF_STEPS_TRACE=<id>[,<id>]|all: how many steps this contingency took. Two
+        // implementations that solve the same system in the same number of iterations agree to
+        // machine precision; when they do not, the first thing to establish is whether the SEQUENCE
+        // differed, not by how much the answers do. The distributed-slack loop stops on a 1 MW band,
+        // so one pass more or less is worth ~0.1 MW of distributed power while every voltage still
+        // looks converged.
+        if (System.getenv("OLF_LF_STEPS_TRACE") != null && result instanceof com.powsybl.openloadflow.ac.AcLoadFlowResult acr) {
+            String want = System.getenv("OLF_LF_STEPS_TRACE");
+            boolean show = "all".equals(want);
+            if (!show) {
+                for (String w : want.split(",")) {
+                    show = show || w.trim().equals(contingency.getId());
+                }
+            }
+            if (show) {
+                System.err.printf("LF_STEPS ctg=%s solverIterations=%d outerLoopIterations=%d "
+                        + "status=%s distributedActivePower=%s slackMismatch=%s%n",
+                        contingency.getId(), acr.getSolverIterations(), acr.getOuterLoopIterations(),
+                        acr.getSolverStatus(), acr.getDistributedActivePower(),
+                        acr.getSlackBusActivePowerMismatch());
+            }
+        }
+        // OLF_RL_FINAL_TRACE: the pin state this contingency ENDED on, per controller bus. The
+        // residual of another implementation's answer is taken against the targets the equation
+        // system holds when that answer is injected - BEFORE these outer loops run - so it flags
+        // every row the loops legitimately move and cannot say whether the two arms ended on the
+        // same pins. This can: it is the FINAL state, printed once per contingency.
+        if (System.getenv("OLF_RL_FINAL_TRACE") != null
+                && matchesCtgFilter("OLF_RL_FINAL_TRACE_CTG", contingency.getId())) {
+            String want = System.getenv("OLF_RL_FINAL_TRACE");
+            network.<LfBus>getControllerElements(VoltageControl.Type.GENERATOR).forEach(bus -> {
+                if (!"all".equals(want) && !bus.getId().startsWith(want)) {
+                    return;
+                }
+                System.err.printf("RL_FINAL ctg=%s bus=%s qLimitType=%s vcEnabled=%b genTargetQ=%.12f v=%.12f%n",
+                        contingency.getId(), bus.getId(),
+                        bus.getQLimitType().map(Enum::name).orElse("none"),
+                        bus.isGeneratorVoltageControlEnabled(), bus.getGenerationTargetQ(), bus.getV());
+            });
+        }
         var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions, securityAnalysisParameters.getIncreasedViolationsParameters());
 
         LoadFlowModel loadFlowModel = securityAnalysisParameters.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC;
@@ -649,6 +837,31 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
         if (status.equals(PostContingencyComputationStatus.CONVERGED)) {
             // update network result
+            if (System.getenv("OLF_Q_PROBE") != null) {
+                // The FINAL post-contingency q at a controller bus, computed exactly as
+                // ReactiveLimitsOuterLoop.checkControllerBus does. The q printed by the RL trace is the
+                // value AT THE CHECK, before the loop pins and re-solves — comparing that against another
+                // implementation's converged q compares two different moments.
+                for (LfBus b : network.getBuses()) {
+                    if (java.util.Arrays.stream(System.getenv("OLF_Q_PROBE").split(","))
+                            .anyMatch(b.getId()::startsWith)) {
+                        double q = b.getQ().eval() + b.getLoadTargetQ();
+                        // DISTR_Q shares the DEVIATION from targetQ, not q itself: its target is
+                        // (qPct-1)*targetQ_i + qPct*sum_j targetQ_j (AcTargetVector), so two members
+                        // with different targetQ legitimately settle at different q. Print the parts.
+                        System.err.printf("Q_PROBE_CPU ctg=%s bus=%s q=%.9f genTgtQ=%.9f loadTgtQ=%.9f "
+                                + "qPct=%.9f maxQ=%.9f overMaxBy=%.9f%n",
+                                lfContingency.getId(), b.getId(), q, b.getGenerationTargetQ(), b.getLoadTargetQ(),
+                                b.getRemoteControlReactivePercent(), b.getMaxQ(), q - b.getMaxQ());
+                        // A CURVE reactive limit is a function of the GENERATOR's targetP, so a limit
+                        // that disagrees between arms is a P disagreement, not a limit-model one.
+                        for (var g : b.getGenerators()) {
+                            System.err.printf("Q_PROBE_CPU_GEN ctg=%s bus=%s gen=%s targetP=%.9f minQ=%.9f maxQ=%.9f%n",
+                                    lfContingency.getId(), b.getId(), g.getId(), g.getTargetP(), g.getMinQ(), g.getMaxQ());
+                        }
+                    }
+                }
+            }
             postContingencyNetworkResult.update();
 
             // detect violations
@@ -748,6 +961,19 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 operatorStrategy.getContingencyContext().getContingencyId(), network, stopwatch.elapsed(TimeUnit.MILLISECONDS));
     }
 
+    /**
+     * Put the network back in its base (pre-contingency) state after a contingency, before the next one is applied.
+     * The default restores every saved bus, branch, HVDC and area state; an implementation that knows what a
+     * contingency's simulation changed may restore less, provided the network ends up identical.
+     *
+     * @param networkState the base state, saved once after the pre-contingency simulation
+     * @param network the network
+     * @param lfContingency the contingency just simulated
+     */
+    protected void restoreBaseState(NetworkState networkState, LfNetwork network, LfContingency lfContingency) {
+        networkState.restore();
+    }
+
     private void processContingency(LfNetwork lfNetwork, SecurityAnalysisParameters securityAnalysisParameters,
                                     List<LimitReduction> limitReductions, ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution,
                                     ReportNode networkReportNode, LfContingency lfContingency, P p, NetworkState networkState,
@@ -765,15 +991,53 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             applySpecificContingencyParameters(context.getParameters(), contingencyLoadFlowParameters, loadFlowParameters, contingencyOpenLoadFlowParameters);
         }
 
+        long tApply = System.nanoTime();
         lfContingency.apply(loadFlowParameters.getBalanceType());
 
+        long tLoss = System.nanoTime();
+        // The loss pre-distribution is an ActivePowerDistribution run like the slack loop's, and its
+        // SPLIT across generators is what the first post-contingency solve sees: tag it with the
+        // contingency too (the tag is set again, harmlessly, around the load flow run below).
+        com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop.CURRENT_CONTINGENCY.set(propagatedContingency.getContingency().getId());
         double preDistributedActivePower = contingencyActivePowerLossDistribution.run(lfNetwork, lfContingency,
             propagatedContingency.getContingency(), securityAnalysisParameters, contingencyLoadFlowParameters, postContSimReportNode);
 
+        long tSim = System.nanoTime();
+        if (System.getenv("OLF_NR_TRACE") != null) {
+            // Which contingency the NR_ENTER/NR_ITER/NR_EXIT lines that follow belong to. Without it
+            // a multi-contingency run's traces cannot be attributed at all, and comparing the two
+            // arms' SOLVE SEQUENCES - not their final quantities - is how a divergence gets located.
+            System.err.println("CPU_CTG ctg=" + propagatedContingency.getContingency().getId());
+        }
+        if (com.powsybl.openloadflow.ac.AcloadFlowEngine.OL_STATS) {
+            com.powsybl.openloadflow.ac.AcloadFlowEngine.lastRunStats();   // clear a stale record
+        }
         var postContingencyResult = runPostContingencySimulation(lfNetwork, context, propagatedContingency.getContingency(),
             lfContingency, preContingencyLimitViolationManager,
             securityAnalysisParameters,
             preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
+        if (com.powsybl.openloadflow.ac.AcloadFlowEngine.OL_STATS) {
+            // One line per contingency: did the state come right out of the first inner Newton, or did outer
+            // loops re-solve it, and at what cost. "nosolve" = no load flow ran for it on this path.
+            String st = com.powsybl.openloadflow.ac.AcloadFlowEngine.lastRunStats();
+            System.err.println("CPU_OL_STATS ctg=" + propagatedContingency.getContingency().getId() + " "
+                    + (st != null ? st : "nosolve"));
+        }
+        if (System.getenv("OLF_DS_TARGET_DUMP") != null) {
+            // Every participating bus's net P target at the END of the contingency, for a direct
+            // comparison against the device's distributed targets. Double.toString round-trips.
+            for (LfBus b : lfNetwork.getBuses()) {
+                if (b.isParticipating() && !b.isDisabled() && !b.isFictitious()) {
+                    System.err.println("CPU_DS_TARGET ctg=" + propagatedContingency.getContingency().getId()
+                            + " bus=" + b.getId() + " target=" + Double.toString(b.getTargetP()));
+                }
+            }
+        }
+        if (SA_PROFILE) {
+            APPLY_NS.add(tLoss - tApply);
+            LOSS_NS.add(tSim - tLoss);
+            SIM_NS.add(System.nanoTime() - tSim);
+        }
         postContingencyResults.add(postContingencyResult);
 
         if (contingencyLoadFlowParameters != null &&
@@ -820,7 +1084,11 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         }
         if (contingencyIt.hasNext()) {
             // restore base state
-            networkState.restore();
+            long tRestore = System.nanoTime();
+            restoreBaseState(networkState, lfNetwork, lfContingency);
+            if (SA_PROFILE) {
+                RESTORE_NS.add(System.nanoTime() - tRestore);
+            }
             if (contingencyLoadFlowParameters != null &&
                 Objects.equals(ContingencyLoadFlowParameters.Scope.CONTINGENCY_AND_OPERATOR_STRATEGY, contingencyLoadFlowParameters.getScope())) {
                 // reset parameters
@@ -829,4 +1097,20 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         }
 
     }
+    /** {@code <VAR>=<id>[,<id>]} restricts a per-contingency trace to those ids; unset means all.
+     *  A security analysis prints these for every contingency it runs, which on a 10540-contingency
+     *  scope is millions of lines for the handful that are under the lens. */
+    protected static boolean matchesCtgFilter(String var, String contingencyId) {
+        String want = System.getenv(var);
+        if (want == null || want.isEmpty()) {
+            return true;
+        }
+        for (String w : want.split(",")) {
+            if (w.trim().equals(contingencyId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
 }

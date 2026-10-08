@@ -31,6 +31,30 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ReactiveLimitsOuterLoop.class);
 
+    /** {@code OLF_RL_TRACE}: print every PV -> PQ / PQ -> PV switch this loop makes, to stderr. The
+     *  test logging config attaches no appender to this logger, so the decisions are otherwise
+     *  invisible — and they are exactly what a GPU port has to reproduce. */
+    private static final boolean RL_TRACE = System.getenv("OLF_RL_TRACE") != null;
+
+    /** Every RL_* line carries the contingency whose solve is running (see
+     *  DistributedSlackOuterLoop.CURRENT_CONTINGENCY), and {@code OLF_RL_TRACE_CTG=<id>[,<id>]}
+     *  restricts the lines to those contingencies: a security analysis runs this loop for every
+     *  contingency, and the switch SEQUENCE of one group under one contingency is what another
+     *  implementation has to reproduce. */
+    private static final String RL_TRACE_CTG = System.getenv("OLF_RL_TRACE_CTG");
+
+    private static void rlPrintf(String fmt, Object... args) {
+        if (!com.powsybl.openloadflow.util.OlfTraceScope.wanted()) {   // OLF_TRACE_CTG filters it too
+            return;
+        }
+        String ctg = DistributedSlackOuterLoop.CURRENT_CONTINGENCY.get();
+        if (RL_TRACE_CTG != null && ctg != null
+                && java.util.Arrays.stream(RL_TRACE_CTG.split(",")).map(String::trim).noneMatch(ctg::equals)) {
+            return;
+        }
+        System.err.printf("ctg=" + (ctg == null ? "base" : ctg) + " " + fmt, args);
+    }
+
     public static final String NAME = "ReactiveLimits";
 
     private static final double REALISTIC_VOLTAGE_MARGIN = 1.02;
@@ -77,6 +101,16 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
             }
             return counter.getValue();
         }
+    }
+
+    /** The PV->PQ switch budget and the reactive-mismatch band this loop switches outside of.
+     *  Exposed so an alternative engine can drive the same loop with the run's own settings. */
+    public int getMaxPqPvSwitch() {
+        return maxPqPvSwitch;
+    }
+
+    public double getMaxReactivePowerMismatch() {
+        return maxReactivePowerMismatch;
     }
 
     @Override
@@ -167,6 +201,14 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
 
         }
 
+        if (RL_TRACE) {
+            rlPrintf("RL_PASS switchPvPq candidates=%d remainingPvBusCount=%d%n",
+                    pvToPqBuses.size(), remainingPvBusCount);
+            for (ControllerBusToPqBus b : pvToPqBuses) {
+                rlPrintf("RL_SWITCH PV->PQ bus=%s q=%.9f qLimit=%.9f limitType=%s%n",
+                        b.controllerBus.getId(), b.q, b.qLimit, b.limitType);
+            }
+        }
         LOGGER.info("{} buses switched PV -> PQ ({} bus remains PV)", pvToPqBuses.size(), modifiedRemainingPvBusCount);
 
         return done;
@@ -183,6 +225,11 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
     }
 
     private static boolean switchPqPv(List<PqToPvBus> pqToPvBuses, ContextData contextData, ReportNode reportNode, int maxPqPvSwitch) {
+        if (RL_TRACE) {
+            for (PqToPvBus b : pqToPvBuses) {
+                rlPrintf("RL_SWITCH PQ->PV bus=%s limitType=%s%n", b.controllerBus.getId(), b.limitType);
+            }
+        }
         int pqPvSwitchCount = 0;
 
         boolean log = LOGGER.isTraceEnabled();
@@ -248,6 +295,16 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
         double minQ = controllerBus.getMinQ();
         double maxQ = controllerBus.getMaxQ();
         double q = controllerBus.getQ().eval() + controllerBus.getLoadTargetQ();
+
+        // OLF_RL_TRACE_BUS also covers the PV side: after an unpin, whether the bus pins AGAIN is
+        // decided here, and the only way to compare that decision with another implementation is to
+        // print the q and the limits it was taken at.
+        if (RL_TRACE_BUS != null && java.util.Arrays.stream(RL_TRACE_BUS.split(","))
+                .anyMatch(controllerBus.getId()::startsWith)) {
+            rlPrintf("RL_PVCHECK bus=%s q=%.12f minQ=%.12f maxQ=%.12f v=%.12f tol=%.3e pinMin=%b pinMax=%b%n",
+                    controllerBus.getId(), q, minQ, maxQ, controllerBus.getV(), maxReactivePowerMismatch,
+                    q < minQ - maxReactivePowerMismatch, q > maxQ + maxReactivePowerMismatch);
+        }
 
         boolean remainsPV = true;
         boolean generatorRemoteController = isGeneratorRemoteController(controllerBus);
@@ -316,13 +373,33 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
             busesWithUpdatedQLimits, canSwitchPqToPv, qLimitType, minQ, maxQ, q));
     }
 
+    /** OLF_RL_TRACE_BUS=<prefix>[,<prefix>]: every pinned-bus DECISION for the named buses - the
+     *  comparison the switch-back turns on (controlled voltage against the group target, and the
+     *  MARGIN between them) plus the limits and the frozen Q. A pin that ends differently on another
+     *  implementation is only "the last bits" if that margin is at the noise floor. */
+    private static final String RL_TRACE_BUS = System.getenv("OLF_RL_TRACE_BUS");
+
     private void checkPqBusWithQLimitType(LfBus controllerCapableBus, List<PqToPvBus> pqToPvBuses, List<LfBus> busesWithUpdatedQLimits,
                                           boolean canSwitchPqToPv, LfBus.QLimitType qLimitType, double minQ, double maxQ, double q) {
+        if (RL_TRACE_BUS != null && java.util.Arrays.stream(RL_TRACE_BUS.split(","))
+                .anyMatch(controllerCapableBus.getId()::startsWith)) {
+            double v = getBusV(controllerCapableBus);
+            double vt = getBusTargetV(controllerCapableBus);
+            rlPrintf("RL_DECIDE bus=%s type=%s q=%.12f minQ=%.12f maxQ=%.12f v=%.12f vt=%.12f margin=%.3e canSwitch=%b%n",
+                    controllerCapableBus.getId(), qLimitType, q, minQ, maxQ, v, vt, v - vt, canSwitchPqToPv);
+        }
         if (qLimitType.isMinLimit()) {
             if (getBusV(controllerCapableBus) < getBusTargetV(controllerCapableBus) && canSwitchPqToPv) {
                 // bus absorb too much reactive power
                 pqToPvBuses.add(new PqToPvBus(controllerCapableBus, LfBus.QLimitType.MIN_Q));
             } else if (qLimitType == LfBus.QLimitType.MIN_Q && Math.abs(minQ - q) > maxReactivePowerMismatch) {
+                if (RL_TRACE) {
+                    // the pinned bus is RE-FROZEN at a limit that MOVED (a reactive-capability curve
+                    // follows the generator's targetP, which the distributed slack moves)
+                    rlPrintf("RL_REFREEZE bus=%s type=MIN_Q frozenQ=%.12f newLimit=%.12f drift=%.3e v=%.9f targetV=%.9f%n",
+                            controllerCapableBus.getId(), q, minQ, minQ - q,
+                            getBusV(controllerCapableBus), getBusTargetV(controllerCapableBus));
+                }
                 LOGGER.trace("PQ bus {} with updated Q limits, previous minQ {} new minQ {}", controllerCapableBus.getId(), q, minQ);
                 controllerCapableBus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(minQ);
                 busesWithUpdatedQLimits.add(controllerCapableBus);
@@ -332,6 +409,11 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
                 // bus produce too much reactive power
                 pqToPvBuses.add(new PqToPvBus(controllerCapableBus, LfBus.QLimitType.MAX_Q));
             } else if (qLimitType == LfBus.QLimitType.MAX_Q && Math.abs(maxQ - q) > maxReactivePowerMismatch) {
+                if (RL_TRACE) {
+                    rlPrintf("RL_REFREEZE bus=%s type=MAX_Q frozenQ=%.12f newLimit=%.12f drift=%.3e v=%.9f targetV=%.9f%n",
+                            controllerCapableBus.getId(), q, maxQ, maxQ - q,
+                            getBusV(controllerCapableBus), getBusTargetV(controllerCapableBus));
+                }
                 LOGGER.trace("PQ bus {} with updated Q limits, previous maxQ {} new maxQ {}", controllerCapableBus.getId(), q, maxQ);
                 controllerCapableBus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(maxQ);
                 busesWithUpdatedQLimits.add(controllerCapableBus);

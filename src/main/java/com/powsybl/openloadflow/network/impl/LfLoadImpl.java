@@ -166,7 +166,13 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
 
     @Override
     public void setAbsVariableTargetP(double absVariableTargetP) {
-        this.absVariableTargetP = absVariableTargetP;
+        double oldAbsVariableTargetP = this.absVariableTargetP;
+        if (oldAbsVariableTargetP != absVariableTargetP) {
+            this.absVariableTargetP = absVariableTargetP;
+            for (LfNetworkListener listener : getBus().getNetwork().getListeners()) {
+                listener.onLoadAbsVariableTargetPChange(this, oldAbsVariableTargetP, absVariableTargetP);
+            }
+        }
     }
 
     public static double getAbsVariableTargetPPerUnit(Load load, boolean distributedOnConformLoad) {
@@ -263,6 +269,9 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
     @Override
     public void setOriginalLoadsDisablingStatus(Map<String, Boolean> originalLoadsDisablingStatus) {
         this.loadsDisablingStatus = Objects.requireNonNull(originalLoadsDisablingStatus);
+        for (LfNetworkListener listener : getBus().getNetwork().getListeners()) {
+            listener.onLoadOriginalDisablingStatusChange(this);
+        }
     }
 
     private static double getPowerFactor(Load load) {

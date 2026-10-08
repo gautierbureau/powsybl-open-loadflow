@@ -90,8 +90,24 @@ public final class ActivePowerDistribution {
 
     private final ActivePowerDistribution.Step step;
 
-    private ActivePowerDistribution(Step step) {
+    private final LoadFlowParameters.BalanceType balanceType;
+
+    private final boolean useActiveLimits;
+
+    private ActivePowerDistribution(Step step, LoadFlowParameters.BalanceType balanceType, boolean useActiveLimits) {
         this.step = Objects.requireNonNull(step);
+        this.balanceType = balanceType;
+        this.useActiveLimits = useActiveLimits;
+    }
+
+    /** The balance type this distribution was created with — for an alternative engine that must
+     *  distribute with the run's own settings. */
+    public LoadFlowParameters.BalanceType getBalanceType() {
+        return balanceType;
+    }
+
+    public boolean isUseActiveLimits() {
+        return useActiveLimits;
     }
 
     public String getElementType() {
@@ -106,6 +122,16 @@ public final class ActivePowerDistribution {
         var participatingBuses = filterParticipatingBuses(buses);
         PreviousStateInfo previousStateInfo = step.resetToInitialState(participatingBuses, referenceGenerator);
         double remainingMismatch = activePowerMismatch + previousStateInfo.previousMismatch();
+        if (System.getenv("OLF_DS_TRACE") != null && dsTraced()) {
+            // resetToInitialState puts every participant back to its INITIAL targetP -- the value from
+            // the ORIGINAL network, NOT the base-converged one -- and previousMismatch adds back
+            // whatever that undid. So the amount actually water-filled is the contingency mismatch PLUS
+            // everything the base load flow had distributed, re-derived from the original anchor. With
+            // clamping, that is not the same function as filling the contingency mismatch alone.
+            System.err.printf("DS_RUN ctg=%s mismatch=%.9f previousMismatch=%.9f effective=%.9f participants=%d%n",
+                    dsCtgTag(), activePowerMismatch, previousStateInfo.previousMismatch(), remainingMismatch,
+                    participatingBuses.size());
+        }
         List<ParticipatingElement> participatingElements = step.getParticipatingElements(participatingBuses, remainingMismatch);
 
         int iteration = 0;
@@ -122,11 +148,72 @@ public final class ActivePowerDistribution {
             iteration++;
         }
 
+        // OLF_DS_SPLIT=<file>: what this run actually put on each participating BUS, as
+        // sum over its generators of (targetP - initialTargetP). The device's batched path dumps the
+        // same quantity per DS row (GPU_DS_TARGET ... delta=), so the two are directly comparable and
+        // a difference in the SPLIT shows up here even when the cumulative TOTAL agrees (measured: it
+        // does, to 5e-05 pu, on rte6515 GEN-6172).
+        String splitFile = System.getenv("OLF_DS_SPLIT");
+        if (splitFile != null && dsTraced()) {
+            try (java.io.PrintWriter w = new java.io.PrintWriter(new java.io.FileWriter(splitFile, true))) {
+                w.printf("# DS_SPLIT ctg=%s mismatch=%.9f previousMismatch=%.9f effectiveIn=%.9f "
+                        + "remaining=%.9f iterations=%d%n", dsCtgTag(),
+                        activePowerMismatch, previousStateInfo.previousMismatch(),
+                        activePowerMismatch + previousStateInfo.previousMismatch(), remainingMismatch, iteration);
+                for (LfBus b : participatingBuses) {
+                    double moved = b.getGenerators().stream()
+                            .filter(LfGenerator::isParticipating)
+                            .mapToDouble(g -> g.getTargetP() - g.getInitialTargetP()).sum();
+                    if (moved != 0) {
+                        // ...and the bus's ABSOLUTE P target, which is what a device row target holds.
+                        // Per-generator absolute P is not comparable across implementations (a device
+                        // that water-fills per generator still anchors per BUS), but this is.
+                        w.printf("%s %.12f %.12f%n", b.getId(), moved, b.getTargetP());
+                    }
+                    // ...and PER GENERATOR. A device that reconstructs a generator's own P from its
+                    // bus's total by a fixed proportional share is exact only while the intra-bus
+                    // split stays proportional, which per-generator clamping breaks. That is
+                    // invisible in the per-bus line and plain here.
+                    for (LfGenerator g : b.getGenerators()) {
+                        if (g.isParticipating() && g.getTargetP() != g.getInitialTargetP()) {
+                            w.printf("G %s %s %.12f %.12f%n", b.getId(), g.getId(),
+                                    g.getTargetP() - g.getInitialTargetP(), g.getTargetP());
+                        }
+                    }
+                }
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        }
         return new Result(iteration, remainingMismatch, previousStateInfo.moved());
     }
 
+    /** {@code OLF_DS_TRACE_CTG=<id>[,<id>]}: restrict the DS_RUN / DS_GEN / DS_SAT prints and the
+     *  OLF_DS_SPLIT file to those contingencies; the base load flow (no tag) is always included. */
+    static boolean dsTraced() {
+        if (!com.powsybl.openloadflow.util.OlfTraceScope.wanted()) {   // OLF_TRACE_CTG filters it too
+            return false;
+        }
+        String want = System.getenv("OLF_DS_TRACE_CTG");
+        String ctg = com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop.CURRENT_CONTINGENCY.get();
+        if (want == null || ctg == null) {
+            return true;
+        }
+        for (String w : want.split(",")) {
+            if (w.trim().equals(ctg)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static String dsCtgTag() {
+        String ctg = com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop.CURRENT_CONTINGENCY.get();
+        return ctg == null ? "base" : ctg;
+    }
+
     public static ActivePowerDistribution create(LoadFlowParameters.BalanceType balanceType, boolean loadPowerFactorConstant, boolean useActiveLimits) {
-        return new ActivePowerDistribution(getStep(balanceType, loadPowerFactorConstant, useActiveLimits));
+        return new ActivePowerDistribution(getStep(balanceType, loadPowerFactorConstant, useActiveLimits), balanceType, useActiveLimits);
     }
 
     public static Step getStep(LoadFlowParameters.BalanceType balanceType, boolean loadPowerFactorConstant, boolean useActiveLimits) {

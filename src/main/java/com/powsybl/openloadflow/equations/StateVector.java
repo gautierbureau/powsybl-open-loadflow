@@ -30,7 +30,35 @@ public class StateVector {
 
     public void set(double[] array) {
         this.array = Objects.requireNonNull(array);
-        notifyStateUpdate();
+        notifyStateUpdate(false);
+    }
+
+    /**
+     * Set the state, declaring that only derived VALUES will be read from it — no Jacobian will be
+     * built before the next full {@link #set(double[])}. Listeners are notified through
+     * {@link StateVectorListener#onStateUpdate(boolean)} and may skip refreshing derivatives, which on
+     * the vectorized AC system is the bulk of the work: refreshing every branch's flows AND all their
+     * partial derivatives costs about five times refreshing the flows alone.
+     *
+     * <p>Callers that build a Jacobian from the state MUST use {@link #set(double[])}: the derivatives
+     * left behind by this method belong to the previous state.
+     */
+    public void setValuesOnly(double[] array) {
+        this.array = Objects.requireNonNull(array);
+        notifyStateUpdate(true);
+    }
+
+    /**
+     * As {@link #setValuesOnly(double[])}, for a caller that will then read the derived values of the given closed
+     * branches only (and the buses), before the next full update: listeners may leave every other branch's derived
+     * values stale.
+     */
+    public void setValuesOnly(double[] array, int[] closedBranchNums) {
+        this.array = Objects.requireNonNull(array);
+        Objects.requireNonNull(closedBranchNums);
+        for (StateVectorListener listener : listeners) {
+            listener.onStateUpdate(closedBranchNums);
+        }
     }
 
     public double[] get() {
@@ -59,8 +87,12 @@ public class StateVector {
     }
 
     private void notifyStateUpdate() {
+        notifyStateUpdate(false);
+    }
+
+    private void notifyStateUpdate(boolean valuesOnly) {
         for (StateVectorListener listener : listeners) {
-            listener.onStateUpdate();
+            listener.onStateUpdate(valuesOnly);
         }
     }
 
