@@ -19,9 +19,7 @@ public class BusDcState extends ElementState<LfBus> {
     // Parallel arrays rather than four Map<generatorId, X>: restore() looks each value up by generator
     // id and a bus carries ~1 generator, so a scan over a tiny array is faster than four hash lookups —
     // and saving costs one pass instead of four streams, with no HashMap and no Double/Boolean boxing.
-    // This is the hottest allocation in the codebase's state save: security analysis saves controller-bus
-    // state per contingency, and the GPU JAVA hybrid does it per scenario per outer-loop round (1006
-    // buses x 4 maps x thousands of scenarios). Note loadStates below is ALREADY positional.
+    // Security analysis saves controller-bus state once per contingency, so this is on a hot path.
     private final String[] generatorIds;
     private final double[] generatorsTargetP;
     private final double[] generatorsInitialTargetP;
@@ -78,71 +76,14 @@ public class BusDcState extends ElementState<LfBus> {
         return new LoadDcState();
     }
 
-    private static final boolean PROFILE = System.getenv("OLF_BUSSTATE_PROFILE") != null;
-
-    private static final java.util.concurrent.atomic.LongAdder GEN_NS = new java.util.concurrent.atomic.LongAdder();
-    private static final java.util.concurrent.atomic.LongAdder LOAD_NS = new java.util.concurrent.atomic.LongAdder();
-    private static final java.util.concurrent.atomic.LongAdder SUPER_NS = new java.util.concurrent.atomic.LongAdder();
-    private static final java.util.concurrent.atomic.LongAdder LOOKUP_NS = new java.util.concurrent.atomic.LongAdder();
-    private static final java.util.concurrent.atomic.LongAdder TARGETP_NS = new java.util.concurrent.atomic.LongAdder();
-    private static final java.util.concurrent.atomic.LongAdder OTHER_NS = new java.util.concurrent.atomic.LongAdder();
-
-    /** "super=X ms generators=Y ms loads=Z ms", then resets. */
-    public static String profile() {
-        String out = "super(ElementState)=" + SUPER_NS.sum() / 1_000_000 + " ms"
-                + " generators=" + GEN_NS.sum() / 1_000_000 + " ms"
-                + " loads=" + LOAD_NS.sum() / 1_000_000 + " ms"
-                + " (gen: idLookup=" + LOOKUP_NS.sum() / 1_000_000
-                + " setTargetP=" + TARGETP_NS.sum() / 1_000_000
-                + " other3=" + OTHER_NS.sum() / 1_000_000 + " ms)";
-        SUPER_NS.reset();
-        GEN_NS.reset();
-        LOAD_NS.reset();
-        LOOKUP_NS.reset();
-        TARGETP_NS.reset();
-        OTHER_NS.reset();
-        return out;
-    }
-
     @Override
     public void restore() {
-        if (PROFILE) {
-            long t0 = System.nanoTime();
-            super.restore();
-            long t1 = System.nanoTime();
-            restoreGenerators();
-            long t2 = System.nanoTime();
-            restoreLoads();
-            long t3 = System.nanoTime();
-            SUPER_NS.add(t1 - t0);
-            GEN_NS.add(t2 - t1);
-            LOAD_NS.add(t3 - t2);
-            return;
-        }
         super.restore();
         restoreGenerators();
         restoreLoads();
     }
 
     private void restoreGenerators() {
-        if (PROFILE) {
-            for (LfGenerator generator : element.getGenerators()) {
-                long a0 = System.nanoTime();
-                int i = indexOf(generator.getId());
-                long a1 = System.nanoTime();
-                LOOKUP_NS.add(a1 - a0);
-                if (i >= 0) {
-                    generator.setTargetP(generatorsTargetP[i]);
-                    long a2 = System.nanoTime();
-                    TARGETP_NS.add(a2 - a1);
-                    generator.setInitialTargetP(generatorsInitialTargetP[i]);
-                    generator.setParticipating(participatingGenerators[i]);
-                    generator.setDisabled(disablingStatusGenerators[i]);
-                    OTHER_NS.add(System.nanoTime() - a2);
-                }
-            }
-            return;
-        }
         for (LfGenerator generator : element.getGenerators()) {
             int i = indexOf(generator.getId());
             if (i >= 0) {                                    // Map.get() returned null for an unsaved id,

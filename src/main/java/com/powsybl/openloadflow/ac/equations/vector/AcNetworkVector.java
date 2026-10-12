@@ -43,8 +43,6 @@ public class AcNetworkVector extends AbstractLfNetworkListener
     // the variables-index generation these row arrays were last synced to (-1: never)
     private long syncedVariablesGeneration = -1;
 
-    private static final boolean VARIABLES_CHECK = System.getenv("OLF_VARIDX_CHECK") != null;
-
     public AcNetworkVector(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem,
                            AcEquationSystemCreationParameters creationParameters) {
         this.network = Objects.requireNonNull(network);
@@ -98,9 +96,6 @@ public class AcNetworkVector extends AbstractLfNetworkListener
                 Variable<AcVariableType> v = variables.get(i);
                 setRow(v, v.getRow());
             }
-            if (VARIABLES_CHECK) {
-                checkRowsAgainstFullWalk(variables);
-            }
         } else {
             fullRowWalk(variables);
         }
@@ -149,18 +144,6 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         Arrays.fill(branchVector.ph2Row, -1);
         for (Variable<AcVariableType> v : variables) {
             setRow(v, v.getRow());
-        }
-    }
-
-    private void checkRowsAgainstFullWalk(List<Variable<AcVariableType>> variables) {
-        int[] v = busVector.vRow.clone();
-        int[] ph = busVector.phRow.clone();
-        int[] a1 = branchVector.a1Row.clone();
-        int[] r1 = branchVector.r1Row.clone();
-        fullRowWalk(variables);
-        if (!Arrays.equals(v, busVector.vRow) || !Arrays.equals(ph, busVector.phRow)
-                || !Arrays.equals(a1, branchVector.a1Row) || !Arrays.equals(r1, branchVector.r1Row)) {
-            throw new IllegalStateException("Incremental AcNetworkVector rows differ from the full walk");
         }
     }
 

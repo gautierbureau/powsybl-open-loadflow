@@ -52,7 +52,7 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
     // security analysis applies and restores one contingency at a time, which adds or removes a handful of the
     // tens of thousands of variables, and rebuilding the whole sorted list from the TreeMap each time dominated
     // the per-contingency index cost. The incremental path produces the same list, in the same order, with the
-    // same rows as the full rebuild (OLF_VARIDX_CHECK=1 asserts it on every update).
+    // same rows as the full rebuild.
     // a LIST, not an identity set: the first full build touches every variable, and an IdentityHashMap keeps that
     // capacity, so each later clear() cost the whole table (0.6 s on network.xiidm). Duplicates are harmless: the
     // incremental pass is idempotent per variable. Past the limit it stops recording and the update is a full one.
@@ -76,8 +76,6 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
     private boolean lastVariablesUpdateSeparated = false;
 
     private static final int INCREMENTAL_VARIABLES_MAX = 256;
-
-    private static final boolean VARIABLES_INDEX_CHECK = System.getenv("OLF_VARIDX_CHECK") != null;
 
     private final List<EquationSystemIndexListener<V, E>> listeners = new ArrayList<>();
 
@@ -226,18 +224,6 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
         rowCount = list.size();
         lastFirstChangedRow = minPos;
         lastRemovedVariables = removed;
-        if (VARIABLES_INDEX_CHECK) {
-            List<Variable<V>> full = sortedMapVariablesToFindRefCount.keySet().stream().sorted().toList();
-            if (!full.equals(sortedVariablesToFind)) {
-                throw new IllegalStateException("Incremental variables index differs from the full rebuild");
-            }
-            for (int i = 0; i < full.size(); i++) {
-                if (full.get(i).getRow() != i) {
-                    throw new IllegalStateException("Incremental variables index: row of " + full.get(i) + " is "
-                            + full.get(i).getRow() + ", expected " + i);
-                }
-            }
-        }
         return true;
     }
 

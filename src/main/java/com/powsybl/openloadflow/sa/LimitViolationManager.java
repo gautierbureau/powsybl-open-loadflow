@@ -76,19 +76,14 @@ public class LimitViolationManager {
     public void detectViolations(LfNetwork network, Predicate<LfBranch> isBranchDisabled) {
         Objects.requireNonNull(network);
 
-        long tBranch = PROFILE ? System.nanoTime() : 0;
         // Detect violation limits on branches
         network.getBranches().stream().filter(b -> !isBranchDisabled.test(b)).forEach(this::detectBranchViolations);
 
-        long tBus = PROFILE ? System.nanoTime() : 0;
         // Detect violation limits on buses
         network.getBuses().stream().filter(b -> !b.isDisabled()).forEach(this::detectBusViolations);
 
+        // Detect voltage angle limits
         detectVoltageAngleViolations(network);
-        if (PROFILE) {
-            BRANCH_NS.add(tBus - tBranch);
-            BUS_NS.add(System.nanoTime() - tBus);
-        }
     }
 
     /** Detect the voltage-angle limit violations. A handful per network and they need only bus angles,
@@ -97,39 +92,6 @@ public class LimitViolationManager {
         network.getVoltageAngleLimits().stream()
                 .filter(limit -> !limit.getFrom().isDisabled() && !limit.getTo().isDisabled())
                 .forEach(this::detectVoltageAngleLimitViolations);
-    }
-
-    /** {@code OLF_LVM_PROFILE=1}: split violation detection into the SCAN (walking every branch's
-     *  limit groups and comparing) and the REPORT (building the LimitViolation and filtering it
-     *  against the reference manager). The scan is what a device kernel can take over; the report is
-     *  what stays on the host either way, so the split is what sizes that move. Read with
-     *  {@link #profile()}. Off by default and read once, so the timers cost nothing normally. */
-    private static final boolean PROFILE = System.getenv("OLF_LVM_PROFILE") != null;
-
-    private static final java.util.concurrent.atomic.LongAdder BRANCH_NS = new java.util.concurrent.atomic.LongAdder();
-    private static final java.util.concurrent.atomic.LongAdder BUS_NS = new java.util.concurrent.atomic.LongAdder();
-    private static final java.util.concurrent.atomic.LongAdder REPORT_NS = new java.util.concurrent.atomic.LongAdder();
-    private static final java.util.concurrent.atomic.LongAdder REPORTED = new java.util.concurrent.atomic.LongAdder();
-
-    /** "branches=X ms buses=Y ms | of which report=Z ms | reported=N", then resets. */
-    public static String profile() {
-        String out = "branches=" + BRANCH_NS.sum() / 1_000_000 + " ms"
-                + " buses=" + BUS_NS.sum() / 1_000_000 + " ms"
-                + " | of which report(build+filter)=" + REPORT_NS.sum() / 1_000_000 + " ms"
-                + " | violationsReported=" + REPORTED.sum();
-        BRANCH_NS.reset();
-        BUS_NS.reset();
-        REPORT_NS.reset();
-        REPORTED.reset();
-        return out;
-    }
-
-    /** Close a build-and-filter timed from {@code t} — the half that stays on the host either way. */
-    private static void reported(long t) {
-        if (PROFILE) {
-            REPORT_NS.add(System.nanoTime() - t);
-            REPORTED.increment();
-        }
     }
 
     private static Pair<String, ThreeSides> getSubjectIdSide(LimitViolation limitViolation) {
@@ -148,8 +110,7 @@ public class LimitViolationManager {
     }
 
     /** Feed in a branch violation detected elsewhere — same key, same reference filtering as
-     *  {@link #detectViolations}. An accelerated detector (the GPU security analysis scans the limits
-     *  as flat arrays, and eventually on the device) still reports through this manager, so the
+     *  {@link #detectViolations}. An accelerated detector can still report through this manager, so the
      *  increased-violations filtering is never a second implementation. */
     public void addBranchLimitViolation(LimitViolation limitViolation) {
         addLimitViolation(limitViolation, Pair.of(getSubjectIdSide(limitViolation), limitViolation.getOperationalLimitsGroupId()));
@@ -170,9 +131,7 @@ public class LimitViolationManager {
         double i = iGetter.apply(branch).eval();
         for (LfBranch.LfLimit temporaryLimit : limits) {
             if (i > temporaryLimit.getReducedValue()) {
-                long t = PROFILE ? System.nanoTime() : 0;
                 addBranchLimitViolation(createLimitViolation(branch, operationalLimitsGroupId, temporaryLimit, LimitViolationType.CURRENT, PerUnit.ib(bus.getNominalV()), i, side));
-                reported(t);
                 break;
             }
         }
@@ -184,9 +143,7 @@ public class LimitViolationManager {
         double p = pGetter.apply(branch).eval();
         for (LfBranch.LfLimit temporaryLimit : limits) {
             if (Math.abs(p) > temporaryLimit.getReducedValue()) {
-                long t = PROFILE ? System.nanoTime() : 0;
                 addBranchLimitViolation(createLimitViolation(branch, operationalLimitsGroupId, temporaryLimit, LimitViolationType.ACTIVE_POWER, PerUnit.SB, p, side));
-                reported(t);
                 break;
             }
         }
@@ -200,9 +157,7 @@ public class LimitViolationManager {
         if (!Double.isNaN(s)) {
             for (LfBranch.LfLimit temporaryLimit : limits) {
                 if (s > temporaryLimit.getReducedValue()) {
-                    long t = PROFILE ? System.nanoTime() : 0;
                     addBranchLimitViolation(createLimitViolation(branch, operationalLimitsGroupId, temporaryLimit, LimitViolationType.APPARENT_POWER, PerUnit.SB, s, side));
-                    reported(t);
                     break;
                 }
             }
@@ -275,16 +230,12 @@ public class LimitViolationManager {
         double scale = bus.getNominalV();
         double busV = bus.getV();
         if (!Double.isNaN(bus.getHighVoltageLimit()) && busV > bus.getHighVoltageLimit()) {
-            long t = PROFILE ? System.nanoTime() : 0;
             addBusLimitViolation(createBusLimitViolation(bus, LimitViolationType.HIGH_VOLTAGE,
                     bus.getHighVoltageLimit() * scale, busV * scale), bus);
-            reported(t);
         }
         if (!Double.isNaN(bus.getLowVoltageLimit()) && busV < bus.getLowVoltageLimit()) {
-            long t = PROFILE ? System.nanoTime() : 0;
             addBusLimitViolation(createBusLimitViolation(bus, LimitViolationType.LOW_VOLTAGE,
                     bus.getLowVoltageLimit() * scale, busV * scale), bus);
-            reported(t);
         }
     }
 
