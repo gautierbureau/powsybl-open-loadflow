@@ -52,6 +52,17 @@ public class DistributedSlackOuterLoop
         return NAME;
     }
 
+    /** The active power distribution this loop uses. Exposed so an alternative engine can drive the
+     *  same loop with the run's own settings. */
+    public ActivePowerDistribution getActivePowerDistribution() {
+        return activePowerDistribution;
+    }
+
+    /** The band this loop distributes outside of, in MW. */
+    public double getSlackBusPMaxMismatch() {
+        return slackBusPMaxMismatch;
+    }
+
     @Override
     public void initialize(AcOuterLoopContext context) {
         context.setData(new DistributedSlackContextData());

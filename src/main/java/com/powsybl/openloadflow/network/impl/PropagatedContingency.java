@@ -75,6 +75,14 @@ public class PropagatedContingency {
         return loadIdsToLose;
     }
 
+    public Map<String, AdmittanceShift> getShuntIdsToShift() {
+        return shuntIdsToShift;
+    }
+
+    public Set<String> getHvdcIdsToOpen() {
+        return hvdcIdsToOpen;
+    }
+
     public PropagatedContingency(Contingency contingency, int index, Set<Switch> switchesToOpen, Set<Terminal> terminalsToDisconnect,
                                  Set<String> busIdsToLose) {
         this.contingency = Objects.requireNonNull(contingency);

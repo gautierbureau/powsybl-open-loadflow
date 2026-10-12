@@ -422,7 +422,16 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
     private void invalidateGenerationTargetQ() {
         // If generationTargetQ was frozen, it is now freed. generationTargetQ is computed according to its definition in getGenerationTargetQ()
         invalidatedGenerationTargetQ = true;
-        isGenerationTargetQFrozen = false;
+        setGenerationTargetQFrozen(false);
+    }
+
+    private void setGenerationTargetQFrozen(boolean frozen) {
+        if (isGenerationTargetQFrozen != frozen) {
+            isGenerationTargetQFrozen = frozen;
+            for (LfNetworkListener listener : network.getListeners()) {
+                listener.onGenerationTargetQFrozenChange(this, frozen);
+            }
+        }
     }
 
     @Override
@@ -467,7 +476,7 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
         // This is only used in case of PV bus switched to PQ bus
         setGeneratorVoltageControlEnabled(false);
         updateGenerationTargetQ(generationTargetQ, this.generationTargetQ);
-        isGenerationTargetQFrozen = true;
+        setGenerationTargetQFrozen(true);
     }
 
     @Override
@@ -545,7 +554,12 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     @Override
     public void setQLimitType(QLimitType qLimitType) {
-        this.qLimitType = qLimitType;
+        if (this.qLimitType != qLimitType) {
+            this.qLimitType = qLimitType;
+            for (LfNetworkListener listener : network.getListeners()) {
+                listener.onQLimitTypeChange(this, qLimitType);
+            }
+        }
     }
 
     @Override

@@ -52,6 +52,12 @@ public class IncrementalTransformerVoltageControlOuterLoop extends AbstractTrans
         this.maxTapShift = maxTapShift;
     }
 
+    /** The largest tap move one pass may make. Exposed so an alternative engine driving the same
+     *  loop uses the run's own setting rather than a guessed one. */
+    public int getMaxTapShift() {
+        return maxTapShift;
+    }
+
     @Override
     public String getName() {
         return NAME;

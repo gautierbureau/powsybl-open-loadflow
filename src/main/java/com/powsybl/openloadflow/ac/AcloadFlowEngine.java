@@ -234,25 +234,10 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
             return buildAcLoadFlowResult(runningContext, OuterLoopResult.stable(), distributedActivePowerPerSc);
         }
 
-        AcSolver solver = solverFactory.create(context.getNetwork(),
-                                               context.getParameters(),
-                                               context.getEquationSystem(),
-                                               context.getJacobianMatrix(),
-                                               context.getTargetVector(),
-                                               context.getEquationVector());
+        AcSolver solver = createSolver(solverFactory, context);
 
-        List<AcOuterLoop> outerLoops = context.getParameters().getOuterLoops().stream().filter(o -> o.isNeeded(context)).toList();
-        List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = outerLoops.stream()
-                .map(outerLoop -> Pair.of(outerLoop, new AcOuterLoopContext(context.getNetwork())))
-                .toList();
-
-        // outer loops initialization
-        for (var outerLoopAndContext : outerLoopsAndContexts) {
-            var outerLoop = outerLoopAndContext.getLeft();
-            var outerLoopContext = outerLoopAndContext.getRight();
-            outerLoopContext.setLoadFlowContext(context);
-            outerLoop.initialize(outerLoopContext);
-        }
+        List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = engineOuterLoopsAndContexts(context);
+        List<AcOuterLoop> outerLoops = outerLoopsAndContexts.stream().map(Pair::getLeft).toList();
 
         if (context.getParameters().isDetailedReport()) {
             if (context.getNetwork().getSynchronousNetworks().size() == 1) {
@@ -371,6 +356,59 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         context.setResult(result);
 
         return result;
+    }
+
+    /**
+     * The solver this engine run drives. Overridable so an alternative engine can tie its outer-loop handling to
+     * the solver it actually created.
+     */
+    protected AcSolver createSolver(AcSolverFactory solverFactory, AcLoadFlowContext context) {
+        return solverFactory.create(context.getNetwork(),
+                                    context.getParameters(),
+                                    context.getEquationSystem(),
+                                    context.getJacobianMatrix(),
+                                    context.getTargetVector(),
+                                    context.getEquationVector());
+    }
+
+    /**
+     * The (outer loop, context) pairs this engine will drive. Overridable so an engine backed by a solver that
+     * already runs some of those loops itself can drop them here (running them in both places would apply them
+     * twice). {@link #createOuterLoopsAndContexts(AcLoadFlowContext)} stays the shared construction path.
+     */
+    protected List<Pair<AcOuterLoop, AcOuterLoopContext>> engineOuterLoopsAndContexts(AcLoadFlowContext context) {
+        return createOuterLoopsAndContexts(context);
+    }
+
+    /**
+     * Build the needed AC outer loops for {@code context}, each paired with a fresh, initialized
+     * {@link AcOuterLoopContext}: the exact sequence {@link #run()} uses (filter {@link AcOuterLoop#isNeeded}, one
+     * context per loop, {@code setLoadFlowContext}, {@code initialize}). Exposed so callers that drive the outer
+     * loops themselves do not need the package-private {@link AcOuterLoopContext} constructor.
+     */
+    public static List<Pair<AcOuterLoop, AcOuterLoopContext>> createOuterLoopsAndContexts(AcLoadFlowContext context) {
+        return createOuterLoopsAndContexts(context, true);
+    }
+
+    /**
+     * Create the (outer loop, context) pairs for {@code context}. When {@code initialize} is true each loop is
+     * {@code initialize}d immediately (the normal single-run path). When false the loops are only created and
+     * their load-flow context set: the caller must {@code initialize} them itself, for instance once per scenario
+     * after restoring that scenario's base state, since {@code initialize} may modify the network (e.g. enable
+     * transformer or shunt voltage control).
+     */
+    public static List<Pair<AcOuterLoop, AcOuterLoopContext>> createOuterLoopsAndContexts(AcLoadFlowContext context, boolean initialize) {
+        List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = context.getParameters().getOuterLoops().stream()
+                .filter(o -> o.isNeeded(context))
+                .map(outerLoop -> Pair.of(outerLoop, new AcOuterLoopContext(context.getNetwork())))
+                .toList();
+        for (var outerLoopAndContext : outerLoopsAndContexts) {
+            outerLoopAndContext.getRight().setLoadFlowContext(context);
+            if (initialize) {
+                outerLoopAndContext.getLeft().initialize(outerLoopAndContext.getRight());
+            }
+        }
+        return outerLoopsAndContexts;
     }
 
     public static List<AcLoadFlowResult> run(List<LfNetwork> lfNetworks, AcLoadFlowParameters parameters) {

@@ -117,7 +117,7 @@ public class LfVscConverterStationImpl extends AbstractLfGenerator implements Lf
     }
 
     @Override
-    protected Optional<ReactiveLimits> getReactiveLimits() {
+    public Optional<ReactiveLimits> getReactiveLimits() {
         return Optional.of(getStation().getReactiveLimits());
     }
 

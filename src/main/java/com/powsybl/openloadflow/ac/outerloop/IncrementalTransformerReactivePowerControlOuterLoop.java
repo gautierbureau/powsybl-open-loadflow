@@ -50,6 +50,11 @@ public class IncrementalTransformerReactivePowerControlOuterLoop extends Abstrac
         this.maxTapShift = maxTapShift;
     }
 
+    /** The largest tap move one pass may make — for an alternative engine driving this loop. */
+    public int getMaxTapShift() {
+        return maxTapShift;
+    }
+
     @Override
     public String getName() {
         return NAME;

@@ -32,14 +32,54 @@ public class LfTerminalsConnectionAction extends AbstractLfBranchAction<Terminal
         }
     }
 
+    private com.powsybl.openloadflow.network.LfShunt shuntToOperate;   // assigned from the super-constructor call — no initializer
+
     @Override
     void findEnabledDisabledBranches(LfNetwork lfNetwork) {
         List<LfBranch> branches = lfNetwork.getBranchesByOriginalId(action.getElementId());
         if (branches != null) {
             branches.forEach(b -> applyEnabledDisabled(b, action));
         } else {
-            LOGGER.warn("TerminalsConnectionAction action {}: branch or three windings transformer matching element id {} not found", action.getId(), action.getElementId());
+            // Not a branch: a shunt compensator's terminals may also be operated — the aggregate
+            // carries a per-compensator section controller when the shunt was retained as closable
+            // (LfTopoConfig.shuntIdsToClose) or operated. Connection = restore its section count,
+            // disconnection = section 0.
+            com.powsybl.openloadflow.network.LfShunt shunt = lfNetwork.getShuntById(action.getElementId());
+            if (shunt != null) {
+                shuntToOperate = shunt;
+            } else {
+                LOGGER.warn("TerminalsConnectionAction action {}: branch, three windings transformer or shunt matching element id {} not found", action.getId(), action.getElementId());
+            }
         }
+    }
+
+    @Override
+    public boolean isValid() {
+        return shuntToOperate != null || super.isValid();
+    }
+
+    @Override
+    public boolean apply(com.powsybl.openloadflow.network.LfNetwork network, com.powsybl.openloadflow.network.LfContingency contingency,
+                         com.powsybl.openloadflow.network.LfNetworkParameters networkParameters) {
+        if (shuntToOperate != null) {
+            return applyShunt();
+        }
+        return super.apply(network, contingency, networkParameters);
+    }
+
+    @Override
+    public boolean applyOnConnectivity(com.powsybl.openloadflow.graph.GraphConnectivity<com.powsybl.openloadflow.network.LfBus, LfBranch> connectivity) {
+        // The SA replay routes AbstractLfBranchAction subclasses through the BULK connectivity
+        // path, never through apply() — the shunt flavor must hook here too. A shunt
+        // (dis)connection changes no connectivity: apply the aggregate update and report success.
+        if (shuntToOperate != null) {
+            return applyShunt();
+        }
+        return super.applyOnConnectivity(connectivity);
+    }
+
+    private boolean applyShunt() {
+        return shuntToOperate.setCompensatorConnected(action.getElementId(), !action.isOpen());
     }
 
     void applyEnabledDisabled(LfBranch branch, TerminalsConnectionAction action) {

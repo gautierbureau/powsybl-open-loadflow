@@ -54,6 +54,28 @@ public final class Actions {
                 });
     }
 
+    /** Collects shunt compensators targeted by a {@link TerminalsConnectionAction}: LINEAR-model
+     *  compensators DISCONNECTED in the base network that a close may reconnect go to
+     *  {@link LfTopoConfig#getShuntIdsToClose()} (loaded connected, initialized at section 0);
+     *  CONNECTED ones targeted by an open/close are added to the operated set so their per-compensator
+     *  section controllers are built. */
+    public static void addAllShuntsToClose(LfTopoConfig topoConfig, Network network, List<Action> actions) {
+        actions.stream()
+                .filter(TerminalsConnectionAction.class::isInstance)
+                .map(TerminalsConnectionAction.class::cast)
+                .forEach(action -> {
+                    var shunt = network.getShuntCompensator(action.getElementId());
+                    if (shunt == null || shunt.getModelType() != com.powsybl.iidm.network.ShuntCompensatorModelType.LINEAR) {
+                        return;                              // non-linear section-0 support depends on a parameter
+                    }
+                    if (shunt.getTerminal().getBusView().getBus() == null) {
+                        topoConfig.getShuntIdsToClose().add(shunt.getId());
+                    } else {
+                        topoConfig.addShuntIdToOperate(shunt.getId());
+                    }
+                });
+    }
+
     public static void checkValidity(Network network, List<Action> actions) {
         for (Action action : actions) {
             switch (action.getType()) {
@@ -68,8 +90,9 @@ public final class Actions {
                 case TerminalsConnectionAction.NAME: {
                     TerminalsConnectionAction terminalsConnectionAction = (TerminalsConnectionAction) action;
                     if (network.getBranch(terminalsConnectionAction.getElementId()) == null &&
-                        network.getThreeWindingsTransformer(terminalsConnectionAction.getElementId()) == null) {
-                        throw new PowsyblException("Branch or three windings transformer '" + terminalsConnectionAction.getElementId() + NOT_FOUND);
+                        network.getThreeWindingsTransformer(terminalsConnectionAction.getElementId()) == null &&
+                        network.getShuntCompensator(terminalsConnectionAction.getElementId()) == null) {
+                        throw new PowsyblException("Branch, three windings transformer or shunt compensator '" + terminalsConnectionAction.getElementId() + NOT_FOUND);
                     }
                     break;
                 }

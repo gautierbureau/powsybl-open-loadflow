@@ -197,7 +197,7 @@ public final class LfStaticVarCompensatorImpl extends AbstractLfGenerator implem
     }
 
     @Override
-    protected Optional<ReactiveLimits> getReactiveLimits() {
+    public Optional<ReactiveLimits> getReactiveLimits() {
         return Optional.of(reactiveLimits);
     }
 

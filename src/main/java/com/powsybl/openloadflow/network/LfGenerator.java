@@ -63,6 +63,15 @@ public interface LfGenerator extends PropertyBag, LfReferencePriorityInjection {
 
     double getTargetQ();
 
+    /**
+     * The target reactive power before any forcing into the reactive limits (per unit). With
+     * forceTargetQInReactiveLimits, {@link #getTargetQ()} returns this value clamped to the limits at the
+     * CURRENT target P; a solver that moves P itself needs the unclamped value to clamp again.
+     */
+    default double getRawTargetQ() {
+        return getTargetQ();
+    }
+
     double getInitialTargetP();
 
     void setInitialTargetP(double initialTargetP);
