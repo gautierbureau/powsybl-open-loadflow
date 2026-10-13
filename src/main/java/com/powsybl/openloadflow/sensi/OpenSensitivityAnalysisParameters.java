@@ -23,6 +23,7 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
     private String debugDir;
     private boolean startWithFrozenACEmulation = START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE;
     private int threadCount = THREAD_COUNT_DEFAULT_VALUE;
+    private boolean adjointSlackDistribution = ADJOINT_SLACK_DISTRIBUTION_DEFAULT_VALUE;
 
     public static final String DEBUG_DIR_PARAM_NAME = "debugDir";
     public static final String DEBUG_DIR_DEFAULT_VALUE = "";
@@ -30,8 +31,11 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
     public static final boolean START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE = true;
     public static final String THREAD_COUNT_PARAM_NAME = "threadCount";
     public static final int THREAD_COUNT_DEFAULT_VALUE = 1;
+    public static final String ADJOINT_SLACK_DISTRIBUTION_PARAM_NAME = "adjointSlackDistribution";
+    public static final boolean ADJOINT_SLACK_DISTRIBUTION_DEFAULT_VALUE = false;
 
-    public static final List<String> SPECIFIC_PARAMETERS_NAMES = List.of(DEBUG_DIR_PARAM_NAME, START_WITH_FROZEN_AC_EMULATION_PARAM_NAME, THREAD_COUNT_PARAM_NAME);
+    public static final List<String> SPECIFIC_PARAMETERS_NAMES = List.of(DEBUG_DIR_PARAM_NAME, START_WITH_FROZEN_AC_EMULATION_PARAM_NAME, THREAD_COUNT_PARAM_NAME,
+            ADJOINT_SLACK_DISTRIBUTION_PARAM_NAME);
 
     @Override
     public String getName() {
@@ -65,6 +69,21 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
         return this;
     }
 
+    public boolean isAdjointSlackDistribution() {
+        return adjointSlackDistribution;
+    }
+
+    /**
+     * With a distributed slack, makes the AC adjoint differentiate through the slack distribution: the active
+     * power imbalance a variable creates, losses included, is spread over the participating elements as the
+     * load flow distributes it, instead of being absorbed by the slack bus. The gradient then matches a load
+     * flow re-run. Off by default, which keeps the adjoint equal to the forward sensitivity.
+     */
+    public OpenSensitivityAnalysisParameters setAdjointSlackDistribution(boolean adjointSlackDistribution) {
+        this.adjointSlackDistribution = adjointSlackDistribution;
+        return this;
+    }
+
     public static OpenSensitivityAnalysisParameters getOrDefault(SensitivityAnalysisParameters sensitivityAnalysisParameters) {
         OpenSensitivityAnalysisParameters sensiParametersExt = sensitivityAnalysisParameters.getExtension(OpenSensitivityAnalysisParameters.class);
         if (sensiParametersExt == null) {
@@ -83,7 +102,8 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
                 .ifPresent(config -> parameters
                         .setDebugDir(config.getStringProperty(DEBUG_DIR_PARAM_NAME, DEBUG_DIR_DEFAULT_VALUE))
                         .setStartWithFrozenACEmulation(config.getBooleanProperty(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME, START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE))
-                        .setThreadCount(config.getIntProperty(THREAD_COUNT_PARAM_NAME, THREAD_COUNT_DEFAULT_VALUE)));
+                        .setThreadCount(config.getIntProperty(THREAD_COUNT_PARAM_NAME, THREAD_COUNT_DEFAULT_VALUE))
+                        .setAdjointSlackDistribution(config.getBooleanProperty(ADJOINT_SLACK_DISTRIBUTION_PARAM_NAME, ADJOINT_SLACK_DISTRIBUTION_DEFAULT_VALUE)));
         return parameters;
     }
 
@@ -94,6 +114,8 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
                 .ifPresent(value -> parameters.setStartWithFrozenACEmulation(Boolean.parseBoolean(value)));
         Optional.ofNullable(properties.get(THREAD_COUNT_PARAM_NAME))
                 .ifPresent(value -> parameters.setThreadCount(Integer.parseInt(value)));
+        Optional.ofNullable(properties.get(ADJOINT_SLACK_DISTRIBUTION_PARAM_NAME))
+                .ifPresent(value -> parameters.setAdjointSlackDistribution(Boolean.parseBoolean(value)));
         return parameters;
     }
 }
