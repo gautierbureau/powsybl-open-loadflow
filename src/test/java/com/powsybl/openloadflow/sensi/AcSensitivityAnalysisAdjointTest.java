@@ -11,10 +11,14 @@ import com.powsybl.commons.PowsyblException;
 import com.powsybl.contingency.ContingencyContext;
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Generator;
+import com.powsybl.iidm.network.Line;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.ShuntCompensatorLinearModel;
+import com.powsybl.iidm.network.extensions.SecondaryVoltageControl;
 import com.powsybl.iidm.network.extensions.SecondaryVoltageControlAdder;
 import com.powsybl.loadflow.LoadFlow;
 import com.powsybl.loadflow.LoadFlowParameters;
+import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
@@ -37,6 +41,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BiConsumer;
+import java.util.function.Supplier;
+import java.util.function.ToDoubleFunction;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -1231,5 +1238,192 @@ class AcSensitivityAnalysisAdjointTest {
         PowsyblException noVariables = assertThrows(PowsyblException.class,
             () -> AcSensitivityAnalysis.buildAdjointFactors(network, functions, List.of()));
         assertTrue(noVariables.getMessage().contains("at least one variable"), noVariables.getMessage());
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // adjointSlackDistribution: the gradient of a load flow re-run with a distributed slack
+    // ---------------------------------------------------------------------------------------------------------
+
+    // the IEEE-14 generators the slack is distributed over: B3-G, B6-G and B8-G are condensers at zero, which the
+    // distribution never makes negative, held at zero here as the imbalance is negative
+    private static final List<String> IEEE14_PARTICIPATING_GENERATORS = List.of("B1-G", "B2-G");
+
+    private static final Map<AcSensitivityAnalysis.FunctionRef, Double> FLOW_COTANGENTS =
+            Map.of(powerKey("L1-2-1"), 1.0, powerKey("L2-3-1"), 0.5);
+
+    /** The objective the FLOW_COTANGENTS are the gradient of, read on a solved network. */
+    private static double flowObjective(Network network) {
+        return network.getBranch("L1-2-1").getTerminal1().getP() + 0.5 * network.getBranch("L2-3-1").getTerminal1().getP();
+    }
+
+    /** Single slack load flow, no cache: the finite differences distribute the slack themselves. */
+    private static LoadFlowParameters singleSlackReRunParameters() {
+        LoadFlowParameters lfp = new LoadFlowParameters().setDistributedSlack(false);
+        OpenLoadFlowParameters.create(lfp);
+        return lfp;
+    }
+
+    /** {@link #svcCacheEnabledParameters} as a single slack load flow, no cache. */
+    private static LoadFlowParameters svcSingleSlackReRunParameters() {
+        LoadFlowParameters lfp = svcCacheEnabledParameters().setDistributedSlack(false);
+        OpenLoadFlowParameters.get(lfp).setNetworkCacheEnabled(false);
+        return lfp;
+    }
+
+    private static Map<AcSensitivityAnalysis.VariableRef, Double> runAdjointWithSlackDistribution(
+            Network network, LoadFlowParameters lfp, boolean adjointSlackDistribution,
+            List<AcSensitivityAnalysis.AdjointVariable> variables) {
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        sensiParams.addExtension(OpenSensitivityAnalysisParameters.class,
+                new OpenSensitivityAnalysisParameters().setAdjointSlackDistribution(adjointSlackDistribution));
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+        return analysis.runAdjoint(network, network.getVariantManager().getWorkingVariantId(), List.of(),
+                FLOW_COTANGENTS, variables);
+    }
+
+    /**
+     * The distributed slack load flow, run to an exact balance. The load flow's own outer loop stops
+     * redistributing below ActivePowerDistribution.P_RESIDUE_EPS, leaving the last loss change on the slack bus:
+     * a fixed fraction of any perturbation, which would bias a finite difference by about the loss sensitivity.
+     * Here a single slack load flow is re-run and what the slack bus absorbed is spread over the participating
+     * generators, in proportion to their maximum power as PROPORTIONAL_TO_GENERATION_P_MAX does, until it is
+     * negligible.
+     */
+    private static void runToExactSlackBalance(Network network, LoadFlowParameters singleSlackParameters,
+                                               List<String> participatingGenerators) {
+        double maxPSum = participatingGenerators.stream().mapToDouble(g -> network.getGenerator(g).getMaxP()).sum();
+        for (int i = 0; i < 20; i++) {
+            LoadFlowResult result = LoadFlow.find("OpenLoadFlow").run(network, singleSlackParameters);
+            assertTrue(result.isFullyConverged());
+            double residual = result.getComponentResults().getFirst().getSlackBusResults().getFirst().getActivePowerMismatch();
+            if (Math.abs(residual) < 1e-9) {
+                return;
+            }
+            for (String id : participatingGenerators) {
+                Generator g = network.getGenerator(id);
+                g.setTargetP(g.getTargetP() + residual * g.getMaxP() / maxPSum);
+            }
+        }
+        throw new AssertionError("slack balance not reached");
+    }
+
+    /** d(objective)/d(perturbation) by a central difference of two exactly balanced load flow re-runs. */
+    private static double reRunCentralDifference(Supplier<Network> base, BiConsumer<Network, Double> perturb,
+                                                 double step, ToDoubleFunction<Network> objective) {
+        double[] values = new double[2];
+        for (int k = 0; k < 2; k++) {
+            Network network = base.get();
+            perturb.accept(network, k == 0 ? step : -step);
+            runToExactSlackBalance(network, singleSlackReRunParameters(), IEEE14_PARTICIPATING_GENERATORS);
+            values[k] = objective.applyAsDouble(network);
+        }
+        return (values[0] - values[1]) / (2 * step);
+    }
+
+    private static void scaleImpedance(Network network, String lineId, double dY) {
+        // series admittance modulus y + dY at constant ksi: R and X scaled by y / (y + dY)
+        Line line = network.getLine(lineId);
+        double y = 1.0 / Math.hypot(line.getR(), line.getX());
+        double scale = y / (y + dY);
+        line.setR(line.getR() * scale).setX(line.getX() * scale);
+    }
+
+    @Test
+    void runAdjointWithSlackDistributionMatchesALoadFlowReRun() {
+        // With a distributed slack the load flow spreads the imbalance a lever creates, losses included, over the
+        // participating generators. adjointSlackDistribution differentiates through that spread, so the gradient
+        // is the one of a load flow re-run, for every lever type. Without it the imbalance stays on the slack
+        // bus (the forward convention), which a re-run does not do.
+        LoadFlowParameters lfp = distributedSlackCacheEnabledParameters();
+        OpenLoadFlowParameters.get(lfp).setSlackBusPMaxMismatch(1e-6);
+        Supplier<Network> ieee14 = IeeeCdfNetworkFactory::create14;
+        Network network = ieee14.get();
+        double shuntB = network.getShuntCompensator("B9-SH").getModel(ShuntCompensatorLinearModel.class).getBPerSection();
+        double y23 = 1.0 / Math.hypot(network.getLine("L2-3-1").getR(), network.getLine("L2-3-1").getX());
+        double y15 = 1.0 / Math.hypot(network.getLine("L1-5-1").getR(), network.getLine("L1-5-1").getX());
+
+        record Lever(SensitivityVariableType type, String id, BiConsumer<Network, Double> perturb, double step) { }
+
+        List<Lever> levers = List.of(
+                new Lever(SensitivityVariableType.INJECTION_ACTIVE_POWER, "B1-G",
+                        (n, d) -> n.getGenerator("B1-G").setTargetP(n.getGenerator("B1-G").getTargetP() + d), 0.5),
+                new Lever(SensitivityVariableType.INJECTION_ACTIVE_POWER, "B2-G",
+                        (n, d) -> n.getGenerator("B2-G").setTargetP(n.getGenerator("B2-G").getTargetP() + d), 0.5),
+                new Lever(SensitivityVariableType.SHUNT_COMPENSATOR_SUSCEPTANCE, "B9-SH",
+                        (n, d) -> {
+                            ShuntCompensatorLinearModel model = n.getShuntCompensator("B9-SH").getModel(ShuntCompensatorLinearModel.class);
+                            model.setBPerSection(model.getBPerSection() + d);
+                        }, 1e-3 * Math.abs(shuntB)),
+                // a line away from the slack bus and one connected to it (the slack bus rhs entry)
+                new Lever(SensitivityVariableType.BRANCH_ADMITTANCE, "L2-3-1", (n, d) -> scaleImpedance(n, "L2-3-1", d), 1e-4 * y23),
+                new Lever(SensitivityVariableType.BRANCH_ADMITTANCE, "L1-5-1", (n, d) -> scaleImpedance(n, "L1-5-1", d), 1e-4 * y15));
+
+        List<AcSensitivityAnalysis.AdjointVariable> variables = levers.stream()
+                .map(l -> AcSensitivityAnalysis.AdjointVariable.of(l.type(), l.id())).toList();
+        Map<AcSensitivityAnalysis.VariableRef, Double> closedLoop = runAdjointWithSlackDistribution(network, lfp, true, variables);
+        Map<AcSensitivityAnalysis.VariableRef, Double> forwardConvention = runAdjointWithSlackDistribution(network, lfp, false, variables);
+
+        double maxGap = 0;
+        for (Lever lever : levers) {
+            AcSensitivityAnalysis.VariableRef key = varKey(lever.type(), lever.id());
+            double fd = reRunCentralDifference(ieee14, lever.perturb(), lever.step(), AcSensitivityAnalysisAdjointTest::flowObjective);
+            assertEquals(fd, closedLoop.get(key), 1e-5 * (Math.abs(fd) + 1e-2), "adjointSlackDistribution vs re-run for " + key);
+            maxGap = Math.max(maxGap, Math.abs(forwardConvention.get(key) - fd) / (Math.abs(fd) + 1e-2));
+        }
+        assertTrue(maxGap > 1e-2, "the forward convention must differ from a re-run here, got a relative gap of " + maxGap);
+    }
+
+    @Test
+    void runAdjointWithSlackDistributionMatchesALoadFlowReRunForAnSvcPilotLever() {
+        // TVC's RST lever with a distributed slack: moving the pilot target moves reactive power and losses.
+        // The slack distribution brings the gradient from 5.5% to 0.17% of a re-run (a step-converged central
+        // difference). What remains is in the SVC coordination weights (SvcPilotPointClosedLoopSensitivity),
+        // which their own solves still compute with the slack on the slack bus.
+        String zone = "z1";
+        double targetV = 13.0;
+        double dV = 0.01;
+        LoadFlowParameters lfp = svcCacheEnabledParameters().setDistributedSlack(true);
+        OpenLoadFlowParameters.get(lfp).setSlackBusPMaxMismatch(1e-6);
+
+        Network network = ieee14WithZone(targetV);
+        List<AcSensitivityAnalysis.AdjointVariable> zoneLever =
+                levers(SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE, List.of(zone));
+        double theta = runAdjointWithSlackDistribution(network, lfp, true, zoneLever)
+                .get(varKey(SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE, zone));
+
+        // divided by the achieved pilot voltage change, as in runAdjointHandlesSvcPilotLeverOnIeee14
+        double[] objective = new double[2];
+        double[] pilotV = new double[2];
+        for (int k = 0; k < 2; k++) {
+            Network n = ieee14WithZone(targetV);
+            n.getExtension(SecondaryVoltageControl.class).getControlZone(zone).orElseThrow().getPilotPoint()
+                    .setTargetV(targetV + (k == 0 ? dV : -dV));
+            runToExactSlackBalance(n, svcSingleSlackReRunParameters(), IEEE14_PARTICIPATING_GENERATORS);
+            objective[k] = flowObjective(n);
+            pilotV[k] = busVoltage(n, "B10");
+        }
+        double fd = (objective[0] - objective[1]) / (pilotV[0] - pilotV[1]);
+        assertEquals(fd, theta, 3e-3 * Math.abs(fd), "adjointSlackDistribution vs re-run for the pilot target");
+        double forwardConvention = runAdjointWithSlackDistribution(ieee14WithZone(targetV), lfp, false, zoneLever)
+                .get(varKey(SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE, zone));
+        assertTrue(Math.abs(forwardConvention - fd) > 10 * Math.abs(theta - fd),
+                "the slack distribution must bring the pilot gradient closer to a re-run");
+    }
+
+    @Test
+    void runAdjointWithSlackDistributionIsTheForwardConventionWithoutADistributedSlack() {
+        // without a distributed slack there is nothing to distribute: the option changes nothing
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        List<AcSensitivityAnalysis.AdjointVariable> variables = levers(SensitivityVariableType.INJECTION_ACTIVE_POWER, GENS);
+        Network network = IeeeCdfNetworkFactory.create14();
+        Map<AcSensitivityAnalysis.VariableRef, Double> on = runAdjointWithSlackDistribution(network, lfp, true, variables);
+        Map<AcSensitivityAnalysis.VariableRef, Double> off = runAdjointWithSlackDistribution(network, lfp, false, variables);
+        for (String g : GENS) {
+            AcSensitivityAnalysis.VariableRef key = varKey(SensitivityVariableType.INJECTION_ACTIVE_POWER, g);
+            assertEquals(off.get(key), on.get(key), 0.0, "option without a distributed slack for " + g);
+        }
     }
 }
