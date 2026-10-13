@@ -34,6 +34,7 @@ public class BusState extends BusDcState {
     private final String[] generatorIds;
     private final LfGenerator.GeneratorControlType[] generatorsControlType;
     private final LfBus.QLimitType qLimitType;
+    private final double generatorVoltageControlTargetValue;
 
     private static final class LoadState extends LoadDcState {
 
@@ -78,6 +79,12 @@ public class BusState extends BusDcState {
             this.generatorsControlType[i] = generators.get(i).getGeneratorControlType();
         }
         qLimitType = bus.getQLimitType().orElse(null);
+        // the target of the generator voltage control this bus is the controlled bus of: outer loops move it
+        // (secondary voltage control, voltage monitoring), and a restored state must not keep their moves
+        generatorVoltageControlTargetValue = bus.getGeneratorVoltageControl()
+                .filter(vc -> vc.getControlledBus() == bus)
+                .map(GeneratorVoltageControl::getTargetValue)
+                .orElse(Double.NaN);
     }
 
     @Override
@@ -149,6 +156,9 @@ public class BusState extends BusDcState {
         }
         element.getGenerators().forEach(g -> g.setGeneratorControlType(controlTypeOf(g.getId())));
         element.setQLimitType(qLimitType);
+        if (!Double.isNaN(generatorVoltageControlTargetValue)) {
+            element.getGeneratorVoltageControl().orElseThrow().setTargetValue(generatorVoltageControlTargetValue);
+        }
     }
 
     /** Same as {@link #restore()}, timed in three parts. */
