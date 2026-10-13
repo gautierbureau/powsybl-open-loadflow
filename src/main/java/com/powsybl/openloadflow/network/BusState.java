@@ -35,6 +35,7 @@ public class BusState extends BusDcState {
     private final LfGenerator.GeneratorControlType[] generatorsControlType;
     private final LfBus.QLimitType qLimitType;
     private final double generatorVoltageControlTargetValue;
+    private final double remoteControlReactivePercent;
 
     private static final class LoadState extends LoadDcState {
 
@@ -85,6 +86,9 @@ public class BusState extends BusDcState {
                 .filter(vc -> vc.getControlledBus() == bus)
                 .map(GeneratorVoltageControl::getTargetValue)
                 .orElse(Double.NaN);
+        // the reactive key of this bus in a shared remote voltage control: renormalized over the remaining
+        // generators when a contingency loses one (LfContingency.processLostGenerators)
+        remoteControlReactivePercent = bus.getRemoteControlReactivePercent();
     }
 
     @Override
@@ -159,6 +163,7 @@ public class BusState extends BusDcState {
         if (!Double.isNaN(generatorVoltageControlTargetValue)) {
             element.getGeneratorVoltageControl().orElseThrow().setTargetValue(generatorVoltageControlTargetValue);
         }
+        element.setRemoteControlReactivePercent(remoteControlReactivePercent);
     }
 
     /** Same as {@link #restore()}, timed in three parts. */
@@ -194,6 +199,10 @@ public class BusState extends BusDcState {
         }
         element.getGenerators().forEach(g -> g.setGeneratorControlType(controlTypeOf(g.getId())));
         element.setQLimitType(qLimitType);
+        if (!Double.isNaN(generatorVoltageControlTargetValue)) {
+            element.getGeneratorVoltageControl().orElseThrow().setTargetValue(generatorVoltageControlTargetValue);
+        }
+        element.setRemoteControlReactivePercent(remoteControlReactivePercent);
         long t3 = System.nanoTime();
         SUPER_NS.add(t1 - t0);
         VC_NS.add(t2 - t1);
