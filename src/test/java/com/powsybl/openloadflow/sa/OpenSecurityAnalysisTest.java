@@ -5395,4 +5395,52 @@ class OpenSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest {
         assertEquals(1, changedPhaseTapChanger.initialTap());
         assertEquals(0, changedPhaseTapChanger.finalTap());
     }
+
+    private static Network createIeee14WithTwoSecondaryVoltageControlZones() {
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.newExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControlAdder.class)
+                .newControlZone().withName("z1")
+                .newPilotPoint().withTargetV(13).withBusbarSectionsOrBusesIds(List.of("B10")).add()
+                .newControlUnit().withId("B6-G").add()
+                .newControlUnit().withId("B8-G").add()
+                .add()
+                .newControlZone().withName("z2")
+                .newPilotPoint().withTargetV(140).withBusbarSectionsOrBusesIds(List.of("B4")).add()
+                .newControlUnit().withId("B2-G").add()
+                .newControlUnit().withId("B3-G").add()
+                .add()
+                .add();
+        return network;
+    }
+
+    private static double busV(SecurityAnalysisResult result, String contingencyId, String voltageLevelId) {
+        return getPostContingencyResult(result, contingencyId).getNetworkResult().getBusResults().stream()
+                .filter(b -> b.getVoltageLevelId().equals(voltageLevelId)).findFirst().orElseThrow().getV();
+    }
+
+    /**
+     * Secondary voltage control moves the target voltages of the generators it controls. Each post-contingency
+     * load flow must start from the pre-contingency targets, whatever contingencies were simulated before it:
+     * L3-4-1 alone starts from the base targets, after L2-4-1 it started from the targets L2-4-1 left.
+     */
+    @Test
+    void testSecondaryVoltageControlTargetsAreRestoredBetweenContingencies() {
+        LoadFlowParameters lfParameters = new LoadFlowParameters();
+        OpenLoadFlowParameters.create(lfParameters)
+                .setSecondaryVoltageControl(true)
+                .setMaxPlausibleTargetVoltage(1.6);
+        SecurityAnalysisParameters saParameters = new SecurityAnalysisParameters().setLoadFlowParameters(lfParameters);
+        Contingency l24 = new Contingency("L2-4-1", new BranchContingency("L2-4-1"));
+        Contingency l34 = new Contingency("L3-4-1", new BranchContingency("L3-4-1"));
+
+        Network network = createIeee14WithTwoSecondaryVoltageControlZones();
+        List<StateMonitor> monitors = createNetworkMonitors(network);
+        SecurityAnalysisResult alone = runSecurityAnalysis(network, List.of(l34), monitors, saParameters);
+        SecurityAnalysisResult afterAnother = runSecurityAnalysis(createIeee14WithTwoSecondaryVoltageControlZones(),
+                List.of(l24, l34), monitors, saParameters);
+
+        for (String vlId : List.of("VL2", "VL3", "VL6", "VL8")) {
+            assertEquals(busV(alone, "L3-4-1", vlId), busV(afterAnother, "L3-4-1", vlId), 0, vlId);
+        }
+    }
 }
