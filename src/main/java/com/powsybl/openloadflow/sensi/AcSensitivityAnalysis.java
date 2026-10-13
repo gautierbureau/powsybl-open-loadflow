@@ -26,6 +26,8 @@ import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.ac.equations.*;
 import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
+import com.powsybl.openloadflow.equations.Equation;
+import com.powsybl.openloadflow.equations.EquationTerm;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
@@ -296,7 +298,8 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
     private double[] analyseAdjoint(AcLoadFlowContext context,
                                    SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups,
                                    Map<LfSensitivityFactor<AcVariableType, AcEquationType>, Double> cotangents,
-                                   Map<LfBus, Double> slackParticipationByBus) {
+                                   Map<LfBus, Double> slackParticipationByBus,
+                                   SlackDistribution slackDistribution) {
         var equationSystem = context.getEquationSystem();
         int equationCount = equationSystem.getIndex().getColumnCount();
 
@@ -310,6 +313,17 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         // the stored matrix is the transposed Jacobian, so solve() is the adjoint solve
         double[] lambda = computeStateCotangent(equationCount, cotangents); // solved in place
         context.getJacobianMatrix().solve(lambda);
+        // with the slack distribution in the system, the state cotangent gets a rank-1 correction and the
+        // slack bus balance its own cotangent (see SlackDistribution)
+        double slackBalanceCotangent = 0;
+        if (slackDistribution != null) {
+            double kappa = slackDistribution.dotParticipation(lambda) / slackDistribution.sigma();
+            double[] u = slackDistribution.u();
+            for (int i = 0; i < lambda.length; i++) {
+                lambda[i] += kappa * u[i];
+            }
+            slackBalanceCotangent = -kappa;
+        }
 
         // thetaBar = lambda . rhs per variable group, plus the direct df/dp term of branch parameters. The rhs
         // column already carries the forward's sign, so no extra sign here.
@@ -317,6 +331,9 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         for (var group : factorGroups.getList()) {
             int col = group.getIndex();
             double thetaG = parameterRhs[col].dot(lambda);
+            if (slackDistribution != null) {
+                thetaG += group.describeSlackBusRhs(slackDistribution.slackBus()) * slackBalanceCotangent;
+            }
             for (var factor : group.getFactors()) {
                 Double yBar = cotangents.get(factor);
                 if (yBar != null && yBar != 0.0) {
@@ -326,6 +343,104 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             thetaBar[col] = thetaG / getVariableBaseValue(group.getFirstFactor());
         }
         return thetaBar;
+    }
+
+    /**
+     * The distributed slack as one more unknown of the linearized system: {@code mu}, the active power the slack
+     * distribution adds, {@code alpha_i * mu} at each participating bus i. The slack bus active power balance,
+     * which the system otherwise leaves to the slack bus, is the matching equation:
+     * <pre>
+     *   [ J    b ] [ dx  ]   [ rhs           ]     b = -alpha on the active power equations of the participating buses
+     *   [ c^T  d ] [ dmu ] = [ slack bus rhs ]     c = d(slack bus active power)/dx, d = -alpha_slack
+     * </pre>
+     * Its adjoint is the plain one, {@code lambda0 = J^-T xBar}, corrected on the same factorization:
+     * {@code lambda = lambda0 + kappa * u} with {@code u = J^-T c}, {@code sigma = d - b.u},
+     * {@code kappa = b.lambda0 / sigma}, and the slack bus balance carries the cotangent {@code -kappa}.
+     *
+     * @param u the solved {@code J^-T c}, by equation column
+     */
+    private record SlackDistribution(LfBus slackBus, Map<LfBus, Double> participationByBus, double[] u, double sigma) {
+
+        static SlackDistribution create(AcLoadFlowContext context, LfNetwork lfNetwork, Map<LfBus, Double> participationByBus) {
+            List<LfBus> slackBuses = lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses();
+            if (slackBuses.size() != 1) {
+                throw new PowsyblException("Adjoint slack distribution supports a single slack bus, the network has "
+                        + slackBuses.size());
+            }
+            LfBus slackBus = slackBuses.getFirst();
+            double[] u = new double[context.getEquationSystem().getIndex().getColumnCount()];
+            @SuppressWarnings("unchecked")
+            Equation<AcVariableType, AcEquationType> slackP = (Equation<AcVariableType, AcEquationType>) slackBus.getP();
+            for (Map.Entry<Variable<AcVariableType>, List<EquationTerm<AcVariableType, AcEquationType>>> e
+                    : slackP.<EquationTerm<AcVariableType, AcEquationType>>getTermsByVariable().entrySet()) {
+                int row = e.getKey().getRow();
+                if (row < 0) {
+                    continue;
+                }
+                for (EquationTerm<AcVariableType, AcEquationType> term : e.getValue()) {
+                    if (term.isActive()) {
+                        u[row] += term.der(e.getKey());
+                    }
+                }
+            }
+            context.getJacobianMatrix().solve(u);
+            double sigma = participationByBus.getOrDefault(slackBus, 0d) - dotParticipation(participationByBus, u);
+            if (Math.abs(sigma) < 1e-12) {
+                throw new PowsyblException("Adjoint slack distribution: singular slack balance (sigma=" + sigma + ")");
+            }
+            return new SlackDistribution(slackBus, participationByBus, u, sigma);
+        }
+
+        double dotParticipation(double[] v) {
+            return dotParticipation(participationByBus, v);
+        }
+
+        /** b.v, b being the participation on the active power equations in the system (the slack bus has none). */
+        private static double dotParticipation(Map<LfBus, Double> participationByBus, double[] v) {
+            double dot = 0;
+            for (Map.Entry<LfBus, Double> e : participationByBus.entrySet()) {
+                LfBus bus = e.getKey();
+                Equation<?, ?> p = (Equation<?, ?>) bus.getP();
+                if (!bus.isSlack() && p.isActive()) {
+                    dot += e.getValue() * v[p.getColumn()];
+                }
+            }
+            return dot;
+        }
+    }
+
+    /**
+     * The slack participation the converged load flow actually distributes over: a generator the distribution
+     * holds at one of its bounds (its active power limits, or zero, since the distribution never changes the
+     * sign of a generation) does not move for a small imbalance and is left out, as the load flow left it out.
+     * The forward participation keeps every participating element, the imbalance direction being unknown there.
+     */
+    private Map<LfBus, Double> activeParticipationByBus(LfNetwork lfNetwork, LoadFlowParameters lfParameters) {
+        OpenLoadFlowParameters lfParametersExt = OpenLoadFlowParameters.get(lfParameters);
+        boolean useActiveLimits = lfParametersExt.isUseActiveLimits();
+        List<ParticipatingElement> participatingElements = new ArrayList<>(getParticipatingElements(
+                lfNetwork.getBuses(), lfParameters.getBalanceType(), lfParametersExt));
+        participatingElements.removeIf(e -> e.getElement() instanceof LfGenerator generator
+                && isAtDistributionBound(generator, useActiveLimits));
+        if (participatingElements.isEmpty()) {
+            throw new PowsyblException("Adjoint slack distribution: no element left to distribute the slack over");
+        }
+        ParticipatingElement.normalizeParticipationFactors(participatingElements);
+        return participatingElements.stream().collect(Collectors.toMap(
+                ParticipatingElement::getLfBus, e -> -e.getFactor(), Double::sum));
+    }
+
+    // the bounds of GenerationActivePowerDistributionStep, the generation sign included
+    private static boolean isAtDistributionBound(LfGenerator generator, boolean useActiveLimits) {
+        double targetP = generator.getTargetP();
+        double minTargetP = useActiveLimits ? generator.getMinTargetP() : -Double.MAX_VALUE;
+        double maxTargetP = useActiveLimits ? generator.getMaxTargetP() : Double.MAX_VALUE;
+        if (targetP < 0) {
+            maxTargetP = Math.min(maxTargetP, 0);
+        } else {
+            minTargetP = Math.max(minTargetP, 0);
+        }
+        return targetP <= minTargetP || targetP >= maxTargetP;
     }
 
     /**
@@ -456,7 +571,15 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             }
         }
 
-        double[] thetaBar = analyseAdjoint(context, factorGroups, cotangents, slackParticipationByBus);
+        // the slack distribution either folded into the injection rhs (the forward convention) or solved with the
+        // system, losses included (adjointSlackDistribution)
+        SlackDistribution slackDistribution = null;
+        Map<LfBus, Double> rhsParticipationByBus = slackParticipationByBus;
+        if (lfParameters.isDistributedSlack() && OpenSensitivityAnalysisParameters.getOrDefault(parameters).isAdjointSlackDistribution()) {
+            slackDistribution = SlackDistribution.create(context, lfNetwork, activeParticipationByBus(lfNetwork, lfParameters));
+            rhsParticipationByBus = Map.of();
+        }
+        double[] thetaBar = analyseAdjoint(context, factorGroups, cotangents, rhsParticipationByBus, slackDistribution);
 
         Map<VariableRef, Double> gradientByGroup = new HashMap<>();
         for (var group : factorGroups.getList()) {
