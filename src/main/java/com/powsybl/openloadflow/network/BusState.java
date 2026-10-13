@@ -29,6 +29,7 @@ public class BusState extends BusDcState {
     private final double svcShuntB;
     private final Map<String, LfGenerator.GeneratorControlType> generatorsControlType;
     private final LfBus.QLimitType qLimitType;
+    private final double remoteControlReactivePercent;
 
     private static final class LoadState extends LoadDcState {
 
@@ -67,6 +68,9 @@ public class BusState extends BusDcState {
         svcShuntB = svcShunt != null ? svcShunt.getB() : Double.NaN;
         this.generatorsControlType = bus.getGenerators().stream().collect(Collectors.toMap(LfGenerator::getId, LfGenerator::getGeneratorControlType));
         qLimitType = bus.getQLimitType().orElse(null);
+        // the reactive key of this bus in a shared remote voltage control: renormalized over the remaining
+        // generators when a contingency loses one (LfContingency.processLostGenerators)
+        remoteControlReactivePercent = bus.getRemoteControlReactivePercent();
     }
 
     @Override
@@ -104,6 +108,7 @@ public class BusState extends BusDcState {
         }
         element.getGenerators().forEach(g -> g.setGeneratorControlType(generatorsControlType.get(g.getId())));
         element.setQLimitType(qLimitType);
+        element.setRemoteControlReactivePercent(remoteControlReactivePercent);
     }
 
     public static BusState save(LfBus bus) {

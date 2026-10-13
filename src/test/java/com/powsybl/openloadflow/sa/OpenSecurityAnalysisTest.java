@@ -32,6 +32,7 @@ import com.powsybl.iidm.network.extensions.LoadDetail;
 import com.powsybl.iidm.network.extensions.LoadDetailAdder;
 import com.powsybl.iidm.network.extensions.StandbyAutomatonAdder;
 import com.powsybl.iidm.network.regulation.RegulationMode;
+import com.powsybl.iidm.network.regulation.VoltageRegulation;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
 import com.powsybl.iidm.network.test.FourSubstationsNodeBreakerFactory;
 import com.powsybl.iidm.network.test.SecurityAnalysisTestNetworkFactory;
@@ -5394,5 +5395,61 @@ class OpenSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest {
         assertNull(changedPhaseTapChanger.side());
         assertEquals(1, changedPhaseTapChanger.initialTap());
         assertEquals(0, changedPhaseTapChanger.finalTap());
+    }
+
+    /**
+     * OLF's shared remote voltage control of b4 by g1, g2 and g3, with a second regulating generator on b1: no
+     * generator has reactive limits, so the reactive keys are uniform per voltage controlling generator (b1 50 %,
+     * b2 and b3 25 %). A second load l4b on b4 is the reference contingency.
+     */
+    private static Network createRemoteVoltageControlWithTwoGeneratorsOnOneController() {
+        Network network = VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        VoltageRegulation g1Regulation = network.getGenerator("g1").getVoltageRegulation();
+        network.getVoltageLevel("vl1").newGenerator()
+                .setId("g1b")
+                .setBus("b1")
+                .setConnectableBus("b1")
+                .setEnergySource(EnergySource.THERMAL)
+                .setMinP(0)
+                .setMaxP(200)
+                .setTargetP(50)
+                .newVoltageRegulation()
+                    .withTargetValue(g1Regulation.getTargetValue())
+                    .withRegulating(true)
+                    .withTerminal(g1Regulation.getTerminal())
+                    .withMode(RegulationMode.VOLTAGE)
+                    .add()
+                .add();
+        network.getVoltageLevel("vl4").newLoad()
+                .setId("l4b")
+                .setBus("b4")
+                .setConnectableBus("b4")
+                .setP0(30)
+                .setQ0(20)
+                .add();
+        return network;
+    }
+
+    /**
+     * A generator outage renormalizes the reactive keys of the group: losing g1b (b1 keeps one generator: 33 % each),
+     * or losing g2, the only generator of b2. The next contingency must start again from the pre-contingency keys:
+     * the same load outage simulated before and after the generator outage must give the same result.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"g1b", "g2"})
+    void testRemoteVoltageControlReactiveKeysAreRestoredBetweenContingencies(String lostGeneratorId) {
+        Network network = createRemoteVoltageControlWithTwoGeneratorsOnOneController();
+        List<Contingency> contingencies = List.of(
+                new Contingency("l4b", new LoadContingency("l4b")),
+                new Contingency(lostGeneratorId, new GeneratorContingency(lostGeneratorId)),
+                new Contingency("l4b-again", new LoadContingency("l4b")));
+        SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, createNetworkMonitors(network), new LoadFlowParameters());
+
+        PostContingencyResult before = getPostContingencyResult(result, "l4b");
+        PostContingencyResult after = getPostContingencyResult(result, "l4b-again");
+        for (String branchId : List.of("tr1", "tr2", "tr3")) {
+            assertEquals(before.getNetworkResult().getBranchResult(branchId).getQ1(),
+                    after.getNetworkResult().getBranchResult(branchId).getQ1(), 0, branchId);
+        }
     }
 }
