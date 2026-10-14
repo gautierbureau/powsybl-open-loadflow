@@ -13,6 +13,7 @@ import org.jgrapht.alg.connectivity.ConnectivityInspector;
 import org.jgrapht.alg.interfaces.SpanningTreeAlgorithm;
 import org.jgrapht.alg.spanning.KruskalMinimumSpanningTree;
 import org.jgrapht.graph.AsSubgraph;
+import org.jgrapht.graph.AsWeightedGraph;
 import org.jgrapht.graph.Pseudograph;
 
 import java.util.*;
@@ -106,7 +107,10 @@ public class LfZeroImpedanceNetwork {
     }
 
     public void updateSpanningTree() {
-        spanningTree = new KruskalMinimumSpanningTree<>(graph).getSpanningTree();
+        // weighting by branch number makes the spanning tree only depend on the enabled branches and not on the order
+        // they have been added to the graph, so that closing again a branch gives back the spanning tree it was part of
+        spanningTree = new KruskalMinimumSpanningTree<>(new AsWeightedGraph<>(graph, branch -> (double) branch.getNum(), true, false))
+                .getSpanningTree();
         Set<LfBranch> spanningTreeEdges = spanningTree.getEdges();
         for (LfBranch branch : graph.edgeSet()) {
             branch.setSpanningTreeEdge(loadFlowModel, spanningTreeEdges.contains(branch));
@@ -224,6 +228,7 @@ public class LfZeroImpedanceNetwork {
 
     public void addBranch(LfBranch branch) {
         graph.addEdge(branch.getBus1(), branch.getBus2(), branch);
+        updateSpanningTree();
     }
 
     @Override
