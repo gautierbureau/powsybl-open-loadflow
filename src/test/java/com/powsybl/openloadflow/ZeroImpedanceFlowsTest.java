@@ -26,6 +26,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import static com.powsybl.openloadflow.util.LoadFlowAssert.assertActivePowerEquals;
 import static com.powsybl.openloadflow.util.LoadFlowAssert.assertReactivePowerEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -622,5 +623,47 @@ class ZeroImpedanceFlowsTest extends AbstractLoadFlowNetworkFactory {
         assertTrue(Double.isNaN(t2.getQ()));
         assertActivePowerEquals(p3, t3);
         assertTrue(Double.isNaN(t3.getQ()));
+    }
+
+    /**
+     *  g1                   l4
+     *  b1 ===== b2 ===== b3 ----- b4
+     *   \   z12    z23   /
+     *    ===============
+     *          z13
+     */
+    @Test
+    void testSpanningTreeOnlyDependsOnEnabledBranches() {
+        Network network = Network.create("spanningTreeOnlyDependsOnEnabledBranches", "code");
+        Bus b1 = createBus(network, "b1");
+        Bus b2 = createBus(network, "b2");
+        Bus b3 = createBus(network, "b3");
+        Bus b4 = createBus(network, "b4");
+        createGenerator(b1, "g1", 2, 1);
+        createLoad(b4, "l4", 2, 1);
+        createLine(network, b1, b2, "z12", 0.0);
+        createLine(network, b2, b3, "z23", 0.0);
+        createLine(network, b1, b3, "z13", 0.0);
+        createLine(network, b3, b4, "l34", 0.01);
+        LfNetwork lfNetwork = Networks.load(network, new LfNetworkParameters()).get(0);
+        LfBranch z12 = lfNetwork.getBranchById("z12");
+        LfBranch z23 = lfNetwork.getBranchById("z23");
+        LfBranch z13 = lfNetwork.getBranchById("z13");
+        // branches are numbered by id, so z23 is the branch closing the loop
+        assertTrue(z12.isSpanningTreeEdge(LoadFlowModel.AC));
+        assertTrue(z13.isSpanningTreeEdge(LoadFlowModel.AC));
+        assertFalse(z23.isSpanningTreeEdge(LoadFlowModel.AC));
+
+        // opening a spanning tree edge of the loop brings the loop closing branch into the tree
+        z12.setDisabled(true);
+        assertFalse(z12.isSpanningTreeEdge(LoadFlowModel.AC));
+        assertTrue(z13.isSpanningTreeEdge(LoadFlowModel.AC));
+        assertTrue(z23.isSpanningTreeEdge(LoadFlowModel.AC));
+
+        // closing it again gives back the spanning tree of the same enabled branches
+        z12.setDisabled(false);
+        assertTrue(z12.isSpanningTreeEdge(LoadFlowModel.AC));
+        assertTrue(z13.isSpanningTreeEdge(LoadFlowModel.AC));
+        assertFalse(z23.isSpanningTreeEdge(LoadFlowModel.AC));
     }
 }
