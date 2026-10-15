@@ -112,6 +112,25 @@ public class LfVscConverterStationImpl extends AbstractLfGenerator implements Lf
         return getStation().getId();
     }
 
+    /**
+     * In the linear mode of AC emulation, the active power of the station is not its target P but the flow of the AC
+     * emulation equation term, which leaves the bus: the reactive limits are evaluated at that flow. In the saturated
+     * and frozen modes, and when the flow is not available (no AC equation system, disabled link), the target P is
+     * the active power of the station.
+     */
+    @Override
+    protected double getReactiveLimitsActivePower() {
+        if (hvdc != null && hvdc.isAcEmulation()
+                && hvdc.getAcEmulationControl().getAcEmulationStatus() == LfHvdc.AcEmulationControl.AcEmulationStatus.LINEAR_MODE
+                && !hvdc.isDisabled() && !hvdc.getBus1().isDisabled() && !hvdc.getBus2().isDisabled()) {
+            double flow = (hvdc.getConverterStation1() == this ? hvdc.getP1() : hvdc.getP2()).eval();
+            if (!Double.isNaN(flow)) {
+                return -flow;
+            }
+        }
+        return super.getReactiveLimitsActivePower();
+    }
+
     @Override
     public double getTargetQ() {
         return Networks.zeroIfNan(getStation().isRegulating() ? getStation().getRegulatingTargetQ() : getStation().getLocalTargetQ()) / PerUnit.SB;
