@@ -44,6 +44,12 @@ public class LfHvdcAction extends AbstractLfAction<HvdcAction> {
 
     @Override
     public boolean apply(LfNetwork network, LfContingency contingency, LfNetworkParameters networkParameters) {
+        if (isValid() && (lfHvdc.isDisabled() || lfHvdc.getBus1() == null || lfHvdc.getBus2() == null
+                || lfHvdc.getBus1().isDisabled() || lfHvdc.getBus2().isDisabled())) {
+            // the link carries no power (the contingency tripped it, or one of its converter stations is out of the
+            // network, and its stations' target are already zero): there is no flow to switch to set points
+            return false;
+        }
         if (isValid()) {
             if (action.isAcEmulationEnabled().isEmpty()) {
                 LOGGER.warn("Hvdc action {}: only explicitly disabling ac emulation is supported.", action.getId());
