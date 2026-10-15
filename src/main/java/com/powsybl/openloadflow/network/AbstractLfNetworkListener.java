@@ -120,4 +120,14 @@ public abstract class AbstractLfNetworkListener implements LfNetworkListener {
     public void onHvdcAcEmulationStatusChange(LfHvdc hvdc, LfHvdc.AcEmulationControl.AcEmulationStatus acEmulationStatus) {
         // empty
     }
+
+    @Override
+    public void onGenerationDisablingStatusChange(LfGenerator generator, boolean disabled) {
+        // empty
+    }
+
+    @Override
+    public void onLoadDisablingStatusChange(LfLoad load) {
+        // empty
+    }
 }

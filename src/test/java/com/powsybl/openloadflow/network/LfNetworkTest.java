@@ -37,6 +37,7 @@ import java.io.InputStream;
 import java.io.StringWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
@@ -146,6 +147,61 @@ class LfNetworkTest extends AbstractSerDeTest {
         assertEquals(2, lfNetworks.size());
         LfNetwork lfNetwork = lfNetworks.get(0);
         assertEquals(0.0, lfNetwork.getGeneratorById("cs2").getParticipationFactor(), 1E-6);
+    }
+
+    @Test
+    void testGenerationDisablingStatusChangeEvent() {
+        Network network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+        LfNetwork lfNetwork = Networks.load(network, new MostMeshedSlackBusSelector()).get(0);
+        LfGenerator generator = lfNetwork.getGeneratorById("GEN");
+        assertNotNull(generator);
+
+        List<Boolean> events = new ArrayList<>();
+        lfNetwork.addListener(new AbstractLfNetworkListener() {
+            @Override
+            public void onGenerationDisablingStatusChange(LfGenerator g, boolean disabled) {
+                assertSame(generator, g);
+                events.add(disabled);
+            }
+        });
+
+        // no event when the status does not actually change
+        generator.setDisabled(false);
+        assertEquals(List.of(), events);
+
+        // event fired on each effective change
+        generator.setDisabled(true);
+        assertEquals(List.of(true), events);
+        generator.setDisabled(false);
+        assertEquals(List.of(true, false), events);
+    }
+
+    @Test
+    void testLoadDisablingStatusChangeEvent() {
+        Network network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+        LfNetwork lfNetwork = Networks.load(network, new MostMeshedSlackBusSelector()).get(0);
+        LfLoad load = lfNetwork.getBuses().stream()
+                .flatMap(b -> b.getLoads().stream())
+                .findFirst().orElseThrow();
+        String originalId = load.getOriginalIds().get(0);
+
+        List<LfLoad> events = new ArrayList<>();
+        lfNetwork.addListener(new AbstractLfNetworkListener() {
+            @Override
+            public void onLoadDisablingStatusChange(LfLoad l) {
+                events.add(l);
+            }
+        });
+
+        // event on effective change
+        load.setOriginalLoadDisabled(originalId, true);
+        assertEquals(List.of(load), events);
+        // no event when the status does not actually change
+        load.setOriginalLoadDisabled(originalId, true);
+        assertEquals(List.of(load), events);
+        // event on change back
+        load.setOriginalLoadDisabled(originalId, false);
+        assertEquals(List.of(load, load), events);
     }
 
     @Test

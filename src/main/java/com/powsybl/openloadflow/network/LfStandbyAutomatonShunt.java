@@ -64,6 +64,11 @@ public final class LfStandbyAutomatonShunt extends AbstractLfShunt {
     }
 
     @Override
+    public LfBus getBus() {
+        return svc.getBus();
+    }
+
+    @Override
     public double getB() {
         return b;
     }

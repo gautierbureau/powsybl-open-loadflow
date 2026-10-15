@@ -126,6 +126,8 @@ public interface LfShunt extends LfElement, LfCopyable<LfShunt, LfBus> {
         }
     }
 
+    LfBus getBus();
+
     double getB();
 
     default double getBMagnitude() {

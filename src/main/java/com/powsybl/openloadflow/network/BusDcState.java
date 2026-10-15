@@ -10,17 +10,18 @@ package com.powsybl.openloadflow.network;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
  * @author Florian Dupuy {@literal <florian.dupuy at rte-france.com>}
  */
 public class BusDcState extends ElementState<LfBus> {
 
-    private final Map<String, Double> generatorsTargetP;
-    private final Map<String, Double> generatorsInitialTargetP;
-    private final Map<String, Boolean> participatingGenerators;
-    private final Map<String, Boolean> disablingStatusGenerators;
+    // generator state indexed by position in bus.getGenerators() (the list order is stable between save
+    // and restore); avoids the per-generator hash-map lookups by id that dominate a large security analysis
+    private final double[] generatorsTargetP;
+    private final double[] generatorsInitialTargetP;
+    private final boolean[] participatingGenerators;
+    private final boolean[] disablingStatusGenerators;
     private final List<LoadDcState> loadStates;
 
     protected static class LoadDcState {
@@ -45,10 +46,19 @@ public class BusDcState extends ElementState<LfBus> {
 
     public BusDcState(LfBus bus) {
         super(bus);
-        this.generatorsTargetP = bus.getGenerators().stream().collect(Collectors.toMap(LfGenerator::getId, LfGenerator::getTargetP));
-        this.generatorsInitialTargetP = bus.getGenerators().stream().collect(Collectors.toMap(LfGenerator::getId, LfGenerator::getInitialTargetP));
-        this.participatingGenerators = bus.getGenerators().stream().collect(Collectors.toMap(LfGenerator::getId, LfGenerator::isParticipating));
-        this.disablingStatusGenerators = bus.getGenerators().stream().collect(Collectors.toMap(LfGenerator::getId, LfGenerator::isDisabled));
+        List<LfGenerator> generators = bus.getGenerators();
+        int generatorCount = generators.size();
+        generatorsTargetP = new double[generatorCount];
+        generatorsInitialTargetP = new double[generatorCount];
+        participatingGenerators = new boolean[generatorCount];
+        disablingStatusGenerators = new boolean[generatorCount];
+        for (int i = 0; i < generatorCount; i++) {
+            LfGenerator generator = generators.get(i);
+            generatorsTargetP[i] = generator.getTargetP();
+            generatorsInitialTargetP[i] = generator.getInitialTargetP();
+            participatingGenerators[i] = generator.isParticipating();
+            disablingStatusGenerators[i] = generator.isDisabled();
+        }
         loadStates = bus.getLoads().stream().map(load -> createLoadState().save(load)).toList();
     }
 
@@ -59,13 +69,17 @@ public class BusDcState extends ElementState<LfBus> {
     @Override
     public void restore() {
         super.restore();
-        element.getGenerators().forEach(g -> g.setTargetP(generatorsTargetP.get(g.getId())));
-        element.getGenerators().forEach(g -> g.setInitialTargetP(generatorsInitialTargetP.get(g.getId())));
-        element.getGenerators().forEach(g -> g.setParticipating(participatingGenerators.get(g.getId())));
-        element.getGenerators().forEach(g -> g.setDisabled(disablingStatusGenerators.get(g.getId())));
+        List<LfGenerator> generators = element.getGenerators();
+        for (int i = 0; i < generators.size(); i++) {
+            LfGenerator generator = generators.get(i);
+            generator.setTargetP(generatorsTargetP[i]);
+            generator.setInitialTargetP(generatorsInitialTargetP[i]);
+            generator.setParticipating(participatingGenerators[i]);
+            generator.setDisabled(disablingStatusGenerators[i]);
+        }
+        List<LfLoad> loads = element.getLoads();
         for (int i = 0; i < loadStates.size(); i++) {
-            LfLoad load = element.getLoads().get(i);
-            loadStates.get(i).restore(load);
+            loadStates.get(i).restore(loads.get(i));
         }
     }
 
