@@ -1540,6 +1540,38 @@ class OpenSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnalysisTe
         assertEquals(network.getLine("l23").getTerminal1().getP(), operatorStrategyResult2.getNetworkResult().getBranchResult("l23").getP1(), LoadFlowAssert.DELTA_POWER);
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testHvdcActionOnALinkWithoutPower(boolean islandedConverter) {
+        // after a contingency that isolates a converter station's bus, or trips the link itself, the link carries no
+        // power: switching its AC emulation off changes nothing (it failed the whole security analysis on the first
+        // shape, and gave the stations of a tripped link the emulation's flow on the second)
+        Network network = HvdcNetworkFactory.createWithHvdcInAcEmulation();
+        network.getHvdcLine("hvdc34").newExtension(HvdcAngleDroopActivePowerControlAdder.class)
+                .withDroop(180)
+                .withP0(0.f)
+                .withEnabled(true)
+                .add();
+        Contingency contingency = islandedConverter
+                ? new Contingency("ctg", List.of(new BranchContingency("l45"), new BranchContingency("l46")))  // b4 holds cs4 alone
+                : new Contingency("ctg", List.of(new HvdcLineContingency("hvdc34")));
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+        List<Action> actions = List.of(new HvdcActionBuilder().withId("acEmulationOff").withHvdcId("hvdc34").withAcEmulationEnabled(false).build());
+        List<OperatorStrategy> operatorStrategies = List.of(new OperatorStrategy("strategy", ContingencyContext.specificContingency("ctg"),
+                new TrueCondition(), List.of("acEmulationOff")));
+        SecurityAnalysisResult result = runSecurityAnalysis(network, List.of(contingency), monitors, new SecurityAnalysisParameters(),
+                operatorStrategies, actions, ReportNode.NO_OP);
+
+        PostContingencyResult postContingencyResult = result.getPostContingencyResults().get(0);
+        OperatorStrategyResult operatorStrategyResult = getOperatorStrategyResult(result, "strategy");
+        assertEquals(PostContingencyComputationStatus.CONVERGED, postContingencyResult.getStatus());
+        assertEquals(PostContingencyComputationStatus.CONVERGED, operatorStrategyResult.getStatus());
+        for (BranchResult branchResult : postContingencyResult.getNetworkResult().getBranchResults()) {
+            assertEquals(branchResult.getP1(), operatorStrategyResult.getNetworkResult().getBranchResult(branchResult.getBranchId()).getP1(),
+                    LoadFlowAssert.DELTA_POWER, branchResult.getBranchId());
+        }
+    }
+
     @Test
     void testWithTieLineContingency() {
         Network network = BoundaryFactory.createWithTwoTieLines();
