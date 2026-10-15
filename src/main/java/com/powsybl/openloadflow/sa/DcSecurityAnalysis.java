@@ -21,6 +21,7 @@ import com.powsybl.openloadflow.lf.outerloop.config.DcOuterLoopConfig;
 import com.powsybl.openloadflow.lf.outerloop.config.DefaultDcOuterLoopConfig;
 import com.powsybl.openloadflow.lf.outerloop.config.ExplicitDcOuterLoopConfig;
 import com.powsybl.openloadflow.network.*;
+import com.powsybl.openloadflow.network.util.PreviousValueVoltageInitializer;
 import com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters;
 import com.powsybl.openloadflow.util.Reports;
 import com.powsybl.security.PostContingencyComputationStatus;
@@ -81,6 +82,11 @@ public class DcSecurityAnalysis extends AbstractSecurityAnalysis<DcVariableType,
     @Override
     protected DcLoadFlowContext createLoadFlowContext(LfNetwork lfNetwork, DcLoadFlowParameters parameters) {
         return new DcLoadFlowContext(lfNetwork, parameters);
+    }
+
+    @Override
+    protected void initStateVector(LfNetwork network, DcLoadFlowContext context) {
+        DcLoadFlowEngine.initStateVector(network, context.getEquationSystem(), new PreviousValueVoltageInitializer(true));
     }
 
     @Override
