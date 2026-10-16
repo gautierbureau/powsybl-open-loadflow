@@ -450,6 +450,15 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
     protected abstract LoadFlowEngine<V, E, P, R> createLoadFlowEngine(C context);
 
+    /**
+     * Set the state vector of the load flow context to the state of the network. The actions of an operator
+     * strategy are applied at the state the strategy starts from, and an action can read the state vector (an
+     * {@link com.powsybl.openloadflow.network.action.LfHvdcAction} sets the converter stations' set points at the
+     * flow of the link), while after the load flow of another strategy of the same contingency it still holds that
+     * strategy's solution: restoring the post-contingency network state does not restore the state vector.
+     */
+    protected abstract void initStateVector(LfNetwork network, C context);
+
     private boolean checkZeroImpedanceLine(LfNetwork lfNetwork, String id) {
         LfBranch lfBranch = lfNetwork.getBranchById(id);
         return lfBranch != null && lfBranch.isZeroImpedance(getLoadFlowModel());
@@ -705,6 +714,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 .filter(Objects::nonNull)
                 .toList();
 
+        initStateVector(network, context);
         LfActionUtils.applyListOfActions(operatorStrategyLfActions, network, lfContingency, networkParameters);
 
         Stopwatch stopwatch = Stopwatch.createStarted();

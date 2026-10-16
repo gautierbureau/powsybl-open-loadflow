@@ -1540,6 +1540,42 @@ class OpenSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnalysisTe
         assertEquals(network.getLine("l23").getTerminal1().getP(), operatorStrategyResult2.getNetworkResult().getBranchResult("l23").getP1(), LoadFlowAssert.DELTA_POWER);
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testHvdcActionDoesNotDependOnThePreviousOperatorStrategy(boolean dc) {
+        // the converter stations' set points of an HvdcAction are the flows of the link at the state its operator
+        // strategy starts from, the post-contingency state, whatever strategy of the same contingency ran before
+        Network network = HvdcNetworkFactory.createWithHvdcInAcEmulation();
+        network.getHvdcLine("hvdc34").newExtension(HvdcAngleDroopActivePowerControlAdder.class)
+                .withDroop(180)
+                .withP0(0.f)
+                .withEnabled(true)
+                .add();
+        List<Contingency> contingencies = List.of(Contingency.generator("g5"));
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+        List<Action> actions = List.of(new HvdcActionBuilder().withId("acEmulationOff").withHvdcId("hvdc34").withAcEmulationEnabled(false).build(),
+                new GeneratorActionBuilder().withId("generationUp").withGeneratorId("g1").withActivePowerRelativeValue(true).withActivePowerValue(1).build());
+        OperatorStrategy hvdcOff = new OperatorStrategy("hvdcOff", ContingencyContext.specificContingency("g5"), new TrueCondition(), List.of("acEmulationOff"));
+        OperatorStrategy generationUp = new OperatorStrategy("generationUp", ContingencyContext.specificContingency("g5"), new TrueCondition(), List.of("generationUp"));
+        SecurityAnalysisParameters securityAnalysisParameters = new SecurityAnalysisParameters();
+        LoadFlowParameters parameters = new LoadFlowParameters().setDc(dc)
+                .setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD);
+        parameters.addExtension(OpenLoadFlowParameters.class, new OpenLoadFlowParameters().setSlackBusPMaxMismatch(0.01));
+        securityAnalysisParameters.setLoadFlowParameters(parameters);
+
+        OperatorStrategyResult alone = getOperatorStrategyResult(runSecurityAnalysis(network, contingencies, monitors,
+                securityAnalysisParameters, List.of(hvdcOff), actions, ReportNode.NO_OP), "hvdcOff");
+        OperatorStrategyResult afterGenerationUp = getOperatorStrategyResult(runSecurityAnalysis(network, contingencies, monitors,
+                securityAnalysisParameters, List.of(generationUp, hvdcOff), actions, ReportNode.NO_OP), "hvdcOff");
+
+        assertEquals(PostContingencyComputationStatus.CONVERGED, alone.getStatus());
+        assertEquals(PostContingencyComputationStatus.CONVERGED, afterGenerationUp.getStatus());
+        for (BranchResult branchResult : alone.getNetworkResult().getBranchResults()) {
+            assertEquals(branchResult.getP1(), afterGenerationUp.getNetworkResult().getBranchResult(branchResult.getBranchId()).getP1(), 1e-9,
+                    branchResult.getBranchId());
+        }
+    }
+
     @Test
     void testWithTieLineContingency() {
         Network network = BoundaryFactory.createWithTwoTieLines();
