@@ -5395,4 +5395,84 @@ class OpenSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest {
         assertEquals(1, changedPhaseTapChanger.initialTap());
         assertEquals(0, changedPhaseTapChanger.finalTap());
     }
+
+    private static void addVoltageRegulatingGenerator(Network network, String voltageLevelId, String busId, String id,
+                                                      double targetP, double targetV, Terminal regulatedTerminal) {
+        network.getVoltageLevel(voltageLevelId).newGenerator()
+                .setId(id)
+                .setBus(busId)
+                .setConnectableBus(busId)
+                .setEnergySource(EnergySource.THERMAL)
+                .setMinP(0)
+                .setMaxP(200)
+                .setTargetP(targetP)
+                .newVoltageRegulation()
+                    .withTargetValue(targetV)
+                    .withRegulating(true)
+                    .withTerminal(regulatedTerminal)
+                    .withMode(RegulationMode.VOLTAGE)
+                    .add()
+                .add();
+    }
+
+    /**
+     * Two remote voltage controls whose controlled buses b4 and b5 are joined by a zero impedance line, so they are
+     * merged: g1, g1b and g2 control b4 (the main control), g3 and g3b control b5 (the dependent one). Every
+     * generator has a 1000 MVar reactive range, so the reactive keys follow the ranges: b1 40 %, b2 20 %, b3 40 %.
+     */
+    private static Network createMergedRemoteVoltageControls() {
+        Network network = VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        network.getSubstation("s").newVoltageLevel()
+                .setId("vl5")
+                .setNominalV(400)
+                .setTopologyKind(TopologyKind.BUS_BREAKER)
+                .add();
+        network.getVoltageLevel("vl5").getBusBreakerView().newBus().setId("b5").add();
+        Line zl = network.newLine()
+                .setId("zl45")
+                .setBus1("b4")
+                .setConnectableBus1("b4")
+                .setBus2("b5")
+                .setConnectableBus2("b5")
+                .setR(0)
+                .setX(0)
+                .add();
+        Generator g1 = network.getGenerator("g1");
+        Generator g3 = network.getGenerator("g3");
+        double g3TargetP = g3.getTargetP();
+        double targetV = g3.getVoltageRegulation().getTargetValue();
+        g3.remove();
+        addVoltageRegulatingGenerator(network, "vl3", "b3", "g3", g3TargetP, targetV, zl.getTerminal2());
+        addVoltageRegulatingGenerator(network, "vl3", "b3", "g3b", 50, targetV, zl.getTerminal2());
+        addVoltageRegulatingGenerator(network, "vl1", "b1", "g1b", 50, g1.getVoltageRegulation().getTargetValue(),
+                g1.getVoltageRegulation().getTerminal());
+        network.getGeneratorStream().forEach(g -> g.newMinMaxReactiveLimits().setMinQ(-500).setMaxQ(500).add());
+        return network;
+    }
+
+    /**
+     * A lost generator no longer takes part in the reactive keys of the control: losing g1b gives b1 25 %, b2 25 %,
+     * b3 50 %; losing g3b, a generator of the dependent control, gives b1 50 %, b2 25 %, b3 25 % over the whole merged
+     * control. The post-contingency state must be the one of a load flow on the network without the lost generator,
+     * within the solver tolerance.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"g1b", "g3b"})
+    void testLostGeneratorOfMergedRemoteVoltageControls(String lostGeneratorId) {
+        Network network = createMergedRemoteVoltageControls();
+        LoadFlowParameters parameters = new LoadFlowParameters();
+        List<Contingency> contingencies = List.of(new Contingency(lostGeneratorId, new GeneratorContingency(lostGeneratorId)));
+        SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, createNetworkMonitors(network), parameters);
+        PostContingencyResult postContingencyResult = getPostContingencyResult(result, lostGeneratorId);
+
+        Network withoutLostGenerator = createMergedRemoteVoltageControls();
+        withoutLostGenerator.getGenerator(lostGeneratorId).getTerminal().disconnect();
+        assertTrue(runLoadFlow(withoutLostGenerator, parameters).isFullyConverged());
+
+        for (String transformerId : List.of("tr1", "tr2", "tr3")) {
+            assertEquals(withoutLostGenerator.getTwoWindingsTransformer(transformerId).getTerminal1().getQ(),
+                    postContingencyResult.getNetworkResult().getBranchResult(transformerId).getQ1(), 1e-2, transformerId);
+        }
+    }
 }
+
