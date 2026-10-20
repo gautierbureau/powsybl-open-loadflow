@@ -5395,4 +5395,72 @@ class OpenSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest {
         assertEquals(1, changedPhaseTapChanger.initialTap());
         assertEquals(0, changedPhaseTapChanger.finalTap());
     }
+
+    /**
+     * b1 (slack g1) -- l12a, l12b -- b2 (load), with an HVDC link in AC emulation from cs1 on b1 to cs2 on b2. cs2
+     * regulates the voltage of b2 with a reactive capability curve that opens with the active power (+-5 MVar at 0 MW,
+     * +-60 MVar at +-100 MW). b3 hangs off b1 through l13 and carries nothing.
+     */
+    private static Network createAcEmulationWithCurveLimitedVsc() {
+        Network network = Network.create("acEmulationCurve", "code");
+        Substation s = network.newSubstation().setId("s").add();
+        for (String b : List.of("b1", "b2", "b3")) {
+            s.newVoltageLevel().setId("vl" + b.substring(1)).setNominalV(400).setTopologyKind(TopologyKind.BUS_BREAKER)
+                    .add().getBusBreakerView().newBus().setId(b).add();
+        }
+        network.getVoltageLevel("vl1").newGenerator().setId("g1").setBus("b1").setConnectableBus("b1")
+                .setMinP(0).setMaxP(1000).setTargetP(200).setLocalTargetV(400)
+                .newVoltageRegulation().withRegulating(true).withMode(RegulationMode.VOLTAGE).add()
+                .add();
+        network.getVoltageLevel("vl2").newLoad().setId("ld2").setBus("b2").setConnectableBus("b2").setP0(150).setQ0(60).add();
+        for (String id : List.of("l12a", "l12b")) {
+            network.newLine().setId(id).setBus1("b1").setConnectableBus1("b1").setBus2("b2").setConnectableBus2("b2")
+                    .setR(1).setX(20).add();
+        }
+        network.newLine().setId("l13").setBus1("b1").setConnectableBus1("b1").setBus2("b3").setConnectableBus2("b3")
+                .setR(1).setX(20).add();
+        network.getVoltageLevel("vl1").newVscConverterStation().setId("cs1").setBus("b1").setConnectableBus("b1")
+                .setLossFactor(1.1f).setLocalTargetQ(0)
+                .newVoltageRegulation().withRegulating(false).add()
+                .add();
+        VscConverterStation cs2 = network.getVoltageLevel("vl2").newVscConverterStation().setId("cs2").setBus("b2")
+                .setConnectableBus("b2").setLossFactor(1.1f).setLocalTargetV(410)
+                .newVoltageRegulation().withRegulating(true).withMode(RegulationMode.VOLTAGE).add()
+                .add();
+        cs2.newReactiveCapabilityCurve()
+                .beginPoint().setP(-100).setMinQ(-60).setMaxQ(60).endPoint()
+                .beginPoint().setP(0).setMinQ(-5).setMaxQ(5).endPoint()
+                .beginPoint().setP(100).setMinQ(-60).setMaxQ(60).endPoint()
+                .add();
+        network.newHvdcLine().setId("hvdc12").setConverterStationId1("cs1").setConverterStationId2("cs2")
+                .setNominalV(400).setR(1).setMaxP(200).setActivePowerSetpoint(60)
+                .setConvertersMode(HvdcLine.ConvertersMode.SIDE_1_RECTIFIER_SIDE_2_INVERTER)
+                .add()
+                .newExtension(HvdcAngleDroopActivePowerControlAdder.class).withP0(40).withDroop(180).withEnabled(true).add();
+        return network;
+    }
+
+    /**
+     * In the linear mode of AC emulation, the reactive limits of cs2 are evaluated at the active power the link
+     * actually carries. They used to be evaluated at the converter station target P: the setpoint-derived one in a
+     * load flow, and 0 after the security analysis has unfrozen the link, so the contingency of l13, which carries
+     * nothing, moved the voltage of b2 by 0.81 kV.
+     */
+    @Test
+    void testAcEmulationVscReactiveLimitsFollowTheFlow() {
+        LoadFlowParameters parameters = new LoadFlowParameters().setHvdcAcEmulation(true);
+
+        Network network = createAcEmulationWithCurveLimitedVsc();
+        assertTrue(runLoadFlow(network, parameters).isFullyConverged());
+        VscConverterStation cs2 = network.getVscConverterStation("cs2");
+        // cs2 is at its maximum reactive power: the curve at the active power it delivers
+        assertEquals(5 + 55 * -cs2.getTerminal().getP() / 100, -cs2.getTerminal().getQ(), 1e-6);
+
+        Network saNetwork = createAcEmulationWithCurveLimitedVsc();
+        SecurityAnalysisResult result = runSecurityAnalysis(saNetwork, List.of(new Contingency("l13", new BranchContingency("l13"))),
+                createNetworkMonitors(saNetwork), parameters);
+        assertEquals(result.getPreContingencyResult().getNetworkResult().getBusResult("b2").getV(),
+                getPostContingencyResult(result, "l13").getNetworkResult().getBusResult("b2").getV(), 1e-6);
+    }
 }
+
