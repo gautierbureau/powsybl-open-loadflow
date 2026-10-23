@@ -19,6 +19,7 @@ import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.se.equations.MeasuredQuantity;
 import com.powsybl.openloadflow.se.equations.MeasurementEquation;
 import com.powsybl.openloadflow.se.equations.MeasurementEquations;
+import com.powsybl.openloadflow.se.equations.VectorizedClosedBranchTerms;
 import com.powsybl.openloadflow.util.PerUnit;
 
 import java.util.ArrayList;
@@ -59,7 +60,18 @@ public class WlsStateEstimator {
 
     private final List<MeasurementEquation> equations = new ArrayList<>();
 
+    private final MeasurementEquations.ClosedBranchTerms closedBranchTerms;
+
     public WlsStateEstimator(LfNetwork network, List<Measurement> measurements) {
+        this(network, measurements, true);
+    }
+
+    /**
+     * @param vectorized whether branch flow and bus injection measurements read the flows of closed branches from
+     *                   an {@link com.powsybl.openloadflow.ac.equations.vector.AcNetworkVector} updated once per
+     *                   iteration, rather than each evaluating its own flow terms. Both give the same values.
+     */
+    public WlsStateEstimator(LfNetwork network, List<Measurement> measurements, boolean vectorized) {
         this.network = Objects.requireNonNull(network);
         this.measurements = List.copyOf(Objects.requireNonNull(measurements));
         int busCount = network.getBuses().size();
@@ -69,6 +81,9 @@ public class WlsStateEstimator {
         }
         this.state = new double[2 * busCount];
         this.stateVector = new StateVector(state);
+        this.closedBranchTerms = vectorized
+                ? new VectorizedClosedBranchTerms(network, variableSet, stateVector)
+                : MeasurementEquations.closedBranchTerms(variableSet);
         for (Measurement measurement : this.measurements) {
             equations.add(createEquation(measurement));
         }
@@ -77,10 +92,10 @@ public class WlsStateEstimator {
     private MeasurementEquation createEquation(Measurement measurement) {
         return switch (measurement.quantity()) {
             case BUS_V -> MeasurementEquations.busVoltage(measurement.bus(), variableSet, stateVector);
-            case BUS_P -> MeasurementEquations.busInjection(measurement.bus(), true, variableSet, stateVector);
-            case BUS_Q -> MeasurementEquations.busInjection(measurement.bus(), false, variableSet, stateVector);
+            case BUS_P -> MeasurementEquations.busInjection(measurement.bus(), true, variableSet, stateVector, closedBranchTerms);
+            case BUS_Q -> MeasurementEquations.busInjection(measurement.bus(), false, variableSet, stateVector, closedBranchTerms);
             case BRANCH_P, BRANCH_Q, BRANCH_I -> MeasurementEquations.branchFlow(measurement.branch(),
-                    measurement.quantity(), measurement.side(), variableSet, stateVector);
+                    measurement.quantity(), measurement.side(), stateVector, closedBranchTerms);
         };
     }
 
@@ -229,6 +244,8 @@ public class WlsStateEstimator {
     private double[] solveNormalEquations(int[] rowToColumn, int columnCount) {
         DenseMatrix gain = new DenseMatrix(columnCount, columnCount);
         double[] rhs = new double[columnCount];
+        JacobianRow row = new JacobianRow(rowToColumn,
+                equations.stream().mapToInt(e -> e.variables().size()).max().orElse(0));
 
         for (int i = 0; i < equations.size(); i++) {
             MeasurementEquation equation = equations.get(i);
@@ -236,18 +253,11 @@ public class WlsStateEstimator {
             double weight = measurement.weight();
             double residual = measurement.valuePu() - equation.eval();
 
-            int[] columns = new int[equation.variables().size()];
-            double[] derivatives = new double[equation.variables().size()];
-            int count = 0;
-            for (Variable<AcVariableType> variable : equation.variables()) {
-                int column = rowToColumn[variable.getRow()];
-                if (column < 0) {
-                    continue; // a fixed reference angle contributes no column
-                }
-                columns[count] = column;
-                derivatives[count] = equation.der(variable);
-                count++;
-            }
+            row.count = 0;
+            equation.derivatives(row);
+            int count = row.count;
+            int[] columns = row.columns;
+            double[] derivatives = row.values;
             for (int a = 0; a < count; a++) {
                 rhs[columns[a]] += weight * derivatives[a] * residual;
                 for (int b = 0; b < count; b++) {
@@ -260,5 +270,34 @@ public class WlsStateEstimator {
             lu.solve(rhs); // solved in place: rhs becomes dx
         }
         return rhs;
+    }
+
+    /**
+     * One Jacobian row, as Jacobian columns and derivatives, filled by {@link MeasurementEquation#derivatives} and
+     * reused from one measurement to the next.
+     */
+    private static final class JacobianRow implements MeasurementEquation.DerivativeConsumer {
+
+        private final int[] rowToColumn;
+        private final int[] columns;
+        private final double[] values;
+        private int count;
+
+        private JacobianRow(int[] rowToColumn, int capacity) {
+            this.rowToColumn = rowToColumn;
+            columns = new int[capacity];
+            values = new double[capacity];
+        }
+
+        @Override
+        public void accept(Variable<AcVariableType> variable, double value) {
+            int column = rowToColumn[variable.getRow()];
+            if (column < 0) {
+                return; // a fixed reference angle contributes no column
+            }
+            columns[count] = column;
+            values[count] = value;
+            count++;
+        }
     }
 }

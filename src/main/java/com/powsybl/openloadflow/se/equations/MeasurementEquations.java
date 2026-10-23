@@ -30,6 +30,7 @@ import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfShunt;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -46,6 +47,35 @@ import java.util.Set;
 public final class MeasurementEquations {
 
     private MeasurementEquations() {
+    }
+
+    /**
+     * Creates the flow term at one side of a branch connected at both sides, which both a branch flow meter and the
+     * injection meters at the ends of the branch are built from.
+     */
+    @FunctionalInterface
+    public interface ClosedBranchTerms {
+
+        SingleEquationTerm<AcVariableType, AcEquationType> create(LfBranch branch, MeasuredQuantity quantity, int side);
+    }
+
+    /**
+     * A term that adds all its derivatives to a Jacobian row in one call, rather than being asked for them one
+     * variable at a time.
+     */
+    interface RowTerm {
+
+        /**
+         * Adds the derivative by the k-th variable of the term to {@code row[positions[k]]}, for every k.
+         */
+        void addDerivatives(double[] row, int[] positions);
+    }
+
+    /**
+     * The analytic flow terms of the load flow, each evaluating its own flow.
+     */
+    public static ClosedBranchTerms closedBranchTerms(VariableSet<AcVariableType> variableSet) {
+        return (branch, quantity, side) -> closedBranchTerm(branch, quantity, side, variableSet);
     }
 
     /**
@@ -73,10 +103,19 @@ public final class MeasurementEquations {
     public static MeasurementEquation busInjection(LfBus bus, boolean active,
                                                    VariableSet<AcVariableType> variableSet,
                                                    StateVector stateVector) {
+        return busInjection(bus, active, variableSet, stateVector, closedBranchTerms(variableSet));
+    }
+
+    /**
+     * @param closedBranchTerms the flow terms of the branches connected at both sides
+     */
+    public static MeasurementEquation busInjection(LfBus bus, boolean active,
+                                                   VariableSet<AcVariableType> variableSet,
+                                                   StateVector stateVector, ClosedBranchTerms closedBranchTerms) {
         Objects.requireNonNull(bus);
         List<SingleEquationTerm<AcVariableType, AcEquationType>> terms = new ArrayList<>();
         for (LfBranch branch : bus.getBranches()) {
-            injectionTerm(branch, bus, active, variableSet).ifPresent(terms::add);
+            injectionTerm(branch, bus, active, variableSet, closedBranchTerms).ifPresent(terms::add);
         }
         for (LfShunt shunt : shunts(bus)) {
             terms.add(shuntTerm(shunt, bus, active, variableSet));
@@ -90,21 +129,31 @@ public final class MeasurementEquations {
     public static MeasurementEquation branchFlow(LfBranch branch, MeasuredQuantity quantity, int side,
                                                  VariableSet<AcVariableType> variableSet,
                                                  StateVector stateVector) {
+        return branchFlow(branch, quantity, side, stateVector, closedBranchTerms(variableSet));
+    }
+
+    /**
+     * @param side 1 or 2, resolved against the branch orientation
+     * @param closedBranchTerms the flow terms of the branches connected at both sides
+     */
+    public static MeasurementEquation branchFlow(LfBranch branch, MeasuredQuantity quantity, int side,
+                                                 StateVector stateVector, ClosedBranchTerms closedBranchTerms) {
         Objects.requireNonNull(branch);
         if (side != 1 && side != 2) {
             throw new IllegalArgumentException("Branch side must be 1 or 2, was " + side);
         }
-        return sum(List.of(closedBranchTerm(branch, quantity, side, variableSet)), stateVector);
+        return sum(List.of(closedBranchTerms.create(branch, quantity, side)), stateVector);
     }
 
     private static Optional<SingleEquationTerm<AcVariableType, AcEquationType>> injectionTerm(
-            LfBranch branch, LfBus bus, boolean active, VariableSet<AcVariableType> variableSet) {
+            LfBranch branch, LfBus bus, boolean active, VariableSet<AcVariableType> variableSet,
+            ClosedBranchTerms closedBranchTerms) {
         LfBus bus1 = branch.getBus1();
         LfBus bus2 = branch.getBus2();
         if (bus1 != null && bus2 != null) {
             int side = bus1.getNum() == bus.getNum() ? 1 : 2;
             MeasuredQuantity quantity = active ? MeasuredQuantity.BRANCH_P : MeasuredQuantity.BRANCH_Q;
-            return Optional.of(closedBranchTerm(branch, quantity, side, variableSet));
+            return Optional.of(closedBranchTerms.create(branch, quantity, side));
         }
         if (bus1 == null && bus2 != null && bus2.getNum() == bus.getNum()) {
             // side 1 open: only the connected side 2 half carries flow
@@ -168,10 +217,19 @@ public final class MeasurementEquations {
 
         private final List<SingleEquationTerm<AcVariableType, AcEquationType>> terms;
         private final Set<Variable<AcVariableType>> variables = new LinkedHashSet<>();
+        private final List<Variable<AcVariableType>> variableList;
+        // where each variable of each term sits in variableList, so a row is accumulated without any lookup
+        private final int[][] termPositions;
+        private final double[] derivatives;
 
         private SumEquation(List<SingleEquationTerm<AcVariableType, AcEquationType>> terms) {
             this.terms = terms;
             terms.forEach(t -> variables.addAll(t.getVariables()));
+            variableList = List.copyOf(variables);
+            termPositions = terms.stream()
+                    .map(t -> t.getVariables().stream().mapToInt(variableList::indexOf).toArray())
+                    .toArray(int[][]::new);
+            derivatives = new double[variableList.size()];
         }
 
         @Override
@@ -197,6 +255,25 @@ public final class MeasurementEquations {
                 }
             }
             return sum;
+        }
+
+        @Override
+        public void derivatives(DerivativeConsumer consumer) {
+            Arrays.fill(derivatives, 0);
+            for (int t = 0; t < terms.size(); t++) {
+                SingleEquationTerm<AcVariableType, AcEquationType> term = terms.get(t);
+                if (term instanceof RowTerm rowTerm) {
+                    rowTerm.addDerivatives(derivatives, termPositions[t]);
+                } else {
+                    List<Variable<AcVariableType>> termVariables = term.getVariables();
+                    for (int k = 0; k < termVariables.size(); k++) {
+                        derivatives[termPositions[t][k]] += term.der(termVariables.get(k));
+                    }
+                }
+            }
+            for (int k = 0; k < variableList.size(); k++) {
+                consumer.accept(variableList.get(k), derivatives[k]);
+            }
         }
     }
 }

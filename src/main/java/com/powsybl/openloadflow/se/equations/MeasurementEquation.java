@@ -28,4 +28,22 @@ public interface MeasurementEquation {
 
     /** Partial derivative of the prediction with respect to one state variable. */
     double der(Variable<AcVariableType> variable);
+
+    /** Receives the partial derivatives of one equation, one variable at a time. */
+    @FunctionalInterface
+    interface DerivativeConsumer {
+
+        void accept(Variable<AcVariableType> variable, double value);
+    }
+
+    /**
+     * Passes every variable of {@link #variables()} to the consumer once, with its partial derivative: the whole
+     * Jacobian row in one call. The result is the same as calling {@link #der(Variable)} for each variable, which is
+     * what this default does; an equation summing several terms overrides it to accumulate them in a single pass.
+     */
+    default void derivatives(DerivativeConsumer consumer) {
+        for (Variable<AcVariableType> variable : variables()) {
+            consumer.accept(variable, der(variable));
+        }
+    }
 }
