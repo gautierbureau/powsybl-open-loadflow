@@ -29,6 +29,7 @@ import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfShunt;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -200,10 +201,39 @@ public final class VectorizedMeasurementEquations {
         return 0;
     }
 
+    /**
+     * The four derivatives of one branch side's flow, by v1, v2, ph1 and ph2 in that order, written to {@code out}.
+     */
+    private void ders(BranchSide s, double[] out) {
+        int b = s.num();
+        boolean side1 = s.side() == 1;
+        switch (s.quantity()) {
+            case BRANCH_P -> {
+                out[0] = side1 ? branchVector.dp1dv1[b] : branchVector.dp2dv1[b];
+                out[1] = side1 ? branchVector.dp1dv2[b] : branchVector.dp2dv2[b];
+                out[2] = side1 ? branchVector.dp1dph1[b] : branchVector.dp2dph1[b];
+                out[3] = side1 ? branchVector.dp1dph2[b] : branchVector.dp2dph2[b];
+            }
+            case BRANCH_Q -> {
+                out[0] = side1 ? branchVector.dq1dv1[b] : branchVector.dq2dv1[b];
+                out[1] = side1 ? branchVector.dq1dv2[b] : branchVector.dq2dv2[b];
+                out[2] = side1 ? branchVector.dq1dph1[b] : branchVector.dq2dph1[b];
+                out[3] = side1 ? branchVector.dq1dph2[b] : branchVector.dq2dph2[b];
+            }
+            default -> {
+                out[0] = side1 ? networkVector.di1dv1(b) : networkVector.di2dv1(b);
+                out[1] = side1 ? networkVector.di1dv2(b) : networkVector.di2dv2(b);
+                out[2] = side1 ? networkVector.di1dph1(b) : networkVector.di2dph1(b);
+                out[3] = side1 ? networkVector.di1dph2(b) : networkVector.di2dph2(b);
+            }
+        }
+    }
+
     private final class FlowEquation implements MeasurementEquation {
 
         private final BranchSide branchSide;
         private final List<Variable<AcVariableType>> variables;
+        private final double[] buffer = new double[4];
 
         private FlowEquation(BranchSide branchSide) {
             this.branchSide = branchSide;
@@ -224,6 +254,14 @@ public final class VectorizedMeasurementEquations {
         public double der(Variable<AcVariableType> variable) {
             return VectorizedMeasurementEquations.this.der(branchSide, variable);
         }
+
+        @Override
+        public void derivatives(DerivativeConsumer consumer) {
+            ders(branchSide, buffer);
+            for (int k = 0; k < 4; k++) {
+                consumer.accept(variables.get(k), buffer[k]);
+            }
+        }
     }
 
     private final class InjectionEquation implements MeasurementEquation {
@@ -231,6 +269,13 @@ public final class VectorizedMeasurementEquations {
         private final List<BranchSide> closed;
         private final List<SingleEquationTerm<AcVariableType, AcEquationType>> scalarTerms;
         private final Set<Variable<AcVariableType>> variables = new LinkedHashSet<>();
+        private final List<Variable<AcVariableType>> variableList;
+        // positions in variableList of the v1, v2, ph1 and ph2 of each closed branch side, then of each scalar term's
+        // variables, so that a whole row is accumulated in one pass without looking any variable up
+        private final int[][] closedVariableIndices;
+        private final int[][] scalarVariableIndices;
+        private final double[] derivativeBuffer;
+        private final double[] branchBuffer = new double[4];
 
         private InjectionEquation(List<BranchSide> closed, List<SingleEquationTerm<AcVariableType, AcEquationType>> scalarTerms) {
             this.closed = closed;
@@ -242,6 +287,19 @@ public final class VectorizedMeasurementEquations {
                 variables.add(s.ph2());
             }
             scalarTerms.forEach(t -> variables.addAll(t.getVariables()));
+            variableList = List.copyOf(variables);
+            closedVariableIndices = new int[closed.size()][];
+            for (int k = 0; k < closed.size(); k++) {
+                BranchSide s = closed.get(k);
+                closedVariableIndices[k] = new int[] {variableList.indexOf(s.v1()), variableList.indexOf(s.v2()),
+                    variableList.indexOf(s.ph1()), variableList.indexOf(s.ph2())};
+            }
+            scalarVariableIndices = new int[scalarTerms.size()][];
+            for (int t = 0; t < scalarTerms.size(); t++) {
+                List<Variable<AcVariableType>> termVariables = scalarTerms.get(t).getVariables();
+                scalarVariableIndices[t] = termVariables.stream().mapToInt(variableList::indexOf).toArray();
+            }
+            derivativeBuffer = new double[variableList.size()];
         }
 
         @Override
@@ -273,6 +331,28 @@ public final class VectorizedMeasurementEquations {
                 }
             }
             return sum;
+        }
+
+        @Override
+        public void derivatives(DerivativeConsumer consumer) {
+            Arrays.fill(derivativeBuffer, 0);
+            for (int k = 0; k < closed.size(); k++) {
+                ders(closed.get(k), branchBuffer);
+                int[] indices = closedVariableIndices[k];
+                for (int j = 0; j < 4; j++) {
+                    derivativeBuffer[indices[j]] += branchBuffer[j];
+                }
+            }
+            for (int t = 0; t < scalarTerms.size(); t++) {
+                SingleEquationTerm<AcVariableType, AcEquationType> term = scalarTerms.get(t);
+                List<Variable<AcVariableType>> termVariables = term.getVariables();
+                for (int j = 0; j < termVariables.size(); j++) {
+                    derivativeBuffer[scalarVariableIndices[t][j]] += term.der(termVariables.get(j));
+                }
+            }
+            for (int k = 0; k < variableList.size(); k++) {
+                consumer.accept(variableList.get(k), derivativeBuffer[k]);
+            }
         }
     }
 }

@@ -251,6 +251,7 @@ public class WlsStateEstimator {
     private double[] solveNormalEquations(int[] rowToColumn, int columnCount) {
         DenseMatrix gain = new DenseMatrix(columnCount, columnCount);
         double[] rhs = new double[columnCount];
+        JacobianRow row = new JacobianRow(rowToColumn);
 
         for (int i = 0; i < equations.size(); i++) {
             MeasurementEquation equation = equations.get(i);
@@ -258,18 +259,11 @@ public class WlsStateEstimator {
             double weight = measurement.weight();
             double residual = measurement.valuePu() - equation.eval();
 
-            int[] columns = new int[equation.variables().size()];
-            double[] derivatives = new double[equation.variables().size()];
-            int count = 0;
-            for (Variable<AcVariableType> variable : equation.variables()) {
-                int column = rowToColumn[variable.getRow()];
-                if (column < 0) {
-                    continue; // a fixed reference angle contributes no column
-                }
-                columns[count] = column;
-                derivatives[count] = equation.der(variable);
-                count++;
-            }
+            row.reset(equation.variables().size());
+            equation.derivatives(row);
+            int count = row.count;
+            int[] columns = row.columns;
+            double[] derivatives = row.values;
             for (int a = 0; a < count; a++) {
                 rhs[columns[a]] += weight * derivatives[a] * residual;
                 for (int b = 0; b < count; b++) {
@@ -282,5 +276,40 @@ public class WlsStateEstimator {
             lu.solve(rhs); // solved in place: rhs becomes dx
         }
         return rhs;
+    }
+
+    /**
+     * One Jacobian row, as Jacobian columns and derivatives, filled by {@link MeasurementEquation#derivatives} and
+     * reused from one measurement to the next.
+     */
+    private static final class JacobianRow implements MeasurementEquation.DerivativeConsumer {
+
+        private final int[] rowToColumn;
+        private int[] columns = new int[8];
+        private double[] values = new double[8];
+        private int count;
+
+        private JacobianRow(int[] rowToColumn) {
+            this.rowToColumn = rowToColumn;
+        }
+
+        private void reset(int capacity) {
+            if (columns.length < capacity) {
+                columns = new int[capacity];
+                values = new double[capacity];
+            }
+            count = 0;
+        }
+
+        @Override
+        public void accept(Variable<AcVariableType> variable, double value) {
+            int column = rowToColumn[variable.getRow()];
+            if (column < 0) {
+                return; // a fixed reference angle contributes no column
+            }
+            columns[count] = column;
+            values[count] = value;
+            count++;
+        }
     }
 }

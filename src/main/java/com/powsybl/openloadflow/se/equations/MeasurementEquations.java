@@ -30,6 +30,7 @@ import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfShunt;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -168,10 +169,24 @@ public final class MeasurementEquations {
 
         private final List<SingleEquationTerm<AcVariableType, AcEquationType>> terms;
         private final Set<Variable<AcVariableType>> variables = new LinkedHashSet<>();
+        private final List<Variable<AcVariableType>> variableList;
+        // for each term, the position in variableList of each of its variables
+        private final int[][] termVariableIndices;
+        private final double[] derivativeBuffer;
 
         private SumEquation(List<SingleEquationTerm<AcVariableType, AcEquationType>> terms) {
             this.terms = terms;
             terms.forEach(t -> variables.addAll(t.getVariables()));
+            variableList = List.copyOf(variables);
+            termVariableIndices = new int[terms.size()][];
+            for (int t = 0; t < terms.size(); t++) {
+                List<Variable<AcVariableType>> termVariables = terms.get(t).getVariables();
+                termVariableIndices[t] = new int[termVariables.size()];
+                for (int k = 0; k < termVariables.size(); k++) {
+                    termVariableIndices[t][k] = variableList.indexOf(termVariables.get(k));
+                }
+            }
+            derivativeBuffer = new double[variableList.size()];
         }
 
         @Override
@@ -197,6 +212,21 @@ public final class MeasurementEquations {
                 }
             }
             return sum;
+        }
+
+        @Override
+        public void derivatives(DerivativeConsumer consumer) {
+            Arrays.fill(derivativeBuffer, 0);
+            for (int t = 0; t < terms.size(); t++) {
+                SingleEquationTerm<AcVariableType, AcEquationType> term = terms.get(t);
+                List<Variable<AcVariableType>> termVariables = term.getVariables();
+                for (int k = 0; k < termVariables.size(); k++) {
+                    derivativeBuffer[termVariableIndices[t][k]] += term.der(termVariables.get(k));
+                }
+            }
+            for (int k = 0; k < variableList.size(); k++) {
+                consumer.accept(variableList.get(k), derivativeBuffer[k]);
+            }
         }
     }
 }

@@ -28,8 +28,10 @@ import com.powsybl.openloadflow.se.WlsStateEstimator;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -95,8 +97,23 @@ class VectorizedMeasurementEquationsTest {
                     assertEquals(expected, vector.der(variable), EPS * Math.max(1, Math.abs(expected)),
                             "derivative of equation " + k + " by " + variable);
                 }
+                assertBulkDerivativesMatch(scalar, scalar, "scalar equation " + k);
+                assertBulkDerivativesMatch(scalar, vector, "vectorized equation " + k);
             }
         }
+    }
+
+    /**
+     * The bulk call must pass every variable exactly once, with the derivative {@code der} gives for it.
+     */
+    private static void assertBulkDerivativesMatch(MeasurementEquation reference, MeasurementEquation equation, String what) {
+        Map<Variable<AcVariableType>, Double> bulk = new LinkedHashMap<>();
+        equation.derivatives((variable, value) -> assertNull(bulk.put(variable, value), what + " passed " + variable + " twice"));
+        assertEquals(new LinkedHashSet<>(reference.variables()), bulk.keySet(), "variables passed by " + what);
+        bulk.forEach((variable, value) -> {
+            double expected = reference.der(variable);
+            assertEquals(expected, value, EPS * Math.max(1, Math.abs(expected)), "bulk derivative of " + what + " by " + variable);
+        });
     }
 
     @Test
