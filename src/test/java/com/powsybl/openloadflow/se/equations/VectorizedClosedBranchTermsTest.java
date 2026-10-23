@@ -37,12 +37,12 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * The vectorized measurement equations must give the same values and derivatives as the scalar ones, so that the
- * estimator can use either.
+ * Measurement equations built on the vectorized closed branch terms must give the same values and derivatives as
+ * those built on the analytic terms, so that the estimator can use either.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-class VectorizedMeasurementEquationsTest {
+class VectorizedClosedBranchTermsTest {
 
     private static final double EPS = 1e-10;
 
@@ -56,23 +56,21 @@ class VectorizedMeasurementEquationsTest {
             variableSet.getVariable(bus.getNum(), AcVariableType.BUS_PHI).setRow(busCount + bus.getNum());
         }
         StateVector stateVector = new StateVector(new double[2 * busCount]);
-        VectorizedMeasurementEquations vectorized = new VectorizedMeasurementEquations(network, variableSet, stateVector);
+        VectorizedClosedBranchTerms vectorized = new VectorizedClosedBranchTerms(network, variableSet, stateVector);
 
         List<MeasurementEquation> scalarEquations = new ArrayList<>();
         List<MeasurementEquation> vectorEquations = new ArrayList<>();
         for (LfBus bus : network.getBuses()) {
-            scalarEquations.add(MeasurementEquations.busVoltage(bus, variableSet, stateVector));
-            vectorEquations.add(vectorized.busVoltage(bus));
             for (boolean active : new boolean[] {true, false}) {
                 scalarEquations.add(MeasurementEquations.busInjection(bus, active, variableSet, stateVector));
-                vectorEquations.add(vectorized.busInjection(bus, active));
+                vectorEquations.add(MeasurementEquations.busInjection(bus, active, variableSet, stateVector, vectorized));
             }
         }
         for (LfBranch branch : network.getBranches()) {
             for (MeasuredQuantity quantity : List.of(MeasuredQuantity.BRANCH_P, MeasuredQuantity.BRANCH_Q, MeasuredQuantity.BRANCH_I)) {
                 for (int side = 1; side <= 2; side++) {
                     scalarEquations.add(MeasurementEquations.branchFlow(branch, quantity, side, variableSet, stateVector));
-                    vectorEquations.add(vectorized.branchFlow(branch, quantity, side));
+                    vectorEquations.add(MeasurementEquations.branchFlow(branch, quantity, side, stateVector, vectorized));
                 }
             }
         }
