@@ -94,6 +94,11 @@ public class LfAreaImpl extends AbstractElement implements LfArea {
             return branch;
         }
 
+        /** The side of the branch whose active power the boundary reads. */
+        public TwoSides getSide() {
+            return side;
+        }
+
         @Override
         public double getP() {
             if (branch.isDisabled()) {
