@@ -19,6 +19,7 @@ import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.se.equations.MeasuredQuantity;
 import com.powsybl.openloadflow.se.equations.MeasurementEquation;
 import com.powsybl.openloadflow.se.equations.MeasurementEquations;
+import com.powsybl.openloadflow.se.equations.VectorizedMeasurementEquations;
 import com.powsybl.openloadflow.util.PerUnit;
 
 import java.util.ArrayList;
@@ -59,7 +60,18 @@ public class WlsStateEstimator {
 
     private final List<MeasurementEquation> equations = new ArrayList<>();
 
+    private final VectorizedMeasurementEquations vectorizedEquations;
+
     public WlsStateEstimator(LfNetwork network, List<Measurement> measurements) {
+        this(network, measurements, true);
+    }
+
+    /**
+     * @param vectorized whether branch flow and bus injection measurements read the flows of closed branches from
+     *                   an {@link com.powsybl.openloadflow.ac.equations.vector.AcNetworkVector} updated once per
+     *                   iteration, rather than each evaluating its own flow terms. Both give the same values.
+     */
+    public WlsStateEstimator(LfNetwork network, List<Measurement> measurements, boolean vectorized) {
         this.network = Objects.requireNonNull(network);
         this.measurements = List.copyOf(Objects.requireNonNull(measurements));
         int busCount = network.getBuses().size();
@@ -69,12 +81,22 @@ public class WlsStateEstimator {
         }
         this.state = new double[2 * busCount];
         this.stateVector = new StateVector(state);
+        this.vectorizedEquations = vectorized ? new VectorizedMeasurementEquations(network, variableSet, stateVector) : null;
         for (Measurement measurement : this.measurements) {
             equations.add(createEquation(measurement));
         }
     }
 
     private MeasurementEquation createEquation(Measurement measurement) {
+        if (vectorizedEquations != null) {
+            return switch (measurement.quantity()) {
+                case BUS_V -> vectorizedEquations.busVoltage(measurement.bus());
+                case BUS_P -> vectorizedEquations.busInjection(measurement.bus(), true);
+                case BUS_Q -> vectorizedEquations.busInjection(measurement.bus(), false);
+                case BRANCH_P, BRANCH_Q, BRANCH_I -> vectorizedEquations.branchFlow(measurement.branch(),
+                        measurement.quantity(), measurement.side());
+            };
+        }
         return switch (measurement.quantity()) {
             case BUS_V -> MeasurementEquations.busVoltage(measurement.bus(), variableSet, stateVector);
             case BUS_P -> MeasurementEquations.busInjection(measurement.bus(), true, variableSet, stateVector);
