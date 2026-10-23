@@ -103,11 +103,11 @@ class AcNetworkVectorWithoutEquationSystemTest {
                     branchVector.q2[num], branchVector.dq2dv1[num], branchVector.dq2dv2[num],
                     branchVector.dq2dph1[num], branchVector.dq2dph2[num], bus1, bus2);
             assertFlow(new ClosedBranchSide1CurrentMagnitudeEquationTerm(branch, bus1, bus2, variableSet, false, false),
-                    branchVector.i1[num], branchVector.di1dv1[num], branchVector.di1dv2[num],
-                    branchVector.di1dph1[num], branchVector.di1dph2[num], bus1, bus2);
+                    branchVector.i1[num], networkVector.di1dv1(num), networkVector.di1dv2(num),
+                    networkVector.di1dph1(num), networkVector.di1dph2(num), bus1, bus2);
             assertFlow(new ClosedBranchSide2CurrentMagnitudeEquationTerm(branch, bus1, bus2, variableSet, false, false),
-                    branchVector.i2[num], branchVector.di2dv1[num], branchVector.di2dv2[num],
-                    branchVector.di2dph1[num], branchVector.di2dph2[num], bus1, bus2);
+                    branchVector.i2[num], networkVector.di2dv1(num), networkVector.di2dv2(num),
+                    networkVector.di2dph1(num), networkVector.di2dph2(num), bus1, bus2);
         }
         assertEquals(network.getBranches().size(), closedCount, "every IEEE 14 branch is closed");
     }

@@ -217,7 +217,6 @@ public class AcNetworkVector extends AbstractLfNetworkListener
 
                     // i1
                     branchVector.i1[branchNum] = FastMath.hypot(branchVector.p1[branchNum], branchVector.q1[branchNum]) / v1;
-                    updateI1Derivatives(branchNum, v1);
 
                     // p2
                     updateP2AndDerivatives(branchNum, v1, r1, v2, sinTheta2, cosTheta2);
@@ -227,44 +226,75 @@ public class AcNetworkVector extends AbstractLfNetworkListener
 
                     // i2
                     branchVector.i2[branchNum] = FastMath.hypot(branchVector.p2[branchNum], branchVector.q2[branchNum]) / v2;
-                    updateI2Derivatives(branchNum, v2);
                 }
             }
         }
     }
 
-    /**
-     * Derivative of a current magnitude i = sqrt(p² + q²) / v from the flow derivatives already computed:
-     * di/dx = (p dp/dx + q dq/dx) / (v² i), minus i / v when x is v itself.
-     * Like the scalar current magnitude terms, it is undefined where the current is zero, for instance from a flat
-     * start on a branch without shunt admittance.
-     */
-    private static double di(double p, double q, double v, double i, double dp, double dq) {
-        return (p * dp + q * dq) / (v * v * i);
+    // Current magnitude derivatives, computed on demand from the flows and flow derivatives of the last update rather
+    // than stored, so that the load flow, which never reads them, does not pay for them at each state update.
+    // With i = sqrt(p² + q²) / v: di/dx = (p dp/dx + q dq/dx) / (v² i), minus i / v when x is v itself.
+    // Like the scalar current magnitude terms, they are undefined where the current is zero, for instance from a flat
+    // start on a branch without shunt admittance. Valid only for a branch where AcBranchVector#isClosed is true.
+
+    private double di1(int branchNum, double dp1, double dq1) {
+        double v1 = busVector.v[branchVector.bus1Num[branchNum]];
+        return (branchVector.p1[branchNum] * dp1 + branchVector.q1[branchNum] * dq1) / (v1 * v1 * branchVector.i1[branchNum]);
     }
 
-    private void updateI1Derivatives(int branchNum, double v1) {
-        double p = branchVector.p1[branchNum];
-        double q = branchVector.q1[branchNum];
-        double i = branchVector.i1[branchNum];
-        branchVector.di1dv1[branchNum] = di(p, q, v1, i, branchVector.dp1dv1[branchNum], branchVector.dq1dv1[branchNum]) - i / v1;
-        branchVector.di1dv2[branchNum] = di(p, q, v1, i, branchVector.dp1dv2[branchNum], branchVector.dq1dv2[branchNum]);
-        branchVector.di1dph1[branchNum] = di(p, q, v1, i, branchVector.dp1dph1[branchNum], branchVector.dq1dph1[branchNum]);
-        branchVector.di1dph2[branchNum] = di(p, q, v1, i, branchVector.dp1dph2[branchNum], branchVector.dq1dph2[branchNum]);
-        branchVector.di1da1[branchNum] = di(p, q, v1, i, branchVector.dp1da1[branchNum], branchVector.dq1da1[branchNum]);
-        branchVector.di1dr1[branchNum] = di(p, q, v1, i, branchVector.dp1dr1[branchNum], branchVector.dq1dr1[branchNum]);
+    private double di2(int branchNum, double dp2, double dq2) {
+        double v2 = busVector.v[branchVector.bus2Num[branchNum]];
+        return (branchVector.p2[branchNum] * dp2 + branchVector.q2[branchNum] * dq2) / (v2 * v2 * branchVector.i2[branchNum]);
     }
 
-    private void updateI2Derivatives(int branchNum, double v2) {
-        double p = branchVector.p2[branchNum];
-        double q = branchVector.q2[branchNum];
-        double i = branchVector.i2[branchNum];
-        branchVector.di2dv1[branchNum] = di(p, q, v2, i, branchVector.dp2dv1[branchNum], branchVector.dq2dv1[branchNum]);
-        branchVector.di2dv2[branchNum] = di(p, q, v2, i, branchVector.dp2dv2[branchNum], branchVector.dq2dv2[branchNum]) - i / v2;
-        branchVector.di2dph1[branchNum] = di(p, q, v2, i, branchVector.dp2dph1[branchNum], branchVector.dq2dph1[branchNum]);
-        branchVector.di2dph2[branchNum] = di(p, q, v2, i, branchVector.dp2dph2[branchNum], branchVector.dq2dph2[branchNum]);
-        branchVector.di2da1[branchNum] = di(p, q, v2, i, branchVector.dp2da1[branchNum], branchVector.dq2da1[branchNum]);
-        branchVector.di2dr1[branchNum] = di(p, q, v2, i, branchVector.dp2dr1[branchNum], branchVector.dq2dr1[branchNum]);
+    public double di1dv1(int branchNum) {
+        double v1 = busVector.v[branchVector.bus1Num[branchNum]];
+        return di1(branchNum, branchVector.dp1dv1[branchNum], branchVector.dq1dv1[branchNum]) - branchVector.i1[branchNum] / v1;
+    }
+
+    public double di1dv2(int branchNum) {
+        return di1(branchNum, branchVector.dp1dv2[branchNum], branchVector.dq1dv2[branchNum]);
+    }
+
+    public double di1dph1(int branchNum) {
+        return di1(branchNum, branchVector.dp1dph1[branchNum], branchVector.dq1dph1[branchNum]);
+    }
+
+    public double di1dph2(int branchNum) {
+        return di1(branchNum, branchVector.dp1dph2[branchNum], branchVector.dq1dph2[branchNum]);
+    }
+
+    public double di1da1(int branchNum) {
+        return di1(branchNum, branchVector.dp1da1[branchNum], branchVector.dq1da1[branchNum]);
+    }
+
+    public double di1dr1(int branchNum) {
+        return di1(branchNum, branchVector.dp1dr1[branchNum], branchVector.dq1dr1[branchNum]);
+    }
+
+    public double di2dv1(int branchNum) {
+        return di2(branchNum, branchVector.dp2dv1[branchNum], branchVector.dq2dv1[branchNum]);
+    }
+
+    public double di2dv2(int branchNum) {
+        double v2 = busVector.v[branchVector.bus2Num[branchNum]];
+        return di2(branchNum, branchVector.dp2dv2[branchNum], branchVector.dq2dv2[branchNum]) - branchVector.i2[branchNum] / v2;
+    }
+
+    public double di2dph1(int branchNum) {
+        return di2(branchNum, branchVector.dp2dph1[branchNum], branchVector.dq2dph1[branchNum]);
+    }
+
+    public double di2dph2(int branchNum) {
+        return di2(branchNum, branchVector.dp2dph2[branchNum], branchVector.dq2dph2[branchNum]);
+    }
+
+    public double di2da1(int branchNum) {
+        return di2(branchNum, branchVector.dp2da1[branchNum], branchVector.dq2da1[branchNum]);
+    }
+
+    public double di2dr1(int branchNum) {
+        return di2(branchNum, branchVector.dp2dr1[branchNum], branchVector.dq2dr1[branchNum]);
     }
 
     public void updateNetworkState() {

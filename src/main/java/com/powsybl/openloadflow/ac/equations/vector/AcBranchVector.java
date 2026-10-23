@@ -95,20 +95,6 @@ public class AcBranchVector {
     public final double[] dq2da1;
     public final double[] dq2dr1;
 
-    public final double[] di1dv1;
-    public final double[] di1dv2;
-    public final double[] di1dph1;
-    public final double[] di1dph2;
-    public final double[] di1da1;
-    public final double[] di1dr1;
-
-    public final double[] di2dv1;
-    public final double[] di2dv2;
-    public final double[] di2dph1;
-    public final double[] di2dph2;
-    public final double[] di2da1;
-    public final double[] di2dr1;
-
     public AcBranchVector(List<LfBranch> branches, AcEquationSystemCreationParameters creationParameters) {
         int size = branches.size();
         bus1Num = new int[size];
@@ -174,20 +160,6 @@ public class AcBranchVector {
         dq2dph2 = new double[size];
         dq2da1 = new double[size];
         dq2dr1 = new double[size];
-
-        di1dv1 = new double[size];
-        di1dv2 = new double[size];
-        di1dph1 = new double[size];
-        di1dph2 = new double[size];
-        di1da1 = new double[size];
-        di1dr1 = new double[size];
-
-        di2dv1 = new double[size];
-        di2dv2 = new double[size];
-        di2dph1 = new double[size];
-        di2dph2 = new double[size];
-        di2da1 = new double[size];
-        di2dr1 = new double[size];
 
         for (int i = 0; i < branches.size(); i++) {
             LfBranch branch = branches.get(i);
