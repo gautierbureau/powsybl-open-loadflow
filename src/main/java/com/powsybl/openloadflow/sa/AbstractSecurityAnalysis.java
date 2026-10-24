@@ -28,6 +28,7 @@ import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.equations.Quantity;
+import com.powsybl.openloadflow.graph.GraphConnectivity;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.lf.AbstractLoadFlowParameters;
 import com.powsybl.openloadflow.lf.LoadFlowContext;
@@ -986,6 +987,19 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         networkState.restore();
     }
 
+    /**
+     * The connectivity whose changes processContingency confines to a contingency and to each of its operator strategies,
+     * null when no simulation changes it for good: only an automation system does (AutomationSystemOuterLoop), on a
+     * connectivity that nests temporary changes.
+     */
+    private static GraphConnectivity<LfBus, LfBranch> connectivityToConfine(LfNetwork network) {
+        if (network.getOverloadManagementSystems().isEmpty()) {
+            return null;
+        }
+        GraphConnectivity<LfBus, LfBranch> connectivity = network.getConnectivity();
+        return connectivity.supportTemporaryChangesNesting() ? connectivity : null;
+    }
+
     private void processContingency(LfNetwork lfNetwork, SecurityAnalysisParameters securityAnalysisParameters,
                                     List<LimitScaling> limitScalings, ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution,
                                     ReportNode networkReportNode, LfContingency lfContingency, P p, NetworkState networkState,
@@ -1001,6 +1015,14 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         ContingencyLoadFlowParameters contingencyLoadFlowParameters = propagatedContingency.getContingency().getExtension(ContingencyLoadFlowParameters.class);
         if (contingencyLoadFlowParameters != null) {
             applySpecificContingencyParameters(context.getParameters(), contingencyLoadFlowParameters, loadFlowParameters, contingencyOpenLoadFlowParameters);
+        }
+
+        // An automation system switches branches in the connectivity for good (AutomationSystemOuterLoop), and restoring the
+        // network state does not undo that: confine its switches to this contingency, the next one starts from the
+        // pre-contingency connectivity
+        GraphConnectivity<LfBus, LfBranch> confinedConnectivity = connectivityToConfine(lfNetwork);
+        if (confinedConnectivity != null) {
+            confinedConnectivity.startTemporaryChanges();
         }
 
         long tApply = System.nanoTime();
@@ -1081,6 +1103,10 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 for (Indexed<OperatorStrategy> operatorStrategy : operatorStrategiesForThisContingency) {
                     ReportNode osSimReportNode = Reports.createOperatorStrategySimulation(postContSimReportNode, operatorStrategy.value().getId());
                     lfNetwork.setReportNode(osSimReportNode);
+                    // and to each operator strategy: the next one starts from the post-contingency connectivity
+                    if (confinedConnectivity != null) {
+                        confinedConnectivity.startTemporaryChanges();
+                    }
                     runActionSimulation(lfNetwork, context,
                         operatorStrategy.value(), preContingencyLimitViolationManager,
                         securityAnalysisParameters, lfActionById,
@@ -1091,8 +1117,14 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                             operatorStrategyResults.add(result);
                             postContingencyNetworkState.restore();
                         });
+                    if (confinedConnectivity != null) {
+                        confinedConnectivity.undoTemporaryChanges();
+                    }
                 }
             }
+        }
+        if (confinedConnectivity != null) {
+            confinedConnectivity.undoTemporaryChanges();
         }
         if (contingencyIt.hasNext()) {
             // restore base state
