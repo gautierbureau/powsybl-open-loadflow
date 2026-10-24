@@ -5395,4 +5395,77 @@ class OpenSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest {
         assertEquals(1, changedPhaseTapChanger.initialTap());
         assertEquals(0, changedPhaseTapChanger.finalTap());
     }
+
+    private static void assertSameNetworkResult(NetworkResult expected, NetworkResult actual, String id) {
+        assertEquals(expected.getBranchResults().stream().map(BranchResult::getBranchId).toList(),
+                actual.getBranchResults().stream().map(BranchResult::getBranchId).toList(), id);
+        for (BranchResult branchResult : expected.getBranchResults()) {
+            assertEquals(branchResult.getI1(), actual.getBranchResult(branchResult.getBranchId()).getI1(), 0, id);
+        }
+        for (BusResult busResult : expected.getBusResults()) {
+            assertEquals(busResult.getV(), actual.getBusResult(busResult.getBusId()).getV(), 0, id);
+        }
+    }
+
+    /**
+     * An automation system's switch changes the connectivity for good (AutomationSystemOuterLoop), and restoring the
+     * pre-contingency network state does not undo that. The outages of tr2, l34b and l3b4 each overload l34, whose system
+     * opens l33p: in one run, the second and the third found l33p already missing from the connectivity, could not open
+     * it and reached the outer loop iteration limit. Each must give what it gives alone.
+     */
+    @Test
+    void testAutomationSystemSwitchesAreConfinedToTheirContingency() {
+        LoadFlowParameters lfParameters = new LoadFlowParameters();
+        OpenLoadFlowParameters.create(lfParameters).setSimulateAutomationSystems(true);
+        SecurityAnalysisParameters saParameters = new SecurityAnalysisParameters().setLoadFlowParameters(lfParameters);
+        Network network = AutomationSystemNetworkFactory.createMeshedWithBranchTripping();
+        List<StateMonitor> monitors = createNetworkMonitors(network);
+        List<Contingency> contingencies = Stream.of("tr2", "l34b", "l3b4", "l12")
+                .map(id -> new Contingency(id, new BranchContingency(id)))
+                .toList();
+        SecurityAnalysisResult together = runSecurityAnalysis(network, contingencies, monitors, saParameters);
+        for (Contingency contingency : contingencies) {
+            SecurityAnalysisResult alone = runSecurityAnalysis(AutomationSystemNetworkFactory.createMeshedWithBranchTripping(),
+                    List.of(contingency), monitors, saParameters);
+            PostContingencyResult expected = getPostContingencyResult(alone, contingency.getId());
+            PostContingencyResult actual = getPostContingencyResult(together, contingency.getId());
+            assertEquals(PostContingencyComputationStatus.CONVERGED, actual.getStatus(), contingency.getId());
+            assertSameNetworkResult(expected.getNetworkResult(), actual.getNetworkResult(), contingency.getId());
+        }
+        // the system opened l33p after the outages of tr2, l34b and l3b4, not after l12's
+        for (String id : List.of("tr2", "l34b", "l3b4")) {
+            assertNull(getPostContingencyResult(together, id).getNetworkResult().getBranchResult("l33p"), id);
+        }
+        assertNotNull(getPostContingencyResult(together, "l12").getNetworkResult().getBranchResult("l33p"));
+    }
+
+    /**
+     * As testAutomationSystemSwitchesAreConfinedToTheirContingency, between the operator strategies of a contingency: after
+     * l12's outage, opening tr2 and opening l34b each overload l34, whose system opens l33p.
+     */
+    @Test
+    void testAutomationSystemSwitchesAreConfinedToTheirOperatorStrategy() {
+        LoadFlowParameters lfParameters = new LoadFlowParameters();
+        OpenLoadFlowParameters.create(lfParameters).setSimulateAutomationSystems(true);
+        SecurityAnalysisParameters saParameters = new SecurityAnalysisParameters().setLoadFlowParameters(lfParameters);
+        Network network = AutomationSystemNetworkFactory.createMeshedWithBranchTripping();
+        List<StateMonitor> monitors = createNetworkMonitors(network);
+        List<Contingency> contingencies = List.of(new Contingency("l12", new BranchContingency("l12")));
+        List<Action> actions = List.of(new TerminalsConnectionAction("open tr2", "tr2", true),
+                new TerminalsConnectionAction("open l34b", "l34b", true));
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("strategy tr2", ContingencyContext.specificContingency("l12"), new TrueCondition(), List.of("open tr2")),
+                new OperatorStrategy("strategy l34b", ContingencyContext.specificContingency("l12"), new TrueCondition(), List.of("open l34b")));
+        SecurityAnalysisResult together = runSecurityAnalysis(network, contingencies, monitors, saParameters, operatorStrategies,
+                actions, ReportNode.NO_OP);
+        for (OperatorStrategy operatorStrategy : operatorStrategies) {
+            SecurityAnalysisResult alone = runSecurityAnalysis(AutomationSystemNetworkFactory.createMeshedWithBranchTripping(),
+                    contingencies, monitors, saParameters, List.of(operatorStrategy), actions, ReportNode.NO_OP);
+            OperatorStrategyResult expected = getOperatorStrategyResult(alone, operatorStrategy.getId());
+            OperatorStrategyResult actual = getOperatorStrategyResult(together, operatorStrategy.getId());
+            assertEquals(PostContingencyComputationStatus.CONVERGED, actual.getStatus(), operatorStrategy.getId());
+            assertSameNetworkResult(expected.getNetworkResult(), actual.getNetworkResult(), operatorStrategy.getId());
+            assertNull(actual.getNetworkResult().getBranchResult("l33p"), operatorStrategy.getId());
+        }
+    }
 }
