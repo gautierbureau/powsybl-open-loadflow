@@ -164,6 +164,52 @@ public final class AutomationSystemNetworkFactory extends AbstractLoadFlowNetwor
         return network;
     }
 
+    /**
+     * From createMeshedWithBranchTripping, with a 5 MW load at b3 and, instead of l34's system, one that opens l33p above
+     * 260 A at tr2's side 1: 175 A in the base, 313 A without tr1 and l3b4, where b3 hangs on l33p alone.
+     */
+    public static Network createMeshedWithIslandingBranchTripping() {
+        Network network = createMeshedWithBranchTripping();
+        network.getOverloadManagementSystem("l34_opens_l33p").remove();
+        createLoad(network.getBusBreakerView().getBus("b3"), "ld3b", 5, 2);
+        network.getSubstation("s1").newOverloadManagementSystem()
+                .setId("tr2_opens_l33p")
+                .setEnabled(true)
+                .setMonitoredElementId("tr2")
+                .setMonitoredElementSide(ThreeSides.ONE)
+                .newBranchTripping()
+                .setKey("l33p key")
+                .setBranchToOperateId("l33p")
+                .setSideToOperate(TwoSides.TWO)
+                .setCurrentLimit(260.)
+                .add()
+                .add();
+        return network;
+    }
+
+    /**
+     * From createMeshedWithBranchTripping, with l34's system closing l34b, closed in the base, above 150 A instead of
+     * opening l33p: 106 A in the base, 174 A without l34b.
+     */
+    public static Network createMeshedWithBranchToClose() {
+        Network network = createMeshedWithBranchTripping();
+        network.getOverloadManagementSystem("l34_opens_l33p").remove();
+        network.getSubstation("s1").newOverloadManagementSystem()
+                .setId("l34_closes_l34b")
+                .setEnabled(true)
+                .setMonitoredElementId("l34")
+                .setMonitoredElementSide(ThreeSides.ONE)
+                .newBranchTripping()
+                .setKey("l34b key")
+                .setBranchToOperateId("l34b")
+                .setSideToOperate(TwoSides.TWO)
+                .setOpenAction(false)
+                .setCurrentLimit(150.)
+                .add()
+                .add();
+        return network;
+    }
+
     public static Network createWithBadAutomationSystems() {
         Network network = AutomationSystemNetworkFactory.createCommonNetwork();
         Bus b3 = network.getBusBreakerView().getBus("b3");
