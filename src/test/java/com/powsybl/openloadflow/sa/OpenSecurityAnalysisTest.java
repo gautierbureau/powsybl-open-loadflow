@@ -5356,6 +5356,51 @@ class OpenSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest {
         assertEmpty(resultFiltered2.getPostContingencyResults().getFirst().getNetworkResult().getThreeWindingsTransformerResults());
     }
 
+    /** createMeshed with a system that opens l3b4 above 150 A at l12's side 1 (86 A in the base). */
+    private static Network createMeshedWithL12System() {
+        Network network = AutomationSystemNetworkFactory.createMeshed();
+        network.getSubstation("s1").newOverloadManagementSystem()
+                .setId("l12_opens_l3b4")
+                .setEnabled(true)
+                .setMonitoredElementId("l12")
+                .setMonitoredElementSide(ThreeSides.ONE)
+                .newBranchTripping()
+                .setKey("l3b4 key")
+                .setBranchToOperateId("l3b4")
+                .setSideToOperate(TwoSides.TWO)
+                .setCurrentLimit(150.)
+                .add()
+                .add();
+        return network;
+    }
+
+    /**
+     * An automation system watching the branch a contingency opened: after l12's outage, l12 carries no current, so its
+     * system, which opens l3b4 above 150 A, has nothing to do. It read the current l12 would carry closed, the 169 A l12b
+     * carries, and opened l3b4. The post-contingency result must be the load flow of the same topology.
+     */
+    @Test
+    void testAutomationSystemDoesNotWatchABranchOutOfService() {
+        LoadFlowParameters lfParameters = new LoadFlowParameters();
+        OpenLoadFlowParameters.create(lfParameters).setSimulateAutomationSystems(true);
+        Network network = createMeshedWithL12System();
+        List<StateMonitor> monitors = createNetworkMonitors(network);
+        List<Contingency> contingencies = List.of(new Contingency("l12", new BranchContingency("l12")));
+        SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, monitors, lfParameters);
+
+        PostContingencyResult postContingencyResult = getPostContingencyResult(result, "l12");
+        assertEquals(PostContingencyComputationStatus.CONVERGED, postContingencyResult.getStatus());
+        assertNotNull(postContingencyResult.getNetworkResult().getBranchResult("l3b4"));
+        Network loadFlowNetwork = createMeshedWithL12System();
+        loadFlowNetwork.getLine("l12").getTerminal1().disconnect();
+        loadFlowNetwork.getLine("l12").getTerminal2().disconnect();
+        loadFlowRunner.run(loadFlowNetwork, lfParameters);
+        for (BranchResult branchResult : postContingencyResult.getNetworkResult().getBranchResults()) {
+            assertEquals(loadFlowNetwork.getBranch(branchResult.getBranchId()).getTerminal1().getI(), branchResult.getI1(), DELTA_I,
+                    branchResult.getBranchId());
+        }
+    }
+
     @Test
     void testChangedPhaseShifterResults() {
         Network network = PhaseControlFactory.createNetworkWithT2wt();
