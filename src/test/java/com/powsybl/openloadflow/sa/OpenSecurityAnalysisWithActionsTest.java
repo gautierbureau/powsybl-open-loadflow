@@ -1765,6 +1765,52 @@ class OpenSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnalysisTe
 
     }
 
+    /**
+     * b1, with a generator, and b2, with a load and a linear shunt compensator of two sections without conductance per
+     * section, joined by two lines.
+     */
+    private static Network createNetworkWithShuntWithoutConductance(int sectionCount) {
+        Network network = Network.create("shunt-without-conductance", "test");
+        VoltageLevel vl1 = network.newSubstation().setId("S1").add().newVoltageLevel().setId("vl1").setNominalV(400)
+                .setTopologyKind(TopologyKind.BUS_BREAKER).add();
+        vl1.getBusBreakerView().newBus().setId("b1").add();
+        vl1.newGenerator().setId("g1").setBus("b1").setConnectableBus("b1").setTargetP(102).setTargetV(400)
+                .setMinP(0).setMaxP(500).setVoltageRegulatorOn(true).add();
+        VoltageLevel vl2 = network.newSubstation().setId("S2").add().newVoltageLevel().setId("vl2").setNominalV(400)
+                .setTopologyKind(TopologyKind.BUS_BREAKER).add();
+        vl2.getBusBreakerView().newBus().setId("b2").add();
+        vl2.newLoad().setId("ld1").setBus("b2").setConnectableBus("b2").setP0(100).setQ0(60).add();
+        vl2.newShuntCompensator().setId("SH").setBus("b2").setConnectableBus("b2").setSectionCount(sectionCount)
+                .newLinearModel().setBPerSection(1e-4).setMaximumSectionCount(2).add()
+                .add();
+        network.newLine().setId("l12a").setVoltageLevel1("vl1").setBus1("b1").setVoltageLevel2("vl2").setBus2("b2").setR(1).setX(10).add();
+        network.newLine().setId("l12b").setVoltageLevel1("vl1").setBus1("b1").setVoltageLevel2("vl2").setBus2("b2").setR(1).setX(10).add();
+        return network;
+    }
+
+    @Test
+    void testShuntActionWithoutConductancePerSection() {
+        // A linear model's conductance per section is optional, and IIDM reads it NaN when unset: the section an action
+        // sets must then have no conductance, as when the network has that section count.
+        // A tight convergence threshold: the strategy and the reference reach that state from different starting points.
+        SecurityAnalysisParameters parameters = new SecurityAnalysisParameters();
+        OpenLoadFlowParameters.create(parameters.getLoadFlowParameters()).setNewtonRaphsonConvEpsPerEq(1e-10);
+        List<Contingency> contingencies = List.of(new Contingency("l12b", new BranchContingency("l12b")));
+        List<StateMonitor> monitors = List.of(new StateMonitor(ContingencyContext.all(), Collections.emptySet(), Set.of("vl2"), Collections.emptySet()));
+        List<Action> actions = List.of(new ShuntCompensatorPositionActionBuilder().withId("twoSections").withShuntCompensatorId("SH").withSectionCount(2).build());
+        List<OperatorStrategy> operatorStrategies = List.of(new OperatorStrategy("twoSections", ContingencyContext.specificContingency("l12b"),
+                new TrueCondition(), List.of("twoSections")));
+        SecurityAnalysisResult result = runSecurityAnalysis(createNetworkWithShuntWithoutConductance(1), contingencies, monitors,
+                parameters, operatorStrategies, actions, ReportNode.NO_OP);
+        OperatorStrategyResult strategyResult = result.getOperatorStrategyResults().getFirst();
+        assertSame(PostContingencyComputationStatus.CONVERGED, strategyResult.getStatus());
+
+        // the same contingency on the network with the shunt compensator at two sections
+        SecurityAnalysisResult reference = runSecurityAnalysis(createNetworkWithShuntWithoutConductance(2), contingencies, monitors, parameters);
+        assertEquals(reference.getPostContingencyResults().getFirst().getNetworkResult().getBusResults().getFirst().getV(),
+                strategyResult.getNetworkResult().getBusResults().getFirst().getV(), 1e-6);
+    }
+
     @Test
     void testVSCLossAcEmulation() {
         // contingency leads to the lost of one converter station.
