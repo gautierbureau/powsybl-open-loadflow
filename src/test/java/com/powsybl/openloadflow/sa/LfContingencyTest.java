@@ -180,4 +180,13 @@ class LfContingencyTest extends AbstractSerDeTest {
         assertEquals(0, shift.getG());
         assertEquals(1e-3 * zb, shift.getB(), 1e-12);
     }
+
+    @Test
+    void testHvdcLineContingencyOpensTheLine() {
+        Network network = HvdcNetworkFactory.createVsc();
+        Contingency contingency = new Contingency("hvdc23", new HvdcLineContingency("hvdc23"));
+        PropagatedContingency propagatedContingency = createList(network, List.of(contingency), new LfTopoConfig(),
+                new PropagatedContingencyCreationParameters()).get(0);
+        assertEquals(Set.of("hvdc23"), propagatedContingency.getHvdcIdsToOpen());
+    }
 }
