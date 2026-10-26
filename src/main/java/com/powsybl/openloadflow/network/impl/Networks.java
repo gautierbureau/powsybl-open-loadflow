@@ -147,6 +147,9 @@ public final class Networks {
             branch.getTerminal2().connect();
             closedBranchesOrSwitches.add(branch.getId());
         }); // in order to be present in the network.
+        // connected to be in their bus's shunt at section 0, electrically the same as disconnected: no topology to restore
+        topoConfig.getShuntIdsToClose().stream().map(network::getShuntCompensator)
+                .forEach(shuntCompensator -> shuntCompensator.getTerminal().connect());
         return closedBranchesOrSwitches;
     }
 
@@ -247,7 +250,8 @@ public final class Networks {
         } else {
             modifiedTopoConfig = topoConfig;
         }
-        if (!modifiedTopoConfig.isBreaker() && modifiedTopoConfig.getBranchIdsToClose().isEmpty()) {
+        if (!modifiedTopoConfig.isBreaker() && modifiedTopoConfig.getBranchIdsToClose().isEmpty()
+                && modifiedTopoConfig.getShuntIdsToClose().isEmpty()) {
             return new LfNetworkList(load(network, topoConfig, networkParameters, reportNode));
         } else {
             if (!networkParameters.isBreakers() && modifiedTopoConfig.isBreaker()) {

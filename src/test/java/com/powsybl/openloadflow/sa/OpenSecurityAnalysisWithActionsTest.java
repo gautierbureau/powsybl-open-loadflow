@@ -21,6 +21,7 @@ import com.powsybl.contingency.violations.LimitViolation;
 import com.powsybl.contingency.violations.LimitViolationType;
 import com.powsybl.iidm.network.*;
 import com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder;
+import com.powsybl.iidm.network.regulation.RegulationMode;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
 import com.powsybl.iidm.serde.test.MetrixTutorialSixBusesFactory;
 import com.powsybl.loadflow.LoadFlowParameters;
@@ -37,6 +38,8 @@ import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFa
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.graph.NaiveGraphConnectivityFactory;
 import com.powsybl.openloadflow.network.*;
+import com.powsybl.openloadflow.network.action.Actions;
+import com.powsybl.openloadflow.network.impl.LfNetworkList;
 import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters;
 import com.powsybl.openloadflow.util.LoadFlowAssert;
@@ -48,6 +51,7 @@ import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.SecurityAnalysisRunParameters;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.results.BranchResult;
+import com.powsybl.security.results.NetworkResult;
 import com.powsybl.security.results.OperatorStrategyResult;
 import com.powsybl.security.results.PostContingencyResult;
 import com.powsybl.security.results.PreContingencyResult;
@@ -930,7 +934,7 @@ class OpenSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnalysisTe
             new AllViolationCondition(List.of("S_SO_2")), List.of("openLine")));
         exception = assertThrows(CompletionException.class, () -> runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
                 operatorStrategies2, actions2, ReportNode.NO_OP));
-        assertEquals("Branch or three windings transformer 'line' not found in the network", exception.getCause().getMessage());
+        assertEquals("Branch, three windings transformer or shunt compensator 'line' not found in the network", exception.getCause().getMessage());
 
         List<Action> actions3 = List.of(new PhaseTapChangerTapPositionAction("pst", "pst1", false, 1));
         List<OperatorStrategy> operatorStrategies3 = List.of(new OperatorStrategy("strategy3", ContingencyContext.specificContingency("S_SO_1"),
@@ -1747,6 +1751,126 @@ class OpenSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnalysisTe
         securityAnalysisParameters.getLoadFlowParameters().setShuntCompensatorVoltageControlOn(true);
         SecurityAnalysisResult result2 = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters, operatorStrategies, actions, ReportNode.NO_OP);
         assertEquals(PostContingencyComputationStatus.CONVERGED, getOperatorStrategyResult(result2, "strategy").getStatus());
+    }
+
+    /**
+     * b1, with a generator, and b2, with a load and a linear shunt compensator SH of two sections, joined by two lines.
+     */
+    private static Network createNetworkWithShunt(boolean shuntConnected, boolean shuntControllingVoltage) {
+        Network network = Network.create("shunt", "test");
+        VoltageLevel vl1 = network.newSubstation().setId("S1").add().newVoltageLevel().setId("vl1").setNominalV(400)
+                .setTopologyKind(TopologyKind.BUS_BREAKER).add();
+        vl1.getBusBreakerView().newBus().setId("b1").add();
+        vl1.newGenerator().setId("g1").setBus("b1").setConnectableBus("b1").setTargetP(102).setTargetV(400)
+                .setMinP(0).setMaxP(500).setVoltageRegulatorOn(true).add();
+        VoltageLevel vl2 = network.newSubstation().setId("S2").add().newVoltageLevel().setId("vl2").setNominalV(400)
+                .setTopologyKind(TopologyKind.BUS_BREAKER).add();
+        vl2.getBusBreakerView().newBus().setId("b2").add();
+        vl2.newLoad().setId("ld1").setBus("b2").setConnectableBus("b2").setP0(100).setQ0(60).add();
+        ShuntCompensatorAdder shuntAdder = vl2.newShuntCompensator().setId("SH").setBus("b2").setConnectableBus("b2").setSectionCount(2);
+        if (shuntControllingVoltage) {
+            shuntAdder.setLocalTargetV(405)
+                    .newVoltageRegulation().withRegulating(true).withTargetDeadband(5.0).withMode(RegulationMode.VOLTAGE).add();
+        }
+        ShuntCompensator shunt = shuntAdder.newLinearModel().setBPerSection(1e-4).setGPerSection(1e-6).setMaximumSectionCount(2).add()
+                .add();
+        network.newLine().setId("l12a").setVoltageLevel1("vl1").setBus1("b1").setVoltageLevel2("vl2").setBus2("b2").setR(1).setX(10).add();
+        network.newLine().setId("l12b").setVoltageLevel1("vl1").setBus1("b1").setVoltageLevel2("vl2").setBus2("b2").setR(1).setX(10).add();
+        if (!shuntConnected) {
+            shunt.getTerminal().disconnect();
+        }
+        return network;
+    }
+
+    /**
+     * A tight convergence threshold: the operator strategies of these tests and their references reach the same state from
+     * different starting points.
+     */
+    private static SecurityAnalysisParameters createParametersWithTightConvergence() {
+        SecurityAnalysisParameters parameters = new SecurityAnalysisParameters();
+        OpenLoadFlowParameters.create(parameters.getLoadFlowParameters()).setNewtonRaphsonConvEpsPerEq(1e-10);
+        return parameters;
+    }
+
+    private static double getB2Voltage(NetworkResult networkResult) {
+        return networkResult.getBusResults().getFirst().getV();
+    }
+
+    private SecurityAnalysisResult runShuntConnectionStrategy(Network network, boolean open, SecurityAnalysisParameters parameters) {
+        List<Contingency> contingencies = List.of(new Contingency("l12b", new BranchContingency("l12b")));
+        List<StateMonitor> monitors = List.of(new StateMonitor(ContingencyContext.all(), Collections.emptySet(), Set.of("vl2"), Collections.emptySet()));
+        List<Action> actions = List.of(new TerminalsConnectionAction("shuntConnection", "SH", open));
+        List<OperatorStrategy> operatorStrategies = List.of(new OperatorStrategy("shuntConnection", ContingencyContext.specificContingency("l12b"),
+                new TrueCondition(), List.of("shuntConnection")));
+        return runSecurityAnalysis(network, contingencies, monitors, parameters, operatorStrategies, actions, ReportNode.NO_OP);
+    }
+
+    private SecurityAnalysisResult runContingency(Network network, SecurityAnalysisParameters parameters) {
+        List<Contingency> contingencies = List.of(new Contingency("l12b", new BranchContingency("l12b")));
+        List<StateMonitor> monitors = List.of(new StateMonitor(ContingencyContext.all(), Collections.emptySet(), Set.of("vl2"), Collections.emptySet()));
+        return runSecurityAnalysis(network, contingencies, monitors, parameters);
+    }
+
+    @Test
+    void testConnectShuntDisconnectedInTheNetwork() {
+        SecurityAnalysisParameters parameters = createParametersWithTightConvergence();
+        SecurityAnalysisResult result = runShuntConnectionStrategy(createNetworkWithShunt(false, false), false, parameters);
+        OperatorStrategyResult strategyResult = result.getOperatorStrategyResults().getFirst();
+        assertSame(PostContingencyComputationStatus.CONVERGED, strategyResult.getStatus());
+
+        // the strategy is the post-contingency state of the network with the shunt compensator connected
+        SecurityAnalysisResult connected = runContingency(createNetworkWithShunt(true, false), parameters);
+        assertEquals(getB2Voltage(connected.getPostContingencyResults().getFirst().getNetworkResult()),
+                getB2Voltage(strategyResult.getNetworkResult()), 1e-6);
+        // which its capacitive susceptance raises
+        assertTrue(getB2Voltage(strategyResult.getNetworkResult()) > getB2Voltage(result.getPostContingencyResults().getFirst().getNetworkResult()) + 0.1);
+
+        // and the shunt compensator is disconnected until then: the base case is the one of the network without action
+        SecurityAnalysisResult disconnected = runContingency(createNetworkWithShunt(false, false), parameters);
+        assertEquals(getB2Voltage(disconnected.getPreContingencyResult().getNetworkResult()),
+                getB2Voltage(result.getPreContingencyResult().getNetworkResult()), 1e-6);
+        assertEquals(getB2Voltage(disconnected.getPostContingencyResults().getFirst().getNetworkResult()),
+                getB2Voltage(result.getPostContingencyResults().getFirst().getNetworkResult()), 1e-6);
+    }
+
+    @Test
+    void testDisconnectShuntConnectedInTheNetwork() {
+        SecurityAnalysisParameters parameters = createParametersWithTightConvergence();
+        SecurityAnalysisResult result = runShuntConnectionStrategy(createNetworkWithShunt(true, false), true, parameters);
+        OperatorStrategyResult strategyResult = result.getOperatorStrategyResults().getFirst();
+        assertSame(PostContingencyComputationStatus.CONVERGED, strategyResult.getStatus());
+
+        // the strategy is the post-contingency state of the network with the shunt compensator disconnected
+        SecurityAnalysisResult disconnected = runContingency(createNetworkWithShunt(false, false), parameters);
+        assertEquals(getB2Voltage(disconnected.getPostContingencyResults().getFirst().getNetworkResult()),
+                getB2Voltage(strategyResult.getNetworkResult()), 1e-6);
+    }
+
+    @Test
+    void testShuntDisconnectedInTheNetworkIsLoadedAtSectionZero() {
+        Network network = createNetworkWithShunt(false, false);
+        LfTopoConfig topoConfig = new LfTopoConfig();
+        Actions.addAllShuntsToConnectOrDisconnect(topoConfig, network, List.of(new TerminalsConnectionAction("shuntConnection", "SH", false)));
+        assertTrue(topoConfig.isClosableShunt("SH"));
+        LfNetworkParameters networkParameters = new LfNetworkParameters().setSlackBusSelector(new FirstSlackBusSelector());
+        try (LfNetworkList lfNetworks = Networks.loadWithReconnectableElements(network, topoConfig, networkParameters, ReportNode.NO_OP)) {
+            LfShunt shunt = lfNetworks.getList().getFirst().getShuntById("SH");
+            assertTrue(shunt.isCompensatorInitiallyDisconnected("SH"));
+            assertEquals(0, shunt.getB());
+            assertEquals(0, shunt.getG());
+        }
+        assertFalse(network.getShuntCompensator("SH").getTerminal().isConnected());
+    }
+
+    @Test
+    void testShuntControllingVoltageIsNotConnectedByAnAction() {
+        // A disconnected shunt compensator that controls voltage is not loaded: with shunt voltage control, its section would
+        // be the voltage control's to change. The action does not apply.
+        SecurityAnalysisParameters parameters = createParametersWithTightConvergence();
+        parameters.getLoadFlowParameters().setShuntCompensatorVoltageControlOn(true);
+        SecurityAnalysisResult result = runShuntConnectionStrategy(createNetworkWithShunt(false, true), false, parameters);
+        assertEquals(getB2Voltage(result.getPostContingencyResults().getFirst().getNetworkResult()),
+                getB2Voltage(result.getOperatorStrategyResults().getFirst().getNetworkResult()), 1e-6);
     }
 
     @Test

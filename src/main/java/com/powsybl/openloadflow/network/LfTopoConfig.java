@@ -30,6 +30,8 @@ public class LfTopoConfig {
 
     private final Set<String> shuntIdsToOperate;
 
+    private final Set<String> shuntIdsToClose;
+
     private final Set<String> branchIdsOpenableSide1;
 
     private final Set<String> branchIdsOpenableSide2;
@@ -43,6 +45,7 @@ public class LfTopoConfig {
         branchIdsWithPtcToRetain = new HashSet<>();
         branchIdsWithRtcToRetain = new HashSet<>();
         shuntIdsToOperate = new HashSet<>();
+        shuntIdsToClose = new HashSet<>();
         branchIdsOpenableSide1 = new HashSet<>();
         branchIdsOpenableSide2 = new HashSet<>();
         branchIdsToClose = new HashSet<>();
@@ -56,6 +59,7 @@ public class LfTopoConfig {
         this.branchIdsWithPtcToRetain = new HashSet<>(other.branchIdsWithPtcToRetain);
         this.branchIdsWithRtcToRetain = new HashSet<>(other.branchIdsWithRtcToRetain);
         this.shuntIdsToOperate = new HashSet<>(other.shuntIdsToOperate);
+        this.shuntIdsToClose = new HashSet<>(other.shuntIdsToClose);
         this.branchIdsOpenableSide1 = new HashSet<>(other.branchIdsOpenableSide1);
         this.branchIdsOpenableSide2 = new HashSet<>(other.branchIdsOpenableSide2);
         this.branchIdsToClose = new HashSet<>(other.branchIdsToClose);
@@ -101,6 +105,18 @@ public class LfTopoConfig {
         return shuntIdsToOperate.contains(shuntId);
     }
 
+    /**
+     * Shunt compensators disconnected in the network that an action may connect: they are loaded connected, at section 0,
+     * which is electrically the same as disconnected, and the action sets their section count.
+     */
+    public Set<String> getShuntIdsToClose() {
+        return shuntIdsToClose;
+    }
+
+    public boolean isClosableShunt(String shuntId) {
+        return shuntIdsToClose.contains(shuntId);
+    }
+
     public Set<String> getBranchIdsOpenableSide1() {
         return branchIdsOpenableSide1;
     }
@@ -125,6 +141,7 @@ public class LfTopoConfig {
         branchIdsWithPtcToRetain.forEach(branchId -> keys.add("ptcToRetain:" + branchId));
         branchIdsWithRtcToRetain.forEach(branchId -> keys.add("rtcToRetain:" + branchId));
         shuntIdsToOperate.forEach(shuntId -> keys.add("shuntToOperate:" + shuntId));
+        shuntIdsToClose.forEach(shuntId -> keys.add("shuntToClose:" + shuntId));
         branchIdsOpenableSide1.forEach(branchId -> keys.add("branchOpenableSide1:" + branchId));
         branchIdsOpenableSide2.forEach(branchId -> keys.add("branchOpenableSide2:" + branchId));
         branchIdsToClose.forEach(branchId -> keys.add("branchToClose:" + branchId));

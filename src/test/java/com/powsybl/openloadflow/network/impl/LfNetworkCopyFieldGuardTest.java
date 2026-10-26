@@ -78,7 +78,8 @@ class LfNetworkCopyFieldGuardTest {
         expected.put(LfBoundaryLineGenerator.class, Set.of("boundaryLineRef"));
         expected.put(LfLoadImpl.class, Set.of("bus", "loadModel", "loadsRefs", "lccCsRefs", "targetQ", "ensurePowerFactorConstantByLoad", "loadsAbsVariableTargetP",
                 "absVariableTargetP", "distributedOnConformLoad", "loadsDisablingStatus", "p", "q"));
-        expected.put(LfShuntImpl.class, Set.of("shuntCompensatorsRefs", "bus", "voltageControl", "voltageControlCapability", "voltageControlEnabled", "controllers", "b", "zb", "g"));
+        expected.put(LfShuntImpl.class, Set.of("shuntCompensatorsRefs", "bus", "voltageControl", "voltageControlCapability", "voltageControlEnabled", "controllers",
+                "initiallyDisconnectedCompensators", "b", "zb", "g"));
         expected.put(AbstractLfShunt.class, Set.of("q", "p"));
         expected.put(LfStandbyAutomatonShunt.class, Set.of("svc", "b"));
         expected.put(AbstractLfBranch.class, Set.of("bus1", "bus2", "currentLimits1", "activePowerLimits1", "apparentPowerLimits1", "currentLimits2", "activePowerLimits2",

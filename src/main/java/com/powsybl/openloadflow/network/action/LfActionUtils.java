@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.network.action;
 
 import com.powsybl.action.*;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.ShuntCompensator;
 import com.powsybl.openloadflow.network.LfContingency;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkParameters;
@@ -35,7 +36,7 @@ public final class LfActionUtils {
         return switch (action.getType()) {
             case SwitchAction.NAME -> new LfSwitchAction((SwitchAction) action, lfNetwork);
             case TerminalsConnectionAction.NAME ->
-                new LfTerminalsConnectionAction((TerminalsConnectionAction) action, lfNetwork);
+                createTerminalsConnectionAction((TerminalsConnectionAction) action, network, lfNetwork);
             case PhaseTapChangerTapPositionAction.NAME ->
                 new LfPhaseTapChangerAction((PhaseTapChangerTapPositionAction) action, lfNetwork);
             case RatioTapChangerTapPositionAction.NAME ->
@@ -50,6 +51,12 @@ public final class LfActionUtils {
                 new LfAreaInterchangeTargetAction((AreaInterchangeTargetAction) action, lfNetwork);
             default -> throw new UnsupportedOperationException("Unsupported action type: " + action.getType());
         };
+    }
+
+    private static LfAction createTerminalsConnectionAction(TerminalsConnectionAction action, Network network, LfNetwork lfNetwork) {
+        ShuntCompensator shuntCompensator = network.getShuntCompensator(action.getElementId());
+        return shuntCompensator != null ? new LfShuntCompensatorConnectionAction(action, shuntCompensator, lfNetwork)
+                                        : new LfTerminalsConnectionAction(action, lfNetwork);
     }
 
     public static Map<String, LfAction> createLfActions(LfNetwork lfNetwork, Set<Action> actions, Network network) {
