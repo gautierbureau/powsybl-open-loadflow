@@ -5468,4 +5468,103 @@ class OpenSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest {
             assertNull(actual.getNetworkResult().getBranchResult("l33p"), operatorStrategy.getId());
         }
     }
+
+    /** The load flow of {@code network} with {@code branchIds} disconnected: the topology a contingency leaves. */
+    private void runLoadFlowWithout(Network network, LoadFlowParameters lfParameters, String... branchIds) {
+        for (String branchId : branchIds) {
+            network.getBranch(branchId).getTerminal1().disconnect();
+            network.getBranch(branchId).getTerminal2().disconnect();
+        }
+        loadFlowRunner.run(network, lfParameters);
+    }
+
+    private static void assertSameBusVoltages(Network network, NetworkResult networkResult) {
+        for (BusResult busResult : networkResult.getBusResults()) {
+            assertEquals(network.getBusBreakerView().getBus(busResult.getBusId()).getV(), busResult.getV(), DELTA_V, busResult.getBusId());
+        }
+    }
+
+    /**
+     * An automation system's opening that leaves a bus alone together with the contingency's openings: after the outage
+     * of tr1 and l3b4, tr2's system opens l33p, the last branch of b3 and its load. The system looked for what its opening
+     * disconnects in the pre-contingency topology, where tr1 and l3b4 still connect b3: b3 stayed enabled without any
+     * branch, and the whole security analysis failed. It must give the load flow of the same topology.
+     */
+    @Test
+    void testAutomationSystemOpeningIslandsABusWithTheContingency() {
+        LoadFlowParameters lfParameters = new LoadFlowParameters();
+        OpenLoadFlowParameters.create(lfParameters).setSimulateAutomationSystems(true);
+        Network network = AutomationSystemNetworkFactory.createMeshedWithIslandingBranchTripping();
+        List<StateMonitor> monitors = createNetworkMonitors(network);
+        List<Contingency> contingencies = List.of(new Contingency("tr1+l3b4", new BranchContingency("tr1"), new BranchContingency("l3b4")));
+        SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, monitors, lfParameters);
+
+        PostContingencyResult postContingencyResult = getPostContingencyResult(result, "tr1+l3b4");
+        assertEquals(PostContingencyComputationStatus.CONVERGED, postContingencyResult.getStatus());
+        assertNull(postContingencyResult.getNetworkResult().getBranchResult("l33p"));
+        assertNull(postContingencyResult.getNetworkResult().getBusResult("b3"));
+        Network loadFlowNetwork = AutomationSystemNetworkFactory.createMeshedWithIslandingBranchTripping();
+        runLoadFlowWithout(loadFlowNetwork, lfParameters, "tr1", "l3b4");
+        assertFalse(loadFlowNetwork.getLine("l33p").getTerminal2().isConnected());
+        assertSameBusVoltages(loadFlowNetwork, postContingencyResult.getNetworkResult());
+    }
+
+    /**
+     * As testAutomationSystemOpeningIslandsABusWithTheContingency, with b3 left on l33p alone by an operator strategy's
+     * actions: after l12's outage, the strategy opens tr1 and l3b4, and tr2's system then opens l33p.
+     */
+    @Test
+    void testAutomationSystemOpeningIslandsABusWithTheActions() {
+        LoadFlowParameters lfParameters = new LoadFlowParameters();
+        OpenLoadFlowParameters.create(lfParameters).setSimulateAutomationSystems(true);
+        SecurityAnalysisParameters saParameters = new SecurityAnalysisParameters().setLoadFlowParameters(lfParameters);
+        Network network = AutomationSystemNetworkFactory.createMeshedWithIslandingBranchTripping();
+        List<StateMonitor> monitors = createNetworkMonitors(network);
+        List<Contingency> contingencies = List.of(new Contingency("l12", new BranchContingency("l12")));
+        List<Action> actions = List.of(new TerminalsConnectionAction("open tr1", "tr1", true),
+                new TerminalsConnectionAction("open l3b4", "l3b4", true));
+        List<OperatorStrategy> operatorStrategies = List.of(new OperatorStrategy("open tr1 and l3b4",
+                ContingencyContext.specificContingency("l12"), new TrueCondition(), List.of("open tr1", "open l3b4")));
+        SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, monitors, saParameters, operatorStrategies,
+                actions, ReportNode.NO_OP);
+
+        // the system does not act after the contingency alone
+        assertNotNull(getPostContingencyResult(result, "l12").getNetworkResult().getBranchResult("l33p"));
+        OperatorStrategyResult operatorStrategyResult = getOperatorStrategyResult(result, "open tr1 and l3b4");
+        assertEquals(PostContingencyComputationStatus.CONVERGED, operatorStrategyResult.getStatus());
+        assertNull(operatorStrategyResult.getNetworkResult().getBranchResult("l33p"));
+        assertNull(operatorStrategyResult.getNetworkResult().getBusResult("b3"));
+        Network loadFlowNetwork = AutomationSystemNetworkFactory.createMeshedWithIslandingBranchTripping();
+        runLoadFlowWithout(loadFlowNetwork, lfParameters, "l12", "tr1", "l3b4");
+        assertFalse(loadFlowNetwork.getLine("l33p").getTerminal2().isConnected());
+        assertSameBusVoltages(loadFlowNetwork, operatorStrategyResult.getNetworkResult());
+    }
+
+    /**
+     * An automation system closing the branch the contingency opened: after l34b's outage, l34's system closes l34b back.
+     * l34b was still in the pre-contingency topology, so closing it there changed nothing: it stayed disabled, the system
+     * found it to close at every check and the load flow reached the outer loop iteration limit. With l34b closed again,
+     * the post-contingency state is the pre-contingency one, as the load flow of the same topology finds it.
+     */
+    @Test
+    void testAutomationSystemClosesTheContingencyBranch() {
+        LoadFlowParameters lfParameters = new LoadFlowParameters();
+        OpenLoadFlowParameters.create(lfParameters).setSimulateAutomationSystems(true);
+        Network network = AutomationSystemNetworkFactory.createMeshedWithBranchToClose();
+        List<StateMonitor> monitors = createNetworkMonitors(network);
+        List<Contingency> contingencies = List.of(new Contingency("l34b", new BranchContingency("l34b")));
+        SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, monitors, lfParameters);
+
+        PostContingencyResult postContingencyResult = getPostContingencyResult(result, "l34b");
+        assertEquals(PostContingencyComputationStatus.CONVERGED, postContingencyResult.getStatus());
+        assertNotNull(postContingencyResult.getNetworkResult().getBranchResult("l34b"));
+        Network loadFlowNetwork = AutomationSystemNetworkFactory.createMeshedWithBranchToClose();
+        runLoadFlowWithout(loadFlowNetwork, lfParameters, "l34b");
+        assertTrue(loadFlowNetwork.getLine("l34b").getTerminal2().isConnected());
+        assertSameBusVoltages(loadFlowNetwork, postContingencyResult.getNetworkResult());
+        for (BranchResult branchResult : result.getPreContingencyResult().getNetworkResult().getBranchResults()) {
+            assertEquals(branchResult.getI1(), postContingencyResult.getNetworkResult().getBranchResult(branchResult.getBranchId()).getI1(),
+                    DELTA_I, branchResult.getBranchId());
+        }
+    }
 }

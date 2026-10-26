@@ -34,6 +34,7 @@ import com.powsybl.openloadflow.lf.AbstractLoadFlowParameters;
 import com.powsybl.openloadflow.lf.LoadFlowContext;
 import com.powsybl.openloadflow.lf.LoadFlowEngine;
 import com.powsybl.openloadflow.network.*;
+import com.powsybl.openloadflow.network.action.AbstractLfBranchAction;
 import com.powsybl.openloadflow.network.action.Actions;
 import com.powsybl.openloadflow.network.action.LfAction;
 import com.powsybl.openloadflow.network.action.LfActionUtils;
@@ -708,6 +709,16 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
         LfActionUtils.applyListOfActions(operatorStrategyLfActions, network, lfContingency, networkParameters);
 
+        // an automation system of the load flow below switches branches in the topology the actions leave
+        GraphConnectivity<LfBus, LfBranch> confinedConnectivity = connectivityToConfine(network);
+        if (confinedConnectivity != null) {
+            for (LfAction action : operatorStrategyLfActions) {
+                if (action instanceof AbstractLfBranchAction<?> branchAction) {
+                    branchAction.updateConnectivity(confinedConnectivity);
+                }
+            }
+        }
+
         Stopwatch stopwatch = Stopwatch.createStarted();
 
         // restart LF on post contingency and post actions equation system
@@ -754,7 +765,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
     /**
      * The connectivity whose changes processContingency confines to a contingency and to each of its operator strategies,
      * null when no simulation changes it for good: only an automation system does (AutomationSystemOuterLoop), on a
-     * connectivity that nests temporary changes.
+     * connectivity that nests temporary changes. Within a contingency's simulation it holds the contingency's openings,
+     * and an operator strategy's switches before its load flow, so that the switches of an automation system are compared
+     * with the topology the load flow solves.
      */
     private static GraphConnectivity<LfBus, LfBranch> connectivityToConfine(LfNetwork network) {
         if (network.getOverloadManagementSystems().isEmpty()) {
@@ -787,6 +800,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         GraphConnectivity<LfBus, LfBranch> confinedConnectivity = connectivityToConfine(lfNetwork);
         if (confinedConnectivity != null) {
             confinedConnectivity.startTemporaryChanges();
+            // which holds the contingency's openings, as operator strategy actions apply them before their own switches
+            lfContingency.getDisabledNetwork().getBranches().forEach(confinedConnectivity::removeEdge);
         }
 
         lfContingency.apply(loadFlowParameters.getBalanceType());
