@@ -234,12 +234,7 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
             return buildAcLoadFlowResult(runningContext, OuterLoopResult.stable(), distributedActivePowerPerSc);
         }
 
-        AcSolver solver = solverFactory.create(context.getNetwork(),
-                                               context.getParameters(),
-                                               context.getEquationSystem(),
-                                               context.getJacobianMatrix(),
-                                               context.getTargetVector(),
-                                               context.getEquationVector());
+        AcSolver solver = createSolver(solverFactory, context);
 
         List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = engineOuterLoopsAndContexts(context);
 
@@ -337,6 +332,19 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         }
 
         return buildAcLoadFlowResult(runningContext, outerLoopFinalResult, distributedActivePowerPerSc);
+    }
+
+    /**
+     * The solver a run drives, created by the engine's solver factory. Overridable so that an engine coordinating its
+     * outer loops with its solver can keep the solver it created.
+     */
+    protected AcSolver createSolver(AcSolverFactory solverFactory, AcLoadFlowContext context) {
+        return solverFactory.create(context.getNetwork(),
+                                    context.getParameters(),
+                                    context.getEquationSystem(),
+                                    context.getJacobianMatrix(),
+                                    context.getTargetVector(),
+                                    context.getEquationVector());
     }
 
     /**
