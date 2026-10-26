@@ -55,43 +55,45 @@ public class AcBranchVector {
     public final int[] a1Row;
     public final int[] r1Row;
 
-    final double[] r1State;
-    final double[] a1State;
+    // Results of AcNetworkVector#updateClosedBranches, valid only for the branches where isClosed is true.
+    // Exposed read-only so that a solver outside this package can consume the vectorized flows and derivatives.
+    public final double[] r1State;
+    public final double[] a1State;
 
-    final double[] p1;
-    final double[] p2;
-    final double[] q1;
-    final double[] q2;
-    final double[] i1;
-    final double[] i2;
+    public final double[] p1;
+    public final double[] p2;
+    public final double[] q1;
+    public final double[] q2;
+    public final double[] i1;
+    public final double[] i2;
 
-    final double[] dp1dv1;
-    final double[] dp1dv2;
-    final double[] dp1dph1;
-    final double[] dp1dph2;
-    final double[] dp1da1;
-    final double[] dp1dr1;
+    public final double[] dp1dv1;
+    public final double[] dp1dv2;
+    public final double[] dp1dph1;
+    public final double[] dp1dph2;
+    public final double[] dp1da1;
+    public final double[] dp1dr1;
 
-    final double[] dq1dv1;
-    final double[] dq1dv2;
-    final double[] dq1dph1;
-    final double[] dq1dph2;
-    final double[] dq1da1;
-    final double[] dq1dr1;
+    public final double[] dq1dv1;
+    public final double[] dq1dv2;
+    public final double[] dq1dph1;
+    public final double[] dq1dph2;
+    public final double[] dq1da1;
+    public final double[] dq1dr1;
 
-    final double[] dp2dv1;
-    final double[] dp2dv2;
-    final double[] dp2dph1;
-    final double[] dp2dph2;
-    final double[] dp2da1;
-    final double[] dp2dr1;
+    public final double[] dp2dv1;
+    public final double[] dp2dv2;
+    public final double[] dp2dph1;
+    public final double[] dp2dph2;
+    public final double[] dp2da1;
+    public final double[] dp2dr1;
 
-    final double[] dq2dv1;
-    final double[] dq2dv2;
-    final double[] dq2dph1;
-    final double[] dq2dph2;
-    final double[] dq2da1;
-    final double[] dq2dr1;
+    public final double[] dq2dv1;
+    public final double[] dq2dv2;
+    public final double[] dq2dph1;
+    public final double[] dq2dph2;
+    public final double[] dq2da1;
+    public final double[] dq2dr1;
 
     public AcBranchVector(List<LfBranch> branches, AcEquationSystemCreationParameters creationParameters) {
         int size = branches.size();
@@ -188,6 +190,16 @@ public class AcBranchVector {
 
     public int getSize() {
         return disabled.length;
+    }
+
+    /**
+     * Whether the branch is enabled and connected at both sides, which are the branches whose flows and derivatives
+     * {@link AcNetworkVector#updateClosedBranches} computes. For any other branch those values are stale.
+     */
+    public boolean isClosed(int branchNum) {
+        return !disabled[branchNum]
+                && bus1Num[branchNum] != -1 && connected1[branchNum]
+                && bus2Num[branchNum] != -1 && connected2[branchNum];
     }
 
     public Evaluable getP1(int branchNum) {

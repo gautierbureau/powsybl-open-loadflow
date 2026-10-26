@@ -24,25 +24,34 @@ import java.util.concurrent.TimeUnit;
 import static com.powsybl.openloadflow.network.PiModel.A2;
 
 /**
- * Vectorized view of the network and variables of the equation system.
+ * Vectorized view of the network and of a set of variables.
+ * <p>
+ * The variables and the state are read through an {@link AcVariableIndex}, so the view works on top of an
+ * {@link EquationSystem} (the load flow) as well as on top of variables and a state vector managed by another
+ * solver.
  *
  * @author Geoffroy Jamgotchian <geoffroy.jamgotchian at rte-france.com>
  */
 public class AcNetworkVector extends AbstractLfNetworkListener
-        implements EquationSystemIndexListener<AcVariableType, AcEquationType>, StateVectorListener {
+        implements AcVariableIndex.Listener, StateVectorListener {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(AcNetworkVector.class);
 
     private final LfNetwork network;
-    private final EquationSystem<AcVariableType, AcEquationType> equationSystem;
+    private final AcVariableIndex variableIndex;
     private final AcBusVector busVector;
     private final AcBranchVector branchVector;
     private boolean variablesInvalid = true;
 
     public AcNetworkVector(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem,
                            AcEquationSystemCreationParameters creationParameters) {
+        this(network, AcVariableIndex.of(equationSystem), creationParameters);
+    }
+
+    public AcNetworkVector(LfNetwork network, AcVariableIndex variableIndex,
+                           AcEquationSystemCreationParameters creationParameters) {
         this.network = Objects.requireNonNull(network);
-        this.equationSystem = Objects.requireNonNull(equationSystem);
+        this.variableIndex = Objects.requireNonNull(variableIndex);
         busVector = new AcBusVector(network.getBuses());
         branchVector = new AcBranchVector(network.getBranches(), creationParameters);
     }
@@ -59,16 +68,16 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         // listen for branch disabling status update
         network.addListener(this);
 
-        // update vectorized variables and then listen for variables change in equation system
+        // update vectorized variables and then listen for variables change in the index
         updateVariables();
-        equationSystem.getIndex().addListener(this);
+        variableIndex.addListener(this);
 
         // listen for state vector change to update vectorized network
-        equationSystem.getStateVector().addListener(this);
+        variableIndex.getStateVector().addListener(this);
     }
 
     /**
-     * Update vectorized view of the variables from the equation system.
+     * Update vectorized view of the variables from the variable index.
      */
     public void updateVariables() {
         if (!variablesInvalid) {
@@ -86,7 +95,7 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         Arrays.fill(branchVector.v2Row, -1);
         Arrays.fill(branchVector.ph2Row, -1);
 
-        for (Variable<AcVariableType> v : equationSystem.getIndex().getSortedVariablesToFind()) {
+        for (Variable<AcVariableType> v : variableIndex.getVariablesWithRow()) {
             int num = v.getElementNum();
             int row = v.getRow();
             switch (v.getType()) {
@@ -222,10 +231,76 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         }
     }
 
+    // Current magnitude derivatives, computed on demand from the flows and flow derivatives of the last update rather
+    // than stored, so that the load flow, which never reads them, does not pay for them at each state update.
+    // With i = sqrt(p² + q²) / v: di/dx = (p dp/dx + q dq/dx) / (v² i), minus i / v when x is v itself.
+    // Like the scalar current magnitude terms, they are undefined where the current is zero, for instance from a flat
+    // start on a branch without shunt admittance. Valid only for a branch where AcBranchVector#isClosed is true.
+
+    private double di1(int branchNum, double dp1, double dq1) {
+        double v1 = busVector.v[branchVector.bus1Num[branchNum]];
+        return (branchVector.p1[branchNum] * dp1 + branchVector.q1[branchNum] * dq1) / (v1 * v1 * branchVector.i1[branchNum]);
+    }
+
+    private double di2(int branchNum, double dp2, double dq2) {
+        double v2 = busVector.v[branchVector.bus2Num[branchNum]];
+        return (branchVector.p2[branchNum] * dp2 + branchVector.q2[branchNum] * dq2) / (v2 * v2 * branchVector.i2[branchNum]);
+    }
+
+    public double di1dv1(int branchNum) {
+        double v1 = busVector.v[branchVector.bus1Num[branchNum]];
+        return di1(branchNum, branchVector.dp1dv1[branchNum], branchVector.dq1dv1[branchNum]) - branchVector.i1[branchNum] / v1;
+    }
+
+    public double di1dv2(int branchNum) {
+        return di1(branchNum, branchVector.dp1dv2[branchNum], branchVector.dq1dv2[branchNum]);
+    }
+
+    public double di1dph1(int branchNum) {
+        return di1(branchNum, branchVector.dp1dph1[branchNum], branchVector.dq1dph1[branchNum]);
+    }
+
+    public double di1dph2(int branchNum) {
+        return di1(branchNum, branchVector.dp1dph2[branchNum], branchVector.dq1dph2[branchNum]);
+    }
+
+    public double di1da1(int branchNum) {
+        return di1(branchNum, branchVector.dp1da1[branchNum], branchVector.dq1da1[branchNum]);
+    }
+
+    public double di1dr1(int branchNum) {
+        return di1(branchNum, branchVector.dp1dr1[branchNum], branchVector.dq1dr1[branchNum]);
+    }
+
+    public double di2dv1(int branchNum) {
+        return di2(branchNum, branchVector.dp2dv1[branchNum], branchVector.dq2dv1[branchNum]);
+    }
+
+    public double di2dv2(int branchNum) {
+        double v2 = busVector.v[branchVector.bus2Num[branchNum]];
+        return di2(branchNum, branchVector.dp2dv2[branchNum], branchVector.dq2dv2[branchNum]) - branchVector.i2[branchNum] / v2;
+    }
+
+    public double di2dph1(int branchNum) {
+        return di2(branchNum, branchVector.dp2dph1[branchNum], branchVector.dq2dph1[branchNum]);
+    }
+
+    public double di2dph2(int branchNum) {
+        return di2(branchNum, branchVector.dp2dph2[branchNum], branchVector.dq2dph2[branchNum]);
+    }
+
+    public double di2da1(int branchNum) {
+        return di2(branchNum, branchVector.dp2da1[branchNum], branchVector.dq2da1[branchNum]);
+    }
+
+    public double di2dr1(int branchNum) {
+        return di2(branchNum, branchVector.dp2dr1[branchNum], branchVector.dq2dr1[branchNum]);
+    }
+
     public void updateNetworkState() {
         Stopwatch stopwatch = Stopwatch.createStarted();
 
-        double[] state = equationSystem.getStateVector().get();
+        double[] state = variableIndex.getStateVector().get();
         updateBuses(state);
         updateClosedBranches(state);
         stopwatch.stop();
@@ -285,33 +360,8 @@ public class AcNetworkVector extends AbstractLfNetworkListener
     }
 
     @Override
-    public void onVariableChange(Variable<AcVariableType> variable, ChangeType changeType) {
+    public void onVariablesChange() {
         variablesInvalid = true;
-    }
-
-    @Override
-    public void onEquationChange(SingleEquation<AcVariableType, AcEquationType> equation, ChangeType changeType) {
-        // nothing to do
-    }
-
-    @Override
-    public void onEquationTermChange(SingleEquationTerm<AcVariableType, AcEquationType> term) {
-        // nothing to do
-    }
-
-    @Override
-    public void onEquationArrayChange(EquationArray<AcVariableType, AcEquationType> equationArray, ChangeType changeType) {
-        // nothing to do
-    }
-
-    @Override
-    public void onEquationTermArrayChange(EquationTermArray<AcVariableType, AcEquationType> equationTermArray, int termNum, ChangeType changeType) {
-        // nothing to do
-    }
-
-    @Override
-    public void onEquationIndexOrderChanged() {
-        // nothing to do
     }
 
     @Override
