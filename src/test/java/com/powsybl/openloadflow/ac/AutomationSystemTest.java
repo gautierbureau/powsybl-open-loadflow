@@ -157,4 +157,46 @@ class AutomationSystemTest {
         assertTrue(network.getLine("l33p").getTerminal1().isConnected());
         assertTrue(network.getLine("l33p").getTerminal2().isConnected());
     }
+
+    /**
+     * A system watching a branch another system opened: l34's system opens l34b above 100 A (106 A in the base); once open,
+     * l34b carries no current, so l34b's system, which opens l3b4 above 140 A, has nothing to do. It read the current l34b
+     * would carry closed, the 174 A l34 carries, and opened l3b4 too.
+     */
+    @Test
+    void testMonitoredBranchOpenedByAnotherSystem() {
+        Network network = AutomationSystemNetworkFactory.createMeshed();
+        Substation s1 = network.getSubstation("s1");
+        s1.newOverloadManagementSystem()
+                .setId("l34_opens_l34b")
+                .setEnabled(true)
+                .setMonitoredElementId("l34")
+                .setMonitoredElementSide(ThreeSides.ONE)
+                .newBranchTripping()
+                .setKey("l34b key")
+                .setBranchToOperateId("l34b")
+                .setSideToOperate(TwoSides.TWO)
+                .setCurrentLimit(100.)
+                .add()
+                .add();
+        s1.newOverloadManagementSystem()
+                .setId("l34b_opens_l3b4")
+                .setEnabled(true)
+                .setMonitoredElementId("l34b")
+                .setMonitoredElementSide(ThreeSides.ONE)
+                .newBranchTripping()
+                .setKey("l3b4 key")
+                .setBranchToOperateId("l3b4")
+                .setSideToOperate(TwoSides.TWO)
+                .setCurrentLimit(140.)
+                .add()
+                .add();
+
+        LoadFlowResult result = loadFlowRunner.run(network, parameters);
+        assertSame(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        assertFalse(network.getLine("l34b").getTerminal1().isConnected());
+        assertTrue(network.getLine("l3b4").getTerminal1().isConnected());
+        assertTrue(network.getLine("l3b4").getTerminal2().isConnected());
+        assertCurrentEquals(173.8, network.getLine("l34").getTerminal1());
+    }
 }
