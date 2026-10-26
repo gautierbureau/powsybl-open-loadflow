@@ -144,6 +144,24 @@ public final class AutomationSystemNetworkFactory extends AbstractLoadFlowNetwor
         return network;
     }
 
+    /**
+     * From createWithBranchTripping without its system, meshed so that no branch outage leaves an island: a second line
+     * beside l12 and beside l34, and a line from b3 to b4.
+     */
+    public static Network createMeshed() {
+        Network network = AutomationSystemNetworkFactory.createCommonNetwork();
+        Bus b1 = network.getBusBreakerView().getBus("b1");
+        Bus b2 = network.getBusBreakerView().getBus("b2");
+        Bus b3 = network.getBusBreakerView().getBus("b3");
+        Bus b3p = network.getBusBreakerView().getBus("b3p");
+        Bus b4 = network.getBusBreakerView().getBus("b4");
+        createLine(network, b3, b3p, "l33p", 0.1, 3);
+        createLine(network, b1, b2, "l12b", 0.1, 3);
+        createLine(network, b3p, b4, "l34b", 0.05, 3.2);
+        createLine(network, b3, b4, "l3b4", 0.05, 6);
+        return network;
+    }
+
     private static Network createCommonNetwork() {
         Network network = Network.create("OverloadManagementSystemTestCase", "code");
         network.setCaseDate(ZonedDateTime.parse("2020-04-05T14:11:00.000+01:00"));
