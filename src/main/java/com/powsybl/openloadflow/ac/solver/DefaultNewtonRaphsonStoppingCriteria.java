@@ -28,6 +28,10 @@ public class DefaultNewtonRaphsonStoppingCriteria implements NewtonRaphsonStoppi
         this.convEpsPerEq = convEpsPerEq;
     }
 
+    public double getConvEpsPerEq() {
+        return convEpsPerEq;
+    }
+
     @Override
     public TestResult test(double[] fx, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
         // calculate norm L2 of equations mismatch vector
