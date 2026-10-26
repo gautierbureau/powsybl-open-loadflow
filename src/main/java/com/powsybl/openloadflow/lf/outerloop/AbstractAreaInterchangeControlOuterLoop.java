@@ -75,6 +75,22 @@ public abstract class AbstractAreaInterchangeControlOuterLoop<
         this.noAreaOuterLoop = noAreaOuterLoop;
     }
 
+    /** The distribution this loop spreads the area and slack mismatches with (the run's balance type and active-limit
+     *  setting). Exposed so an alternative engine can drive the same loop with the run's own settings. */
+    public ActivePowerDistribution getActivePowerDistribution() {
+        return activePowerDistribution;
+    }
+
+    /** The band, in MW, the slack bus mismatch is distributed outside of. */
+    public double getSlackBusPMaxMismatch() {
+        return slackBusPMaxMismatch;
+    }
+
+    /** The band, in MW, an area's interchange mismatch is distributed outside of. */
+    public double getAreaInterchangePMaxMismatch() {
+        return areaInterchangePMaxMismatch;
+    }
+
     @Override
     public void initialize(O context) {
         LfNetwork network = context.getNetwork();
@@ -341,7 +357,7 @@ public abstract class AbstractAreaInterchangeControlOuterLoop<
                 .collect(Collectors.toSet());
     }
 
-    protected Map<String, Double> allocateSlackDistributionParticipationFactors(LfNetwork lfNetwork) {
+    public Map<String, Double> allocateSlackDistributionParticipationFactors(LfNetwork lfNetwork) {
         Map<String, Double> slackDistributionFactorByAreaId = new HashMap<>();
         List<LfBus> slackBuses = lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses();
         int totalSlackBusCount = slackBuses.size();
