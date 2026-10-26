@@ -53,7 +53,9 @@ public class AutomationSystemOuterLoop implements AcOuterLoop {
         Set<LfBranch> branchesToClose = new HashSet<>();
         for (LfOverloadManagementSystem system : network.getOverloadManagementSystems()) {
             LfBranch branchToMonitor = system.getMonitoredBranch();
-            if (branchToMonitor.isConnectedAtBothSides()) {
+            // a branch out of service carries no current, whatever its closed-branch current term computes from the
+            // voltages of its buses
+            if (isInService(branchToMonitor)) {
                 double i = system.getMonitoredSide() == TwoSides.ONE ? branchToMonitor.getI1().eval() : branchToMonitor.getI2().eval();
                 for (LfOverloadManagementSystem.LfBranchTripping branchTripping : system.getBranchTrippingList()) {
                     double threshold = branchTripping.threshold();
