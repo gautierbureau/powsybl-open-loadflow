@@ -222,7 +222,9 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
         for (int i = minPos; i < list.size(); i++) {
             list.get(i).setRow(i);
         }
-        sortedVariablesToFind = Collections.unmodifiableList(list);
+        // a copy, like the full rebuild's list, not a view of this one: the solver walks the sorted variables at every
+        // iteration, and AcSolverUtil.updateNetwork took twice as long over the view
+        sortedVariablesToFind = List.copyOf(list);
         rowCount = list.size();
         lastFirstChangedRow = minPos;
         lastRemovedVariables = removed;
