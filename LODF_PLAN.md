@@ -43,13 +43,22 @@ Do:
 | file | change |
 |---|---|
 | `src/main/java/com/powsybl/openloadflow/dc/fastdc/LodfResult.java` | new: result record |
-| `src/main/java/com/powsybl/openloadflow/dc/fastdc/LodfCalculator.java` | new: the computation on an `LfNetwork` |
-| `src/main/java/com/powsybl/openloadflow/sensi/LodfComputer.java` | new: entry point on an iidm `Network` and branch ids |
+| `src/main/java/com/powsybl/openloadflow/dc/fastdc/LodfEngine.java` | new: the computation on an `LfNetwork` |
+| `src/main/java/com/powsybl/openloadflow/sensi/LodfAnalysis.java` | new: entry point on an iidm `Network` and branch ids |
 | `src/main/java/com/powsybl/openloadflow/dc/fastdc/ConnectivityBreakAnalysis.java` | `CONNECTIVITY_LOSS_THRESHOLD`: `private` -> package-private (one word) |
-| `src/test/java/com/powsybl/openloadflow/dc/fastdc/LodfCalculatorTest.java` | new |
-| `src/test/java/com/powsybl/openloadflow/sensi/LodfComputerTest.java` | new |
+| `src/test/java/com/powsybl/openloadflow/dc/fastdc/LodfEngineTest.java` | new |
+| `src/test/java/com/powsybl/openloadflow/sensi/LodfAnalysisTest.java` | new |
 | `docs/sensitivity/lodf.md` | new page |
 | `docs/sensitivity/index.md` | add `lodf.md` to the toctree, after `parameters.md` |
+
+Keep these names, they follow OLF's conventions:
+
+- `*Engine` for a computation on a DC load flow context, like `WoodburyEngine` in the same package;
+- `*Analysis` for the entry point on an iidm network, like `DcSensitivityAnalysis` and `WoodburyDcSecurityAnalysis`;
+- `*Result` for the result, like `DcLoadFlowResult`;
+- `run` for the entry methods, like `DcLoadFlowEngine.run` and `ConnectivityBreakAnalysis.run`;
+- no `Calculator` or `Computer` suffix (OLF has none), no `Dc` prefix (OLF adds it only where an AC counterpart
+  exists, and LODF only exists in DC), and `Lodf` rather than `LODF`.
 
 Do **not** add (each was in #6, or is a later step):
 
@@ -72,7 +81,7 @@ Do **not** add (each was in #6, or is a later step):
 | outage with `1 - PTDF(k, k) < ConnectivityBreakAnalysis.CONNECTIVITY_LOSS_THRESHOLD` (1e-6) | empty column, index listed in `undefinedOutageIndices` |
 | empty monitored or outaged list | `PowsyblException("LODF computation needs at least one monitored branch and one outaged branch")` |
 | threshold negative or NaN | `PowsyblException("LODF threshold must be positive or zero: " + threshold)` |
-| id unknown to the iidm network (`LodfComputer` only) | `PowsyblException("Branch '" + id + "' not found")` |
+| id unknown to the iidm network (`LodfAnalysis` only) | `PowsyblException("Branch '" + id + "' not found")` |
 
 Why the 1e-6 criterion is enough for a first version (addresses review point 1 of #6 by documenting it, no new code):
 
@@ -104,7 +113,7 @@ import com.powsybl.math.matrix.SparseMatrix;
 import java.util.List;
 
 /**
- * Result of a DC LODF computation, see {@link LodfCalculator}.
+ * Result of a DC LODF computation, see {@link LodfEngine}.
  *
  * @param lodfMatrix the LODF matrix, with one row per monitored branch and one column per outaged branch, in the order
  *                   of the given lists. Only the factors whose absolute value is greater than or equal to the threshold
@@ -119,7 +128,7 @@ public record LodfResult(SparseMatrix lodfMatrix, List<Integer> undefinedOutageI
 }
 ```
 
-### 4.2 `LodfCalculator`
+### 4.2 `LodfEngine`
 
 Instance fields avoid passing seven parameters around (same pattern as `WoodburyEngine`); the only entry points are
 static.
@@ -161,7 +170,7 @@ import java.util.Objects;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at gmail.com>}
  */
-public final class LodfCalculator {
+public final class LodfEngine {
 
     /**
      * Number of outages solved together: bounds the dense (equation count x batch size) states matrix, at no cost as the
@@ -183,7 +192,7 @@ public final class LodfCalculator {
     private final TDoubleArrayList values = new TDoubleArrayList();
     private final List<Integer> undefinedOutageIndices = new ArrayList<>();
 
-    private LodfCalculator(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches, int outageCount, double threshold) {
+    private LodfEngine(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches, int outageCount, double threshold) {
         this.loadFlowContext = loadFlowContext;
         this.monitoredBranches = monitoredBranches;
         EquationSystem<DcVariableType, DcEquationType> equationSystem = loadFlowContext.getEquationSystem();
@@ -201,7 +210,7 @@ public final class LodfCalculator {
      * factors whose absolute value is greater than or equal to the threshold.
      *
      * <p>The DC equation system of the context must have been created with phase control off and with zero impedance
-     * branches replaced by minimal impedance ones, as done by {@link com.powsybl.openloadflow.sensi.LodfComputer}.
+     * branches replaced by minimal impedance ones, as done by {@link com.powsybl.openloadflow.sensi.LodfAnalysis}.
      *
      * <p>A {@code null} entry stands for a branch that is not part of the network: like a branch that is not connected
      * on both sides, it gets no factor as a monitored branch (its flow is 0), and its outage is undefined.
@@ -212,16 +221,16 @@ public final class LodfCalculator {
      * @param threshold the factors whose absolute value is lower than this threshold are not kept, 0 keeps all of them
      * @return the sparse LODF matrix and the indexes of the outages whose factors are undefined
      */
-    public static LodfResult computeLodf(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches,
-                                         List<LfBranch> outagedBranches, double threshold) {
-        return computeLodf(loadFlowContext, monitoredBranches, outagedBranches, threshold, OUTAGE_BATCH_SIZE);
+    public static LodfResult run(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches,
+                                 List<LfBranch> outagedBranches, double threshold) {
+        return run(loadFlowContext, monitoredBranches, outagedBranches, threshold, OUTAGE_BATCH_SIZE);
     }
 
     /**
-     * Same as {@link #computeLodf(DcLoadFlowContext, List, List, double)} with an explicit batch size, for tests.
+     * Same as {@link #run(DcLoadFlowContext, List, List, double)} with an explicit batch size, for tests.
      */
-    static LodfResult computeLodf(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches,
-                                  List<LfBranch> outagedBranches, double threshold, int outageBatchSize) {
+    static LodfResult run(DcLoadFlowContext loadFlowContext, List<LfBranch> monitoredBranches,
+                          List<LfBranch> outagedBranches, double threshold, int outageBatchSize) {
         Objects.requireNonNull(loadFlowContext);
         Objects.requireNonNull(monitoredBranches);
         Objects.requireNonNull(outagedBranches);
@@ -231,12 +240,12 @@ public final class LodfCalculator {
         if (Double.isNaN(threshold) || threshold < 0) {
             throw new PowsyblException("LODF threshold must be positive or zero: " + threshold);
         }
-        LodfCalculator calculator = new LodfCalculator(loadFlowContext, monitoredBranches, outagedBranches.size(), threshold);
+        LodfEngine engine = new LodfEngine(loadFlowContext, monitoredBranches, outagedBranches.size(), threshold);
         for (int batchStart = 0; batchStart < outagedBranches.size(); batchStart += outageBatchSize) {
             int batchEnd = Math.min(batchStart + outageBatchSize, outagedBranches.size());
-            calculator.addColumns(outagedBranches.subList(batchStart, batchEnd), batchStart);
+            engine.addColumns(outagedBranches.subList(batchStart, batchEnd), batchStart);
         }
-        return calculator.createResult();
+        return engine.createResult();
     }
 
     /**
@@ -304,7 +313,7 @@ public final class LodfCalculator {
 }
 ```
 
-### 4.3 `LodfComputer`
+### 4.3 `LodfAnalysis`
 
 ```java
 package com.powsybl.openloadflow.sensi;
@@ -317,7 +326,7 @@ import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.dc.DcLoadFlowContext;
 import com.powsybl.openloadflow.dc.DcLoadFlowParameters;
-import com.powsybl.openloadflow.dc.fastdc.LodfCalculator;
+import com.powsybl.openloadflow.dc.fastdc.LodfEngine;
 import com.powsybl.openloadflow.dc.fastdc.LodfResult;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -328,13 +337,13 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * Network level entry point of the DC LODF computation of {@link LodfCalculator}.
+ * Network level entry point of the DC LODF computation of {@link LodfEngine}.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at gmail.com>}
  */
-public final class LodfComputer {
+public final class LodfAnalysis {
 
-    private LodfComputer() {
+    private LodfAnalysis() {
     }
 
     /**
@@ -353,8 +362,8 @@ public final class LodfComputer {
      * @param parameters the load flow parameters, defining the DC model
      * @return the sparse LODF matrix and the indexes of the outages whose factors are undefined
      */
-    public static LodfResult computeLodf(Network network, List<String> monitoredBranchIds, List<String> outagedBranchIds,
-                                         double threshold, LoadFlowParameters parameters) {
+    public static LodfResult run(Network network, List<String> monitoredBranchIds, List<String> outagedBranchIds,
+                                 double threshold, LoadFlowParameters parameters) {
         Objects.requireNonNull(network);
         Objects.requireNonNull(monitoredBranchIds);
         Objects.requireNonNull(outagedBranchIds);
@@ -376,7 +385,7 @@ public final class LodfComputer {
         List<LfBranch> monitoredBranches = getLfBranches(network, lfNetwork, monitoredBranchIds);
         List<LfBranch> outagedBranches = getLfBranches(network, lfNetwork, outagedBranchIds);
         try (DcLoadFlowContext loadFlowContext = new DcLoadFlowContext(lfNetwork, dcParameters, false)) {
-            return LodfCalculator.computeLodf(loadFlowContext, monitoredBranches, outagedBranches, threshold);
+            return LodfEngine.run(loadFlowContext, monitoredBranches, outagedBranches, threshold);
         }
     }
 
@@ -417,8 +426,8 @@ public final class LodfComputer {
    classes `final` with a private constructor.
 7. Load test networks like the existing fast DC tests:
    `LfNetwork.load(network, new LfNetworkLoaderImpl(), dcParameters.getNetworkParameters()).getFirst()`.
-8. In `LodfCalculatorTest`, use `new DcLoadFlowParameters()` (phase control off, minimal impedance off): do not put zero
-   impedance branches in those tests (no flow term). Zero impedance branches are tested through `LodfComputer`.
+8. In `LodfEngineTest`, use `new DcLoadFlowParameters()` (phase control off, minimal impedance off): do not put zero
+   impedance branches in those tests (no flow term). Zero impedance branches are tested through `LodfAnalysis`.
 
 ## 6. Tests
 
@@ -427,7 +436,7 @@ Port the post-outage flow helpers (`calculateFlows`, `checkLodfMatrixAgainstPost
 `LodfCalculatorTest`. They are on branch `claude/lodf-factors-dc-sa-i1ttsi`. Adapt them to read
 `result.lodfMatrix().toDense()`, and drop the vectorized parameterization.
 
-`LodfCalculatorTest` (package `com.powsybl.openloadflow.dc.fastdc`):
+`LodfEngineTest` (package `com.powsybl.openloadflow.dc.fastdc`):
 
 | test | network | checks |
 |---|---|---|
@@ -439,7 +448,7 @@ Port the post-outage flow helpers (`calculateFlows`, `checkLodfMatrixAgainstPost
 | `testOpenBranch` | four-bus with `l23` terminal 1 disconnected | `l23` monitored: empty row; `l23` outaged: undefined |
 | `testInvalidInputs` | four-bus | empty monitored list, empty outaged list, threshold -1 and NaN: `PowsyblException` with the messages of section 3 |
 
-`LodfComputerTest` (package `com.powsybl.openloadflow.sensi`), `new LoadFlowParameters()`:
+`LodfAnalysisTest` (package `com.powsybl.openloadflow.sensi`), `new LoadFlowParameters()`:
 
 | test | network | checks |
 |---|---|---|
@@ -459,7 +468,7 @@ Port the post-outage flow helpers (`calculateFlows`, `checkLodfMatrixAgainstPost
 4. **Conventions**: the table of section 3 without the exception rows.
 5. **Usage**:
    ```java
-   LodfResult result = LodfComputer.computeLodf(network, monitoredBranchIds, outagedBranchIds, 0.05, new LoadFlowParameters());
+   LodfResult result = LodfAnalysis.run(network, monitoredBranchIds, outagedBranchIds, 0.05, new LoadFlowParameters());
    SparseMatrix lodfMatrix = result.lodfMatrix(); // rows: monitored branches, columns: outaged branches
    List<Integer> undefinedOutageIndices = result.undefinedOutageIndices();
    ```
@@ -481,7 +490,7 @@ Port the post-outage flow helpers (`calculateFlows`, `checkLodfMatrixAgainstPost
 ## 9. Verification and delivery
 
 ```bash
-./mvnw --batch-mode -Dtest='LodfCalculatorTest,LodfComputerTest' test   # checkstyle runs too (validate phase)
+./mvnw --batch-mode -Dtest='LodfEngineTest,LodfAnalysisTest' test   # checkstyle runs too (validate phase)
 ./mvnw --batch-mode install                                            # full build before pushing
 ```
 
@@ -494,6 +503,6 @@ Port the post-outage flow helpers (`calculateFlows`, `checkLodfMatrixAgainstPost
     1. tolerance: documented, see section 3;
     2. streaming writer and threads: removed;
     3. batch sizing division by zero: fixed batch size;
-    4. phase-control precondition: in the javadoc, and enforced by `LodfComputer`;
+    4. phase-control precondition: in the javadoc, and enforced by `LodfAnalysis`;
     5. nits: the pypowsybl files are not included.
   - that it supersedes gautierbureau/powsybl-open-loadflow#6.
