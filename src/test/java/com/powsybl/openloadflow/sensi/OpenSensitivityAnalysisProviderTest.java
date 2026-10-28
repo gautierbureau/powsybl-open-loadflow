@@ -45,7 +45,7 @@ class OpenSensitivityAnalysisProviderTest extends AbstractSensitivityAnalysisTes
     void specificParametersTest() {
         var provider = new OpenSensitivityAnalysisProvider();
 
-        assertEquals(3, provider.getSpecificParametersNames().size());
+        assertEquals(4, provider.getSpecificParametersNames().size());
 
         SensitivityAnalysisParameters parameters = new SensitivityAnalysisParameters();
 
@@ -64,6 +64,11 @@ class OpenSensitivityAnalysisProviderTest extends AbstractSensitivityAnalysisTes
         provider.loadSpecificParameters(Map.of(OpenSensitivityAnalysisParameters.THREAD_COUNT_PARAM_NAME, "2"))
                 .ifPresent(parametersExt -> parameters.addExtension((Class) parametersExt.getClass(), parametersExt));
         assertEquals(2, parameters.getExtension(OpenSensitivityAnalysisParameters.class).getThreadCount());
+
+        assertFalse(parameters.getExtension(OpenSensitivityAnalysisParameters.class).isAdjointSlackDistribution());
+        provider.loadSpecificParameters(Map.of(OpenSensitivityAnalysisParameters.ADJOINT_SLACK_DISTRIBUTION_PARAM_NAME, "true"))
+                .ifPresent(parametersExt -> parameters.addExtension((Class) parametersExt.getClass(), parametersExt));
+        assertTrue(parameters.getExtension(OpenSensitivityAnalysisParameters.class).isAdjointSlackDistribution());
     }
 
     @Test
