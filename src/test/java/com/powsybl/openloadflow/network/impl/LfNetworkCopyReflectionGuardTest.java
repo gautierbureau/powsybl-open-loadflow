@@ -8,7 +8,6 @@
 package com.powsybl.openloadflow.network.impl;
 
 import com.powsybl.commons.report.ReportNode;
-import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.DenseMatrixFactory;
@@ -16,17 +15,11 @@ import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcloadFlowEngine;
-import com.powsybl.openloadflow.ac.AsymmetricalLoadFlowTest;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
-import com.powsybl.openloadflow.network.AcDcNetworkFactory;
-import com.powsybl.openloadflow.network.HvdcNetworkFactory;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfTopoConfig;
 import com.powsybl.openloadflow.network.LoadFlowModel;
-import com.powsybl.openloadflow.network.MultiAreaNetworkFactory;
 import com.powsybl.openloadflow.network.NodeBreakerNetworkFactory;
-import com.powsybl.openloadflow.network.PhaseControlFactory;
-import com.powsybl.openloadflow.network.SlackBusSelectionMode;
 import com.powsybl.openloadflow.util.Evaluable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -56,7 +49,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  *   <li>values (primitives, strings, enums) must be <b>equal</b>;</li>
  *   <li>objects of this library must be <b>distinct but corresponding</b> instances — an identity
  *       map also checks the sharing topology (an object referenced twice in the original must map
- *       to a single copied object referenced the same way);</li>
+ *       to a single copied object referenced the same way), the outer instance of an inner class
+ *       instance included;</li>
  *   <li>collections and maps must be <b>distinct containers</b> (no aliasing of mutable state
  *       between the copy and the original, which two threads would then mutate concurrently)
  *       with corresponding content;</li>
@@ -115,6 +109,7 @@ class LfNetworkCopyReflectionGuardTest {
             "LfLoadImpl#loadModel",
             "LfStaticVarCompensatorImpl#standByAutomaton",
             "AbstractLfAcDcConverter#lossFactors",
+            "LfVoltageSourceConverterImpl#droopBands",
             // immutable after the load by design
             "AbstractLfGenerator#asym", "AbstractLfBranch#asymLine",
             "LfNetwork#slackBusSelector", "LfNetwork#referenceBusSelector", "LfNetwork#connectivityFactory",
@@ -129,27 +124,15 @@ class LfNetworkCopyReflectionGuardTest {
     }
 
     static Stream<Arguments> cases() {
-        Network nodeBreakerNetwork = NodeBreakerNetworkFactory.create();
-        LfTopoConfig nodeBreakerTopoConfig = new LfTopoConfig();
-        nodeBreakerTopoConfig.getSwitchesToOpen().add(nodeBreakerNetwork.getSwitch("C"));
-
-        return Stream.of(
-                // solved network: mutable state differs from the freshly built defaults, so the equality
-                // checks actually discriminate
-                new Case("ieee300Solved", IeeeCdfNetworkFactory.create300(), p -> { }, new LfTopoConfig(), true),
-                new Case("nodeBreakerRetainedSwitch", nodeBreakerNetwork, p -> { }, nodeBreakerTopoConfig, false),
-                new Case("phaseControlT2wt", PhaseControlFactory.createNetworkWithT2wt(), p -> p.setPhaseShifterRegulationOn(true), new LfTopoConfig(), false),
-                new Case("hvdcAcEmulationSolved", HvdcNetworkFactory.createNetworkWithGenerators(), p -> p.setHvdcAcEmulation(true), new LfTopoConfig(), true),
-                new Case("areas", MultiAreaNetworkFactory.createTwoAreasWithTieLine(), p -> { }, new LfTopoConfig(), false),
-                new Case("acDcThreeConvertersSolved", AcDcNetworkFactory.createAcDcNetworkWithThreeConverters(),
-                        p -> OpenLoadFlowParameters.create(p).setAcDcNetwork(true), new LfTopoConfig(), true),
-                new Case("asymmetricalSolved", AsymmetricalLoadFlowTest.fourNodescreate(),
-                        p -> {
-                            p.setUseReactiveLimits(false).setDistributedSlack(false);
-                            OpenLoadFlowParameters.create(p).setAsymmetrical(true)
-                                    .setSlackBusSelectionMode(SlackBusSelectionMode.FIRST);
-                        }, new LfTopoConfig(), true)
-        ).map(Arguments::of);
+        // the cases of the behavioral equivalence test, which enable the optional features (controls,
+        // automation systems, HVDC AC emulation, areas...): the walk only checks the classes it finds
+        // instances of. Each case is also walked once solved: the mutable state then differs from the
+        // freshly built defaults, so the equality checks actually discriminate
+        return LfNetworkCopierTest.cases()
+                .map(arguments -> (LfNetworkCopierTest.Case) arguments.get()[0])
+                .flatMap(c -> Stream.of(new Case(c.name(), c.network(), c.parametersCustomizer(), c.topoConfig(), false),
+                        new Case(c.name() + "Solved", c.network(), c.parametersCustomizer(), c.topoConfig(), true)))
+                .map(Arguments::of);
     }
 
     @ParameterizedTest(name = "{0}")
@@ -253,7 +236,12 @@ class LfNetworkCopyReflectionGuardTest {
 
             for (Class<?> type = original.getClass(); type != null && type.getName().startsWith(OUR_PACKAGE); type = type.getSuperclass()) {
                 for (Field field : type.getDeclaredFields()) {
-                    if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic()) {
+                    if (Modifier.isStatic(field.getModifiers())) {
+                        continue;
+                    }
+                    // the synthetic outer instance of an inner class is walked: a copied inner instance must be
+                    // bound to the copy of its outer instance, not to the original one
+                    if (field.isSynthetic() && !field.getName().startsWith("this$")) {
                         continue;
                     }
                     String key = type.getSimpleName() + "#" + field.getName();
