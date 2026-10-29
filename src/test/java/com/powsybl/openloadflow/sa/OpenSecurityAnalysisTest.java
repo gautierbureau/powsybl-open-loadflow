@@ -1533,6 +1533,51 @@ class OpenSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest {
     }
 
     @Test
+    void testViolationsEqualUpToRoundingAreEquivalent() {
+        // With the default thresholds (0 for voltage), a post-contingency value one ULP on the worse side of its
+        // pre-contingency value is the same value, not an increased violation; a 1e-9 relative increase still is one.
+        SecurityAnalysisParameters.IncreasedViolationsParameters violationsParameters = new SecurityAnalysisParameters.IncreasedViolationsParameters();
+        LimitViolation lowVoltage = voltageViolation(LimitViolationType.LOW_VOLTAGE, 380, 375);
+        assertTrue(LimitViolationManager.violationWeakenedOrEquivalent(lowVoltage,
+                voltageViolation(LimitViolationType.LOW_VOLTAGE, 380, Math.nextDown(375.0)), violationsParameters));
+        assertFalse(LimitViolationManager.violationWeakenedOrEquivalent(lowVoltage,
+                voltageViolation(LimitViolationType.LOW_VOLTAGE, 380, 375 * (1 - 1e-9)), violationsParameters));
+
+        LimitViolation highVoltage = voltageViolation(LimitViolationType.HIGH_VOLTAGE, 420, 421);
+        assertTrue(LimitViolationManager.violationWeakenedOrEquivalent(highVoltage,
+                voltageViolation(LimitViolationType.HIGH_VOLTAGE, 420, Math.nextUp(421.0)), violationsParameters));
+        assertFalse(LimitViolationManager.violationWeakenedOrEquivalent(highVoltage,
+                voltageViolation(LimitViolationType.HIGH_VOLTAGE, 420, 421 * (1 + 1e-9)), violationsParameters));
+
+        // likewise for a flow, with a 0 proportional threshold
+        violationsParameters.setFlowProportionalThreshold(0);
+        LimitViolation current = currentViolation(1047.86);
+        assertTrue(LimitViolationManager.violationWeakenedOrEquivalent(current, currentViolation(Math.nextUp(1047.86)), violationsParameters));
+        assertFalse(LimitViolationManager.violationWeakenedOrEquivalent(current, currentViolation(1047.86 * (1 + 1e-9)), violationsParameters));
+    }
+
+    private static LimitViolation voltageViolation(LimitViolationType type, double limit, double value) {
+        return new LimitViolationBuilder()
+                .subject("voltageLevel1")
+                .type(type)
+                .limit(limit)
+                .value(value)
+                .build();
+    }
+
+    private static LimitViolation currentViolation(double value) {
+        return new LimitViolationBuilder()
+                .subject("line1")
+                .current()
+                .limitName("permanent")
+                .duration(Integer.MAX_VALUE)
+                .side1()
+                .limit(1000)
+                .value(value)
+                .build();
+    }
+
+    @Test
     void testViolationOnThreeWindingsTransformersLeg() {
         Network network = T3wtFactory.create();
         network.getThreeWindingsTransformer("3wt").getLeg2().getOrCreateSelectedOperationalLimitsGroup().newCurrentLimits()
