@@ -45,6 +45,34 @@ public class PerEquationTypeStoppingCriteria implements NewtonRaphsonStoppingCri
         this.maxDefaultSusceptanceMismatch = maxDefaultSusceptanceMismatch;
     }
 
+    public double getConvEpsPerEq() {
+        return convEpsPerEq;
+    }
+
+    public double getMaxActivePowerMismatch() {
+        return maxActivePowerMismatch;
+    }
+
+    public double getMaxReactivePowerMismatch() {
+        return maxReactivePowerMismatch;
+    }
+
+    public double getMaxVoltageMismatch() {
+        return maxVoltageMismatch;
+    }
+
+    public double getMaxDefaultAngleMismatch() {
+        return maxDefaultAngleMismatch;
+    }
+
+    public double getMaxDefaultRatioMismatch() {
+        return maxDefaultRatioMismatch;
+    }
+
+    public double getMaxDefaultSusceptanceMismatch() {
+        return maxDefaultSusceptanceMismatch;
+    }
+
     private double computeNorm(double[] fx) {
         return Vectors.norm2(fx);
     }
