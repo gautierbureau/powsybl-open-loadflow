@@ -93,7 +93,7 @@ public final class LfBoundaryLineGenerator extends AbstractLfGenerator {
     }
 
     @Override
-    protected Optional<ReactiveLimits> getReactiveLimits() {
+    public Optional<ReactiveLimits> getReactiveLimits() {
         return Optional.ofNullable(getBoundaryLine().getGeneration().getReactiveLimits());
     }
 
