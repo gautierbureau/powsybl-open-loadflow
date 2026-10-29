@@ -23,6 +23,7 @@ import com.powsybl.openloadflow.network.*;
 import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
 import com.powsybl.openloadflow.network.impl.PropagatedContingencyCreationParameters;
+import com.powsybl.openloadflow.util.PerUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -38,6 +39,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import static com.powsybl.openloadflow.network.impl.PropagatedContingency.createList;
@@ -163,5 +165,28 @@ class LfContingencyTest extends AbstractSerDeTest {
                             lfNetwork.getBranchById("T3wT_leg_2"), DisabledBranchStatus.BOTH_SIDES,
                             lfNetwork.getBranchById("T3wT_leg_3"), DisabledBranchStatus.BOTH_SIDES),
                 lfContingency.getDisabledNetwork().getBranchesStatus());
+    }
+
+    @Test
+    void testShuntCompensatorContingencyShiftsItsAdmittance() {
+        Network network = ShuntNetworkFactory.create();
+        network.getShuntCompensator("SHUNT").setSectionCount(1);
+        Contingency contingency = new Contingency("SHUNT", new ShuntCompensatorContingency("SHUNT"));
+        PropagatedContingency propagatedContingency = createList(network, List.of(contingency), new LfTopoConfig(),
+                new PropagatedContingencyCreationParameters()).get(0);
+        assertEquals(Set.of("SHUNT"), propagatedContingency.getShuntIdsToShift().keySet());
+        double zb = PerUnit.zb(network.getVoltageLevel("vl3").getNominalV());
+        AdmittanceShift shift = propagatedContingency.getShuntIdsToShift().get("SHUNT");
+        assertEquals(0, shift.getG());
+        assertEquals(1e-3 * zb, shift.getB(), 1e-12);
+    }
+
+    @Test
+    void testHvdcLineContingencyOpensTheLine() {
+        Network network = HvdcNetworkFactory.createVsc();
+        Contingency contingency = new Contingency("hvdc23", new HvdcLineContingency("hvdc23"));
+        PropagatedContingency propagatedContingency = createList(network, List.of(contingency), new LfTopoConfig(),
+                new PropagatedContingencyCreationParameters()).get(0);
+        assertEquals(Set.of("hvdc23"), propagatedContingency.getHvdcIdsToOpen());
     }
 }
