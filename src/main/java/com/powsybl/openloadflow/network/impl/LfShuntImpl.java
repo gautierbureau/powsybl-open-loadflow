@@ -136,9 +136,11 @@ public class LfShuntImpl extends AbstractLfShunt {
         switch (shuntCompensator.getModelType()) {
             case LINEAR:
                 ShuntCompensatorLinearModel linearModel = (ShuntCompensatorLinearModel) model;
+                // the conductance per section is optional and reads NaN when unset: no conductance, as ShuntCompensator.getG() has it
+                double gPerSection = Double.isNaN(linearModel.getGPerSection()) ? 0 : linearModel.getGPerSection();
                 for (int section = 1; section <= shuntCompensator.getMaximumSectionCount(); section++) {
                     sectionsB.add(linearModel.getBPerSection() * section * zb);
-                    sectionsG.add(linearModel.getGPerSection() * section * zb);
+                    sectionsG.add(gPerSection * section * zb);
                 }
                 break;
             case NON_LINEAR:
