@@ -11,8 +11,11 @@ import com.powsybl.action.*;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.iidm.network.Branch;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.ShuntCompensator;
+import com.powsybl.iidm.network.ShuntCompensatorModelType;
 import com.powsybl.iidm.network.Switch;
 import com.powsybl.iidm.network.TieLine;
+import com.powsybl.iidm.network.regulation.RegulationMode;
 import com.powsybl.openloadflow.network.LfTopoConfig;
 import com.powsybl.openloadflow.network.impl.LfLegBranch;
 
@@ -57,8 +60,9 @@ public final class Actions {
                 case TerminalsConnectionAction.NAME: {
                     TerminalsConnectionAction terminalsConnectionAction = (TerminalsConnectionAction) action;
                     if (network.getBranch(terminalsConnectionAction.getElementId()) == null &&
-                        network.getThreeWindingsTransformer(terminalsConnectionAction.getElementId()) == null) {
-                        throw new PowsyblException("Branch or three windings transformer '" + terminalsConnectionAction.getElementId() + NOT_FOUND);
+                        network.getThreeWindingsTransformer(terminalsConnectionAction.getElementId()) == null &&
+                        network.getShuntCompensator(terminalsConnectionAction.getElementId()) == null) {
+                        throw new PowsyblException("Branch, three windings transformer or shunt compensator '" + terminalsConnectionAction.getElementId() + NOT_FOUND);
                     }
                     break;
                 }
@@ -172,6 +176,27 @@ public final class Actions {
     public static void addAllShuntsToOperate(LfTopoConfig topoConfig, List<Action> actions) {
         actions.stream().filter(action -> action.getType().equals(ShuntCompensatorPositionAction.NAME))
                 .forEach(action -> topoConfig.addShuntIdToOperate(((ShuntCompensatorPositionAction) action).getShuntCompensatorId()));
+    }
+
+    /**
+     * A terminals connection action on a linear shunt compensator sets its section count, to connect it, or section 0, to
+     * disconnect it: a connected one has its sections kept, and a disconnected one is loaded connected at section 0 (see
+     * {@link LfTopoConfig#getShuntIdsToClose()}), unless it controls voltage, since its section would then be the voltage
+     * control's to change.
+     */
+    public static void addAllShuntsToConnectOrDisconnect(LfTopoConfig topoConfig, Network network, List<Action> actions) {
+        for (Action action : actions) {
+            if (TerminalsConnectionAction.NAME.equals(action.getType())) {
+                ShuntCompensator shuntCompensator = network.getShuntCompensator(((TerminalsConnectionAction) action).getElementId());
+                if (shuntCompensator != null && shuntCompensator.getModelType() == ShuntCompensatorModelType.LINEAR) {
+                    if (shuntCompensator.getTerminal().getBusView().getBus() != null) {
+                        topoConfig.addShuntIdToOperate(shuntCompensator.getId());
+                    } else if (!shuntCompensator.isRegulatingWithMode(RegulationMode.VOLTAGE)) {
+                        topoConfig.getShuntIdsToClose().add(shuntCompensator.getId());
+                    }
+                }
+            }
+        }
     }
 
     public static void addAllBranchesToClose(LfTopoConfig topoConfig, Network network, List<Action> actions) {
