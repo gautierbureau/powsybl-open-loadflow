@@ -78,6 +78,7 @@ import java.util.stream.Stream;
 import static com.google.common.collect.testing.Helpers.assertEmpty;
 import static com.powsybl.openloadflow.network.ZeroImpedanceNetworkFactory.createWith3BusesNonImpedantSubNetwork;
 import static com.powsybl.openloadflow.network.ZeroImpedanceNetworkFactory.createWithNonImpedantThreeWindingsTransformer;
+import static com.powsybl.openloadflow.network.ZeroImpedanceNetworkFactory.createWithZeroImpedanceLoop;
 import static com.powsybl.openloadflow.util.LoadFlowAssert.*;
 import static java.util.Collections.emptySet;
 import static org.junit.jupiter.api.Assertions.*;
@@ -5217,6 +5218,41 @@ class OpenSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest {
         SecurityAnalysisResult result = assertDoesNotThrow(() -> runSecurityAnalysis(network, contingencies, monitors, loadFlowParameters));
         assertEquals(expectedL12P1, result.getPreContingencyResult().getNetworkResult().getBranchResult("l12").getP1(), DELTA_POWER);
         assertEquals(expectedL12P1, result.getPostContingencyResults().getFirst().getNetworkResult().getBranchResult("l12").getP1(), DELTA_POWER);
+    }
+
+    /**
+     * The flows of a zero impedance loop are computed on a spanning tree of the loop. In the base case the tree is
+     * {z12, z13} and z23 carries no flow. The contingency z12 opens a tree edge, so z23 enters the tree. Once z12 is
+     * closed again, the following contingency ld4 must be computed with the base case tree: its flows must not depend
+     * on the contingency run before it.
+     */
+    @ParameterizedTest(name = "DC = {0}")
+    @ValueSource(booleans = {false, true})
+    void testZeroImpedanceLoopFlowsDoNotDependOnPreviousContingencies(boolean dc) {
+        Network network = createWithZeroImpedanceLoop();
+        LoadFlowParameters loadFlowParameters = new LoadFlowParameters()
+                .setDc(dc);
+        OpenLoadFlowParameters.create(loadFlowParameters)
+                .setLowImpedanceBranchMode(OpenLoadFlowParameters.LowImpedanceBranchMode.REPLACE_BY_ZERO_IMPEDANCE_LINE);
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+        Contingency z12 = Contingency.line("z12");
+        Contingency ld4 = new Contingency("ld4", new LoadContingency("ld4"));
+
+        SecurityAnalysisResult ld4Alone = runSecurityAnalysis(network, List.of(ld4), monitors, loadFlowParameters);
+        SecurityAnalysisResult ld4AfterZ12 = runSecurityAnalysis(network, List.of(z12, ld4), monitors, loadFlowParameters);
+
+        // z12 opened: the flow to ld2 goes through z13 and z23
+        NetworkResult z12Result = getPostContingencyResult(ld4AfterZ12, "z12").getNetworkResult();
+        assertEquals(3.0, z12Result.getBranchResult("z13").getP1(), DELTA_POWER);
+        assertEquals(-2.0, z12Result.getBranchResult("z23").getP1(), DELTA_POWER);
+
+        // ld4 lost: the flow to ld2 goes through z12 only, whether z12 has been opened before or not
+        for (SecurityAnalysisResult result : List.of(ld4Alone, ld4AfterZ12)) {
+            NetworkResult ld4Result = getPostContingencyResult(result, "ld4").getNetworkResult();
+            assertEquals(2.0, ld4Result.getBranchResult("z12").getP1(), DELTA_POWER);
+            assertEquals(0.0, ld4Result.getBranchResult("z13").getP1(), DELTA_POWER);
+            assertEquals(0.0, ld4Result.getBranchResult("z23").getP1(), DELTA_POWER);
+        }
     }
 
     @ParameterizedTest(name = "DC = {0}")
