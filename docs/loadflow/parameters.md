@@ -855,8 +855,9 @@ voltage target is reached. Available values are:
 - `Q_QR`: the units are aligned on the level `q / qr`, where `qr` is the participation factor of the unit (half of its
   reactive range by default, see `LfSecondaryVoltageControl.setParticipationFactor`). The reactive power is then shared
   proportionally to the participation factors, which is the alignment variable of the reactive power control loops of the
-  Dynawo/DynaFlow secondary voltage control models. Note that in this mode the level saturates at `-1` and `1`, so a unit
-  with an asymmetric reactive diagram does not use the whole of it.
+  Dynawo/DynaFlow secondary voltage control models. In this mode the level saturates at `-1` and `1` like in the dynamic
+  models: the reactive power of a participating unit is bounded to `[-qr, qr]` (on top of its own reactive limits), so a
+  unit with an asymmetric reactive diagram does not use the whole of it and a far pilot point target may not be reached.
 
 The default value is `K`.
 

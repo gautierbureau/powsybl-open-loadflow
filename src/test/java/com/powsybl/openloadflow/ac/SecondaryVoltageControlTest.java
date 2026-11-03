@@ -51,6 +51,8 @@ import static org.junit.jupiter.api.Assertions.*;
 @ExtendWith(ServiceParameterResolver.class)
 class SecondaryVoltageControlTest {
 
+    private static final double TARGET_V_SATURATION = 14.5;
+
     private final CommonTestConfig commonTestConfig;
 
     SecondaryVoltageControlTest(CommonTestConfig commonTestConfig) {
@@ -987,5 +989,45 @@ class SecondaryVoltageControlTest {
         // whereas the k values of the two units are not aligned (compare with testNoReactiveLimits: k = -0.412 for both)
         assertEquals(-0.121, qToK(g6), DELTA_POWER);
         assertEquals(-0.463, qToK(g8), DELTA_POWER);
+    }
+
+    @Test
+    void testQQrAlignmentModeSaturation() {
+        // in Q/Qr mode the level saturates at 1 like in the dynamic models: g6 [-6, 24] cannot be asked more than
+        // qr = 15 Mvar and g8 [-6, 200] more than qr = 103 Mvar, so a far pilot point target is not reached, whereas
+        // the K mode uses the whole reactive diagrams
+        network.newExtension(SecondaryVoltageControlAdder.class)
+                .newControlZone()
+                .withName("z1")
+                .newPilotPoint().withTargetV(TARGET_V_SATURATION).withBusbarSectionsOrBusesIds(List.of("B10")).add()
+                .newControlUnit().withId("B6-G").add()
+                .newControlUnit().withId("B8-G").add()
+                .add()
+                .add();
+        parametersExt.setSecondaryVoltageControl(true)
+                .setSecondaryVoltageControlAlignmentMode(LfSecondaryVoltageControl.AlignmentMode.Q_QR);
+
+        LoadFlowResult result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        assertEquals(20, result.getComponentResults().get(0).getIterationCount());
+        assertVoltageEquals(13.798, b10); // 14.5 kV is out of reach with the level saturated at 1
+        assertVoltageEquals(13.663, b6);
+        assertVoltageEquals(26.486, b8);
+        assertReactivePowerEquals(-15, g6.getTerminal()); // qr = (24 + 6) / 2
+        assertReactivePowerEquals(-103, g8.getTerminal()); // qr = (200 + 6) / 2
+        assertEquals(1, qToLevel(g6), DELTA_POWER);
+        assertEquals(1, qToLevel(g8), DELTA_POWER);
+
+        parametersExt.setSecondaryVoltageControlAlignmentMode(LfSecondaryVoltageControl.AlignmentMode.K);
+        result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        assertEquals(21, result.getComponentResults().get(0).getIterationCount());
+        assertVoltageEquals(14.5, b10); // reached with the whole reactive diagrams
+        assertVoltageEquals(14.184, b6);
+        assertVoltageEquals(29.108, b8);
+        assertReactivePowerEquals(-18.417, g6.getTerminal());
+        assertReactivePowerEquals(-161.669, g8.getTerminal());
+        assertEquals(0.628, qToK(g6), DELTA_POWER);
+        assertEquals(0.628, qToK(g8), DELTA_POWER);
     }
 }

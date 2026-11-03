@@ -143,9 +143,22 @@ public interface LfBus extends LfElement, LfCopyable<LfBus, LfNetwork> {
 
     boolean isGenerationTargetQFrozen();
 
+    /**
+     * Minimum reactive power of the bus (pu), including the bounds set by a secondary voltage control if any.
+     */
     double getMinQ();
 
+    /**
+     * Maximum reactive power of the bus (pu), including the bounds set by a secondary voltage control if any.
+     */
     double getMaxQ();
+
+    /**
+     * Set reactive power bounds (pu) tighter than the generator reactive limits, as imposed by a secondary voltage
+     * control whose level saturates at -1 and 1 (see {@link LfSecondaryVoltageControl.AlignmentMode#Q_QR}). NaN removes
+     * the bound.
+     */
+    void setSecondaryVoltageControlReactiveBounds(double minQ, double maxQ);
 
     Optional<QLimitType> getQLimitType();
 

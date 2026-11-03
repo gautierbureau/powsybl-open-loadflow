@@ -109,6 +109,7 @@ public class LfSecondaryVoltageControl implements LfCopyable<LfSecondaryVoltageC
         this.targetValue = targetValue;
         this.controlUnits = List.copyOf(controlUnits);
         this.alignmentMode = Objects.requireNonNull(alignmentMode);
+        applyParticipationBounds();
     }
 
     public LfSecondaryVoltageControl copy(LfNetwork copyNetwork) {
@@ -132,6 +133,23 @@ public class LfSecondaryVoltageControl implements LfCopyable<LfSecondaryVoltageC
                 controlUnit.setParticipationFactor(participationFactor);
             }
         }
+        applyParticipationBounds();
+    }
+
+    /**
+     * Half of the reactive range of the generators of a controller bus (pu), without the bounds set by the secondary
+     * voltage control itself.
+     */
+    private static double getHalfReactiveRange(LfBus controllerBus) {
+        double minQ = 0;
+        double maxQ = 0;
+        for (LfGenerator generator : controllerBus.getGenerators()) {
+            if (!generator.isDisabled() && generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE) {
+                minQ += generator.getMinQ();
+                maxQ += generator.getMaxQ();
+            }
+        }
+        return (maxQ - minQ) / 2;
     }
 
     /**
@@ -149,7 +167,33 @@ public class LfSecondaryVoltageControl implements LfCopyable<LfSecondaryVoltageC
                 defined = true;
             }
         }
-        return defined ? qr : (controllerBus.getMaxQ() - controllerBus.getMinQ()) / 2;
+        return defined ? qr : getHalfReactiveRange(controllerBus);
+    }
+
+    /**
+     * In {@link AlignmentMode#Q_QR}, the level is saturated at -1 and 1 like in the dynamic secondary voltage control
+     * models: a participating unit cannot be asked more than its participation factor qr, so the reactive power of its
+     * controller bus is bounded to [-qr, qr] (on top of its own reactive limits). Buses of units that do not participate
+     * anymore get their bound removed.
+     */
+    private void applyParticipationBounds() {
+        Set<LfBus> participatingBuses = new LinkedHashSet<>();
+        Set<LfBus> allBuses = new LinkedHashSet<>();
+        for (ControlUnit controlUnit : controlUnits) {
+            List<LfBus> buses = controlUnit.getGeneratorVoltageControl().getMergedControllerElements();
+            allBuses.addAll(buses);
+            if (controlUnit.isParticipate()) {
+                participatingBuses.addAll(buses);
+            }
+        }
+        for (LfBus controllerBus : allBuses) {
+            if (alignmentMode == AlignmentMode.Q_QR && participatingBuses.contains(controllerBus)) {
+                double qr = getParticipationFactor(controllerBus);
+                controllerBus.setSecondaryVoltageControlReactiveBounds(-qr, qr);
+            } else {
+                controllerBus.setSecondaryVoltageControlReactiveBounds(Double.NaN, Double.NaN);
+            }
+        }
     }
 
     private static double getControllerBusQ(LfBus controllerBus) {
@@ -220,6 +264,9 @@ public class LfSecondaryVoltageControl implements LfCopyable<LfSecondaryVoltageC
                 controlUnit.setParticipate(participate);
                 changed = true;
             }
+        }
+        if (changed) {
+            applyParticipationBounds();
         }
         return changed;
     }

@@ -59,6 +59,10 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     protected QLimitType qLimitType;
 
+    protected double svcMinQ = Double.NaN;
+
+    protected double svcMaxQ = Double.NaN;
+
     protected final List<LfGenerator> generators = new ArrayList<>();
 
     protected final List<LfVoltageSourceConverter> converters = new ArrayList<>();
@@ -151,6 +155,8 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
         copyReactiveStateFrom(other);
         this.generationTargetP = other.generationTargetP;
         this.qLimitType = other.qLimitType;
+        this.svcMinQ = other.svcMinQ;
+        this.svcMaxQ = other.svcMaxQ;
         this.loadTargetP = other.loadTargetP;
         this.loadTargetQ = other.loadTargetQ;
         // slack and reference flags are not copied: selection is lazily re-run on the copied network
@@ -578,12 +584,20 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     @Override
     public double getMinQ() {
-        return getLimitQ(LfGenerator::getMinQ);
+        double minQ = getLimitQ(LfGenerator::getMinQ);
+        return Double.isNaN(svcMinQ) ? minQ : Math.max(minQ, svcMinQ);
     }
 
     @Override
     public double getMaxQ() {
-        return getLimitQ(LfGenerator::getMaxQ);
+        double maxQ = getLimitQ(LfGenerator::getMaxQ);
+        return Double.isNaN(svcMaxQ) ? maxQ : Math.min(maxQ, svcMaxQ);
+    }
+
+    @Override
+    public void setSecondaryVoltageControlReactiveBounds(double minQ, double maxQ) {
+        this.svcMinQ = minQ;
+        this.svcMaxQ = maxQ;
     }
 
     @Override
