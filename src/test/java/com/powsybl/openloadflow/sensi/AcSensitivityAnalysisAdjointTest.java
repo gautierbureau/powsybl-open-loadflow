@@ -17,6 +17,7 @@ import com.powsybl.iidm.network.ShuntCompensatorLinearModel;
 import com.powsybl.iidm.network.TwoWindingsTransformer;
 import com.powsybl.iidm.network.extensions.SecondaryVoltageControl;
 import com.powsybl.iidm.network.extensions.SecondaryVoltageControlAdder;
+import com.powsybl.iidm.network.regulation.RegulationMode;
 import com.powsybl.loadflow.LoadFlow;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
@@ -1643,7 +1644,7 @@ class AcSensitivityAnalysisAdjointTest {
         AcLoadFlowContext cachedContext = NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow()
                 .getValues().get(0).getContext();
         try (AcLoadFlowContext context = AcSensitivityAnalysis.createAdjointContext(cachedContext,
-                new ReactiveLimitsSmoothing(ReactiveLimitsSmoothing.DEFAULT_MU), 0)) {
+                new ReactiveLimitsSmoothing(ReactiveLimitsSmoothing.DEFAULT_MU), 0, false)) {
             double[] mismatches = AcSensitivityAnalysis.polish(context, 6);
             assertTrue(mismatches[0] > 1e-4, "the exact solution is not the smoothed one, got " + mismatches[0]);
             assertTrue(mismatches[6] < 1e-10, "the polish must converge, got " + Arrays.toString(mismatches));
@@ -1665,5 +1666,109 @@ class AcSensitivityAnalysisAdjointTest {
         var linearized = runAdjoint(network, lfp, new ReactiveLimitsSmoothing(ReactiveLimitsSmoothing.DEFAULT_MU), 0, ieee14Cotangents(), ieee14Levers());
         var polishedDefault = runAdjoint(network, lfp, new ReactiveLimitsSmoothing(ReactiveLimitsSmoothing.DEFAULT_MU), 5, ieee14Cotangents(), ieee14Levers());
         assertTrue(maxAbsDifference(linearized, polishedDefault) < 0.1 * maxAbs(linearized));
+    }
+
+    // ---- the tap changers' voltage control in the adjoint ----
+
+    /**
+     * {@link VoltageControlNetworkFactory#createNetworkWithT2wt} with a tap changer of 401 fine steps (ratio 0.9 to 1.1)
+     * regulating BUS_3 to {@code targetV} with no deadband: the rounding leaves BUS_3 within a few volts of its target,
+     * so a load flow finite difference sees the continuous response of the tap.
+     */
+    private static Network t2wtWithFineTaps(double targetV) {
+        Network network = VoltageControlNetworkFactory.createNetworkWithT2wt();
+        TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("T2wT");
+        t2wt.getRatioTapChanger().remove();
+        var adder = t2wt.newRatioTapChanger();
+        for (int k = 0; k <= 400; k++) {
+            adder.beginStep().setRho(0.9 + 0.0005 * k).setR(0).setX(0).setG(0).setB(0).endStep();
+        }
+        adder.setTapPosition(200)
+                .setLoadTapChangingCapabilities(true)
+                .newVoltageRegulation()
+                    .withTargetValue(targetV)
+                    .withRegulating(false)
+                    .withTerminal(t2wt.getTerminal2())
+                    .withMode(RegulationMode.VOLTAGE)
+                    .add()
+                .add();
+        t2wt.getRatioTapChanger().getVoltageRegulation().setTargetDeadband(0).setRegulating(true);
+        return network;
+    }
+
+    private static LoadFlowParameters tapCacheEnabledParameters() {
+        LoadFlowParameters lfp = cacheEnabledParameters().setTransformerVoltageControlOn(true);
+        OpenLoadFlowParameters.get(lfp)
+                .setTransformerVoltageControlMode(OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
+        return lfp;
+    }
+
+    private static Map<AcSensitivityAnalysis.VariableRef, Double> runAdjointWithTaps(Network network, LoadFlowParameters lfp,
+                                                                                     boolean transformerVoltageControl,
+                                                                                     Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents,
+                                                                                     List<AcSensitivityAnalysis.AdjointVariable> variables) {
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        sensiParams.addExtension(OpenSensitivityAnalysisParameters.class,
+                new OpenSensitivityAnalysisParameters().setAdjointTransformerVoltageControl(transformerVoltageControl));
+        return new AcSensitivityAnalysis(new SparseMatrixFactory(), new DTreeGraphConnectivityFactory<>(), sensiParams)
+                .runAdjoint(network, network.getVariantManager().getWorkingVariantId(), List.of(), cotangents, variables);
+    }
+
+    /** dV(bus)/dQ(LOAD_3) by a load flow central difference, per Mvar of load (the opposite of an injection). */
+    private static double busVoltagePerLoad3Q(double targetV, LoadFlowParameters lfp, String bus) {
+        double dq = 2.0;
+        Network plus = t2wtWithFineTaps(targetV);
+        plus.getLoad("LOAD_3").setQ0(plus.getLoad("LOAD_3").getQ0() + dq);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(plus, lfp).isFullyConverged());
+        Network minus = t2wtWithFineTaps(targetV);
+        minus.getLoad("LOAD_3").setQ0(minus.getLoad("LOAD_3").getQ0() - dq);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(minus, lfp).isFullyConverged());
+        return (busVoltage(plus, bus) - busVoltage(minus, bus)) / (2 * dq);
+    }
+
+    private static double load3Gradient(Network network, LoadFlowParameters lfp, boolean transformerVoltageControl, String bus) {
+        return runAdjointWithTaps(network, lfp, transformerVoltageControl,
+                Map.of(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, bus), 1.0),
+                levers(SensitivityVariableType.INJECTION_REACTIVE_POWER, List.of("LOAD_3")))
+                .get(varKey(SensitivityVariableType.INJECTION_REACTIVE_POWER, "LOAD_3"));
+    }
+
+    /**
+     * A tap regulating inside its range holds its bus: the load flow moves it when the load changes, the frozen
+     * adjoint does not know. With adjointTransformerVoltageControl the gradient is the load flow's.
+     */
+    @Test
+    void runAdjointDifferentiatesARegulatingTap() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtWithFineTaps(32);
+        double frozenBus3 = load3Gradient(network, lfp, false, "BUS_3");
+        int tap = network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getSolvedTapPosition();
+        assertTrue(tap > 0 && tap < 400, "the tap must regulate inside its range, at " + tap);
+        double regulatingBus3 = load3Gradient(network, lfp, true, "BUS_3");
+        double fdBus3 = busVoltagePerLoad3Q(32, lfp, "BUS_3");
+        // the regulated bus: held by the load flow (up to the rounding), and by the gradient
+        assertTrue(frozenBus3 > 0.3, "the frozen tap leaves BUS_3 free, got " + frozenBus3);
+        assertEquals(0, regulatingBus3, 1e-9);
+        assertEquals(0, fdBus3, 5e-3);
+        // a bus on the other side: the regulating gradient is the load flow's, the frozen one is not
+        double frozenBus2 = load3Gradient(network, lfp, false, "BUS_2");
+        double regulatingBus2 = load3Gradient(network, lfp, true, "BUS_2");
+        double fdBus2 = busVoltagePerLoad3Q(32, lfp, "BUS_2");
+        assertEquals(-fdBus2, regulatingBus2, 1e-3 * Math.abs(fdBus2));
+        assertTrue(Math.abs(frozenBus2 + fdBus2) > 1e-2 * Math.abs(fdBus2), "frozen " + frozenBus2 + " against " + -fdBus2);
+    }
+
+    /** A tap at the end of its range cannot move further: it stays held, as in the load flow. */
+    @Test
+    void runAdjointKeepsATapAtItsLimitHeld() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtWithFineTaps(36);
+        double frozen = load3Gradient(network, lfp, false, "BUS_3");
+        assertEquals(400, network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getSolvedTapPosition());
+        assertEquals(frozen, load3Gradient(network, lfp, true, "BUS_3"), 0.0);
+        // against a +-2 Mvar central difference, which carries the curvature of the load flow
+        assertEquals(-busVoltagePerLoad3Q(36, lfp, "BUS_3"), frozen, 5e-3 * Math.abs(frozen));
     }
 }
