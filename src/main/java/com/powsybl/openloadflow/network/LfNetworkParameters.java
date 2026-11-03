@@ -138,6 +138,10 @@ public class LfNetworkParameters {
 
     private boolean secondaryVoltageControl = SECONDARY_VOLTAGE_CONTROL_DEFAULT_VALUE;
 
+    public static final LfSecondaryVoltageControl.AlignmentMode SECONDARY_VOLTAGE_CONTROL_ALIGNMENT_MODE_DEFAULT_VALUE = LfSecondaryVoltageControl.AlignmentMode.K;
+
+    private LfSecondaryVoltageControl.AlignmentMode secondaryVoltageControlAlignmentMode = SECONDARY_VOLTAGE_CONTROL_ALIGNMENT_MODE_DEFAULT_VALUE;
+
     private boolean cacheEnabled = CACHE_ENABLED_DEFAULT_VALUE;
 
     private boolean asymmetrical = ASYMMETRICAL_DEFAULT_VALUE;
@@ -208,6 +212,7 @@ public class LfNetworkParameters {
         this.maxSlackBusCount = other.maxSlackBusCount;
         this.debugDir = other.debugDir;
         this.secondaryVoltageControl = other.secondaryVoltageControl;
+        this.secondaryVoltageControlAlignmentMode = other.secondaryVoltageControlAlignmentMode;
         this.cacheEnabled = other.cacheEnabled;
         this.asymmetrical = other.asymmetrical;
         this.linePerUnitMode = other.linePerUnitMode;
@@ -527,6 +532,15 @@ public class LfNetworkParameters {
         return this;
     }
 
+    public LfSecondaryVoltageControl.AlignmentMode getSecondaryVoltageControlAlignmentMode() {
+        return secondaryVoltageControlAlignmentMode;
+    }
+
+    public LfNetworkParameters setSecondaryVoltageControlAlignmentMode(LfSecondaryVoltageControl.AlignmentMode secondaryVoltageControlAlignmentMode) {
+        this.secondaryVoltageControlAlignmentMode = Objects.requireNonNull(secondaryVoltageControlAlignmentMode);
+        return this;
+    }
+
     public boolean isCacheEnabled() {
         return cacheEnabled;
     }
@@ -723,6 +737,7 @@ public class LfNetworkParameters {
                 ", maxSlackBusCount=" + maxSlackBusCount +
                 ", debugDir=" + debugDir +
                 ", secondaryVoltageControl=" + secondaryVoltageControl +
+                ", secondaryVoltageControlAlignmentMode=" + secondaryVoltageControlAlignmentMode +
                 ", cacheEnabled=" + cacheEnabled +
                 ", asymmetrical=" + asymmetrical +
                 ", minNominalVoltageTargetVoltageCheck=" + minNominalVoltageTargetVoltageCheck +

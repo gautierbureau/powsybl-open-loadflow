@@ -947,4 +947,45 @@ class SecondaryVoltageControlTest {
         assertEquals(1.066, b6.getV() / b6.getVoltageLevel().getNominalV(), 1e-3);
         assertEquals(0.92, b991.getV() / b991.getVoltageLevel().getNominalV(), 1e-3);
     }
+
+    private static double qToLevel(Generator g) {
+        ReactiveLimits limits = g.getReactiveLimits();
+        double q = -g.getTerminal().getQ();
+        double p = -g.getTerminal().getP();
+        return q / ((limits.getMaxQ(p) - limits.getMinQ(p)) / 2);
+    }
+
+    @Test
+    void testQQrAlignmentMode() {
+        // g6 [-6, 24] and g8 [-6, 200] have asymmetric reactive diagrams: aligning k (relative position in the
+        // diagram) and aligning q / qr (reactive power shared proportionally to the participation factors, as the
+        // Dynawo/DynaFlow reactive power control loops do) give different dispatches
+        parameters.setUseReactiveLimits(false);
+        network.newExtension(SecondaryVoltageControlAdder.class)
+                .newControlZone()
+                .withName("z1")
+                .newPilotPoint().withTargetV(13).withBusbarSectionsOrBusesIds(List.of("B10")).add()
+                .newControlUnit().withId("B6-G").add()
+                .newControlUnit().withId("B8-G").add()
+                .add()
+                .add();
+        parametersExt.setSecondaryVoltageControl(true)
+                .setSecondaryVoltageControlAlignmentMode(LfSecondaryVoltageControl.AlignmentMode.Q_QR);
+
+        LoadFlowResult result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        assertVoltageEquals(13, b10);
+        // same level q / qr for both units, with qr = half of the reactive range by default
+        assertEquals(qToLevel(g6), qToLevel(g8), 1e-3);
+        assertEquals(6, result.getComponentResults().get(0).getIterationCount());
+        assertVoltageEquals(13.017, b6);
+        assertVoltageEquals(23.627, b8);
+        assertReactivePowerEquals(-7.188, g6.getTerminal()); // 0.479 * 15 Mvar
+        assertReactivePowerEquals(-49.356, g8.getTerminal()); // 0.479 * 103 Mvar
+        assertEquals(0.479, qToLevel(g6), DELTA_POWER);
+        assertEquals(0.479, qToLevel(g8), DELTA_POWER);
+        // whereas the k values of the two units are not aligned (compare with testNoReactiveLimits: k = -0.412 for both)
+        assertEquals(-0.121, qToK(g6), DELTA_POWER);
+        assertEquals(-0.463, qToK(g8), DELTA_POWER);
+    }
 }

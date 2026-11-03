@@ -20,12 +20,36 @@ public class LfSecondaryVoltageControl implements LfCopyable<LfSecondaryVoltageC
 
     private static final Logger LOGGER = LoggerFactory.getLogger(LfSecondaryVoltageControl.class);
 
+    /**
+     * How the reactive power of the control units of a zone is aligned by the secondary voltage control.
+     */
+    public enum AlignmentMode {
+        /**
+         * Align k = (2q - qmax - qmin) / (qmax - qmin), which is -1 at qmin and 1 at qmax: the reactive power of each
+         * unit is placed at the same relative position of its reactive diagram.
+         */
+        K,
+        /**
+         * Align the level q / qr, where qr is the participation factor of the unit (half of its reactive range by
+         * default), which is the alignment variable of the reactive power control loops of the Dynawo/DynaFlow
+         * secondary voltage control models: the reactive power is shared proportionally to the participation factors,
+         * and the level saturates at -1 and 1.
+         */
+        Q_QR
+    }
+
     public static final class ControlUnit implements LfCopyable<ControlUnit, LfNetwork> {
         private final String id;
 
         private boolean participate;
 
         private final GeneratorVoltageControl generatorVoltageControl;
+
+        /**
+         * Participation factor qr of the unit (pu), only used with {@link AlignmentMode#Q_QR}. NaN means default value
+         * (half of the reactive range of the unit controller bus).
+         */
+        private double participationFactor = Double.NaN;
 
         public ControlUnit(String id, boolean participate, GeneratorVoltageControl generatorVoltageControl) {
             this.id = Objects.requireNonNull(id);
@@ -34,7 +58,17 @@ public class LfSecondaryVoltageControl implements LfCopyable<LfSecondaryVoltageC
         }
 
         public ControlUnit copy(LfNetwork copyNetwork) {
-            return new ControlUnit(id, participate, copyNetwork.getBusById(generatorVoltageControl.getControlledBus().getId()).getGeneratorVoltageControl().orElseThrow());
+            ControlUnit copy = new ControlUnit(id, participate, copyNetwork.getBusById(generatorVoltageControl.getControlledBus().getId()).getGeneratorVoltageControl().orElseThrow());
+            copy.participationFactor = participationFactor;
+            return copy;
+        }
+
+        public double getParticipationFactor() {
+            return participationFactor;
+        }
+
+        public void setParticipationFactor(double participationFactor) {
+            this.participationFactor = participationFactor;
         }
 
         public String getId() {
@@ -62,18 +96,90 @@ public class LfSecondaryVoltageControl implements LfCopyable<LfSecondaryVoltageC
 
     private double targetValue;
 
+    private final AlignmentMode alignmentMode;
+
     public LfSecondaryVoltageControl(String zoneName, LfBus pilotBus, double targetValue, List<ControlUnit> controlUnits) {
+        this(zoneName, pilotBus, targetValue, controlUnits, AlignmentMode.K);
+    }
+
+    public LfSecondaryVoltageControl(String zoneName, LfBus pilotBus, double targetValue, List<ControlUnit> controlUnits,
+                                     AlignmentMode alignmentMode) {
         this.zoneName = Objects.requireNonNull(zoneName);
         this.pilotBus = Objects.requireNonNull(pilotBus);
         this.targetValue = targetValue;
         this.controlUnits = List.copyOf(controlUnits);
+        this.alignmentMode = Objects.requireNonNull(alignmentMode);
     }
 
     public LfSecondaryVoltageControl copy(LfNetwork copyNetwork) {
         return new LfSecondaryVoltageControl(zoneName,
                 copyNetwork.getBusById(pilotBus.getId()),
                 targetValue,
-                controlUnits.stream().map(controlUnit -> controlUnit.copy(copyNetwork)).toList());
+                controlUnits.stream().map(controlUnit -> controlUnit.copy(copyNetwork)).toList(),
+                alignmentMode);
+    }
+
+    public AlignmentMode getAlignmentMode() {
+        return alignmentMode;
+    }
+
+    /**
+     * Set the participation factor (pu) of a control unit, used by {@link AlignmentMode#Q_QR}.
+     */
+    public void setParticipationFactor(String controlUnitId, double participationFactor) {
+        for (ControlUnit controlUnit : controlUnits) {
+            if (controlUnit.getId().equals(controlUnitId)) {
+                controlUnit.setParticipationFactor(participationFactor);
+            }
+        }
+    }
+
+    /**
+     * Participation factor qr (pu) of a controller bus: sum of the participation factors of the control units connected
+     * to this bus, or half of the bus reactive range when none has been defined.
+     */
+    public double getParticipationFactor(LfBus controllerBus) {
+        double qr = 0;
+        boolean defined = false;
+        for (ControlUnit controlUnit : controlUnits) {
+            if (controlUnit.isParticipate()
+                    && !Double.isNaN(controlUnit.getParticipationFactor())
+                    && controlUnit.getGeneratorVoltageControl().getMergedControllerElements().contains(controllerBus)) {
+                qr += controlUnit.getParticipationFactor();
+                defined = true;
+            }
+        }
+        return defined ? qr : (controllerBus.getMaxQ() - controllerBus.getMinQ()) / 2;
+    }
+
+    private static double getControllerBusQ(LfBus controllerBus) {
+        return controllerBus.getQ().eval() + controllerBus.getLoadTargetQ();
+    }
+
+    /**
+     * Alignment variable of a controller bus (see {@link AlignmentMode}), in [-1, 1] when the reactive power is inside
+     * its range.
+     */
+    public double calculateK(LfBus controllerBus) {
+        return qToK(getControllerBusQ(controllerBus), controllerBus);
+    }
+
+    public double qToK(double q, LfBus controllerBus) {
+        return switch (alignmentMode) {
+            case K -> (2 * q - controllerBus.getMaxQ() - controllerBus.getMinQ())
+                    / (controllerBus.getMaxQ() - controllerBus.getMinQ());
+            case Q_QR -> q / getParticipationFactor(controllerBus);
+        };
+    }
+
+    /**
+     * Derivative of the alignment variable with respect to the controller bus reactive power injection.
+     */
+    public double calculateDkDq(LfBus controllerBus) {
+        return switch (alignmentMode) {
+            case K -> 2 / (controllerBus.getMaxQ() - controllerBus.getMinQ());
+            case Q_QR -> 1 / getParticipationFactor(controllerBus);
+        };
     }
 
     public String getZoneName() {

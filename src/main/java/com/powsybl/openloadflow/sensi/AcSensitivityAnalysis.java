@@ -773,6 +773,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                 .setMinNominalVoltageTargetVoltageCheck(lfParametersExt.getMinNominalVoltageTargetVoltageCheck())
                 .setLowImpedanceThreshold(lfParametersExt.getLowImpedanceThreshold())
                 .setSecondaryVoltageControl(lfParametersExt.isSecondaryVoltageControl()) // load SVC zones for SVC_PILOT sensitivity
+                .setSecondaryVoltageControlAlignmentMode(lfParametersExt.getSecondaryVoltageControlAlignmentMode())
                 .setAreaInterchangeControlAreaType(lfParametersExt.getAreaInterchangeControlAreaType())
                 .setForceTargetQInReactiveLimits(lfParametersExt.isForceTargetQInReactiveLimits())
                 .setDisableInconsistentVoltageControls(lfParametersExt.isDisableInconsistentVoltageControls())

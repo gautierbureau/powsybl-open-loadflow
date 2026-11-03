@@ -103,7 +103,7 @@ public final class SvcPilotPointClosedLoopSensitivity {
         SensitivityContext sensitivityContext = SensitivityContext.create(allControlledBuses, controlledBusIndex, context);
         DenseMatrix a = SecondaryVoltageControlOuterLoop.createA(svcs, allControllerBuses, controllerBusIndex);
         DenseMatrix jK = SecondaryVoltageControlOuterLoop.createJk(sensitivityContext, allControllerBuses, allControlledBuses,
-                controllerBusIndex, controlledBusIndex).transpose();
+                controllerBusIndex, controlledBusIndex, SecondaryVoltageControlOuterLoop.buildZoneByControllerBus(svcs)).transpose();
         DenseMatrix b = a.times(jK);
 
         // Replace the last row of each zone block with its pilot-voltage constraint, and record, per pilot bus,

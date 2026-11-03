@@ -1594,7 +1594,7 @@ public class LfNetworkLoaderImpl implements LfNetworkLoader<Network> {
                 List<LfSecondaryVoltageControl.ControlUnit> lfControlUnits = createLfSecondaryVoltageControlUnits(controlZone,
                         controlUnits, splitGeneratorVoltageControlsByOriginalControl);
                 var lfSvc = new LfSecondaryVoltageControl(controlZone.getName(), lfPilotBus, targetV,
-                        lfControlUnits);
+                        lfControlUnits, parameters.getSecondaryVoltageControlAlignmentMode());
                 if (!lfControlUnits.isEmpty()) {
                     lfNetwork.addSecondaryVoltageControl(lfSvc);
                 }

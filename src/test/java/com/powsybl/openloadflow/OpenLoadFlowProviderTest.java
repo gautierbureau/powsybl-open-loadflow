@@ -67,7 +67,7 @@ class OpenLoadFlowProviderTest {
                 "voltagePerReactivePowerControl=false, generatorReactivePowerRemoteControl=false, transformerReactivePowerControl=false, " +
                 "loadFlowModel=DC, reactiveLimits=false, hvdcAcEmulation=true, minPlausibleTargetVoltage=0.8, maxPlausibleTargetVoltage=1.2, " +
                 "loaderPostProcessorSelection=[], reactiveRangeCheckMode=MAX, lowImpedanceThreshold=1.0E-8, svcVoltageMonitoring=false, " +
-                "maxSlackBusCount=1, debugDir=null, secondaryVoltageControl=false, cacheEnabled=false, asymmetrical=false, " +
+                "maxSlackBusCount=1, debugDir=null, secondaryVoltageControl=false, secondaryVoltageControlAlignmentMode=K, cacheEnabled=false, asymmetrical=false, " +
                 "minNominalVoltageTargetVoltageCheck=20.0, linePerUnitMode=IMPEDANCE, useLoadModel=false, simulateAutomationSystems=false, " +
                 "referenceBusSelector=ReferenceBusFirstSlackSelector, voltageTargetPriorities=[VOLTAGE_SOURCE_CONVERTER, GENERATOR, TRANSFORMER, SHUNT], " +
                 "fictitiousGeneratorVoltageControlCheckMode=FORCED, areaInterchangeControl=false, areaInterchangeControlAreaType=ControlArea, " +
@@ -91,7 +91,7 @@ class OpenLoadFlowProviderTest {
                 "transformerVoltageControl=false, voltagePerReactivePowerControl=false, generatorReactivePowerRemoteControl=false, " +
                 "transformerReactivePowerControl=false, loadFlowModel=AC, reactiveLimits=true, hvdcAcEmulation=true, " +
                 "minPlausibleTargetVoltage=0.8, maxPlausibleTargetVoltage=1.2, loaderPostProcessorSelection=[], reactiveRangeCheckMode=MAX, " +
-                "lowImpedanceThreshold=1.0E-8, svcVoltageMonitoring=true, maxSlackBusCount=1, debugDir=null, secondaryVoltageControl=false, " +
+                "lowImpedanceThreshold=1.0E-8, svcVoltageMonitoring=true, maxSlackBusCount=1, debugDir=null, secondaryVoltageControl=false, secondaryVoltageControlAlignmentMode=K, " +
                 "cacheEnabled=false, asymmetrical=false, minNominalVoltageTargetVoltageCheck=20.0, linePerUnitMode=IMPEDANCE, " +
                 "useLoadModel=false, simulateAutomationSystems=false, referenceBusSelector=ReferenceBusFirstSlackSelector, " +
                 "voltageTargetPriorities=[VOLTAGE_SOURCE_CONVERTER, GENERATOR, TRANSFORMER, SHUNT], fictitiousGeneratorVoltageControlCheckMode=FORCED, " +
@@ -136,7 +136,7 @@ class OpenLoadFlowProviderTest {
     void specificParametersTest() {
         OpenLoadFlowProvider provider = new OpenLoadFlowProvider();
 
-        assertEquals(84, provider.getSpecificParameters().size());
+        assertEquals(85, provider.getSpecificParameters().size());
 
         LoadFlowParameters parameters = new LoadFlowParameters();
 
@@ -162,7 +162,7 @@ class OpenLoadFlowProviderTest {
         Map<String, String> map = provider.createMapFromSpecificParameters(parametersExt);
         // Null values are not serialized by the provider
         long nullValueCount = parametersExt.toMap().values().stream().filter(Objects::isNull).count();
-        assertEquals(84, map.size() + nullValueCount);
+        assertEquals(85, map.size() + nullValueCount);
         assertEquals(3, nullValueCount); // debugDir, outerLoopNames and networkCacheScope are nullable
         assertEquals(provider.getRawSpecificParameters().size(), map.size() + nullValueCount);
     }

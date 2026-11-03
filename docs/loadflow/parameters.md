@@ -846,6 +846,20 @@ Generators that belongs to a secondary voltage control zone should be in local v
 If secondaryVoltageControl is set to `true`, generators that belongs to a secondary voltage control zone and that are configured
 for remote voltage control are switched to local voltage control with an initial local target equals to remoteTarget / remoteNominalV * localNominalV.
 
+(param-lf-secondary-voltage-control-alignment-mode)=
+#### secondaryVoltageControlAlignmentMode
+Defines how the reactive power of the control units of a secondary voltage control zone is aligned once the pilot point
+voltage target is reached. Available values are:
+- `K`: the units are aligned on `k = (2 q - qmax - qmin) / (qmax - qmin)`, the relative position of their reactive power
+  in their reactive diagram (`k = -1` at `qmin`, `k = 1` at `qmax`).
+- `Q_QR`: the units are aligned on the level `q / qr`, where `qr` is the participation factor of the unit (half of its
+  reactive range by default, see `LfSecondaryVoltageControl.setParticipationFactor`). The reactive power is then shared
+  proportionally to the participation factors, which is the alignment variable of the reactive power control loops of the
+  Dynawo/DynaFlow secondary voltage control models. Note that in this mode the level saturates at `-1` and `1`, so a unit
+  with an asymmetric reactive diagram does not use the whole of it.
+
+The default value is `K`.
+
 (param-lf-voltage-target-priorities)=
 #### voltageTargetPriorities
 When multiple equipment regulate the same bus with different voltage targets,
