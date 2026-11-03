@@ -89,7 +89,8 @@ public abstract class AbstractAcOuterLoopConfig implements AcOuterLoopConfig {
 
     protected static Optional<AcOuterLoop> createSecondaryVoltageControlOuterLoop(OpenLoadFlowParameters parametersExt) {
         if (parametersExt.isSecondaryVoltageControl()) {
-            return Optional.of(new SecondaryVoltageControlOuterLoop(parametersExt.getMinPlausibleTargetVoltage(), parametersExt.getMaxPlausibleTargetVoltage()));
+            return Optional.of(new SecondaryVoltageControlOuterLoop(parametersExt.getMinPlausibleTargetVoltage(), parametersExt.getMaxPlausibleTargetVoltage(),
+                    parametersExt.getSecondaryVoltageControlMaxTargetVoltageStep(), parametersExt.isSecondaryVoltageControlStallDetection()));
         }
         return Optional.empty();
     }

@@ -25,6 +25,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreationParameters;
 import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.IncrementalShuntVoltageControlOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop;
+import com.powsybl.openloadflow.ac.outerloop.SecondaryVoltageControlOuterLoop;
 import com.powsybl.openloadflow.ac.solver.*;
 import com.powsybl.openloadflow.dc.DcLoadFlowParameters;
 import com.powsybl.openloadflow.dc.DcOuterLoop;
@@ -233,6 +234,10 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
     public static final String SECONDARY_VOLTAGE_CONTROL_PARAM_NAME = "secondaryVoltageControl";
 
     public static final String SECONDARY_VOLTAGE_CONTROL_ALIGNMENT_MODE_PARAM_NAME = "secondaryVoltageControlAlignmentMode";
+
+    public static final String SECONDARY_VOLTAGE_CONTROL_MAX_TARGET_VOLTAGE_STEP_PARAM_NAME = "secondaryVoltageControlMaxTargetVoltageStep";
+
+    public static final String SECONDARY_VOLTAGE_CONTROL_STALL_DETECTION_PARAM_NAME = "secondaryVoltageControlStallDetection";
 
     public static final String REACTIVE_LIMITS_MAX_SWITCH_PQ_PV_PARAM_NAME = "reactiveLimitsMaxPqPvSwitch";
 
@@ -492,6 +497,12 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
             "Secondary voltage control reactive power alignment mode",
             LfNetworkParameters.SECONDARY_VOLTAGE_CONTROL_ALIGNMENT_MODE_DEFAULT_VALUE.name(), getEnumPossibleValues(LfSecondaryVoltageControl.AlignmentMode.class),
             ParameterScope.FUNCTIONAL, VOLTAGE_CONTROLS_CATEGORY_KEY),
+        new Parameter(SECONDARY_VOLTAGE_CONTROL_MAX_TARGET_VOLTAGE_STEP_PARAM_NAME, ParameterType.DOUBLE,
+            "Secondary voltage control maximum controlled bus target voltage change per adjustment (kV), <= 0 to disable clipping",
+            SecondaryVoltageControlOuterLoop.MAX_TARGET_VOLTAGE_STEP_KV_DEFAULT_VALUE, ParameterScope.FUNCTIONAL, VOLTAGE_CONTROLS_CATEGORY_KEY),
+        new Parameter(SECONDARY_VOLTAGE_CONTROL_STALL_DETECTION_PARAM_NAME, ParameterType.BOOLEAN,
+            "Secondary voltage control stalled zones detection",
+            SecondaryVoltageControlOuterLoop.STALL_DETECTION_DEFAULT_VALUE, ParameterScope.FUNCTIONAL, VOLTAGE_CONTROLS_CATEGORY_KEY),
         new Parameter(REACTIVE_LIMITS_MAX_SWITCH_PQ_PV_PARAM_NAME, ParameterType.INTEGER,
             "Reactive limits maximum Pq Pv switch",
             ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE, ParameterScope.FUNCTIONAL, GENERATOR_VOLTAGE_CONTROL_CATEGORY_KEY),
@@ -775,6 +786,10 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
     private boolean secondaryVoltageControl = LfNetworkParameters.SECONDARY_VOLTAGE_CONTROL_DEFAULT_VALUE;
 
     private LfSecondaryVoltageControl.AlignmentMode secondaryVoltageControlAlignmentMode = LfNetworkParameters.SECONDARY_VOLTAGE_CONTROL_ALIGNMENT_MODE_DEFAULT_VALUE;
+
+    private double secondaryVoltageControlMaxTargetVoltageStep = SecondaryVoltageControlOuterLoop.MAX_TARGET_VOLTAGE_STEP_KV_DEFAULT_VALUE;
+
+    private boolean secondaryVoltageControlStallDetection = SecondaryVoltageControlOuterLoop.STALL_DETECTION_DEFAULT_VALUE;
 
     private int reactiveLimitsMaxPqPvSwitch = ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE;
 
@@ -1271,6 +1286,24 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
 
     public OpenLoadFlowParameters setSecondaryVoltageControlAlignmentMode(LfSecondaryVoltageControl.AlignmentMode secondaryVoltageControlAlignmentMode) {
         this.secondaryVoltageControlAlignmentMode = Objects.requireNonNull(secondaryVoltageControlAlignmentMode);
+        return this;
+    }
+
+    public double getSecondaryVoltageControlMaxTargetVoltageStep() {
+        return secondaryVoltageControlMaxTargetVoltageStep;
+    }
+
+    public OpenLoadFlowParameters setSecondaryVoltageControlMaxTargetVoltageStep(double secondaryVoltageControlMaxTargetVoltageStep) {
+        this.secondaryVoltageControlMaxTargetVoltageStep = secondaryVoltageControlMaxTargetVoltageStep;
+        return this;
+    }
+
+    public boolean isSecondaryVoltageControlStallDetection() {
+        return secondaryVoltageControlStallDetection;
+    }
+
+    public OpenLoadFlowParameters setSecondaryVoltageControlStallDetection(boolean secondaryVoltageControlStallDetection) {
+        this.secondaryVoltageControlStallDetection = secondaryVoltageControlStallDetection;
         return this;
     }
 
@@ -1812,6 +1845,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
         config.getOptionalBooleanProperty(SECONDARY_VOLTAGE_CONTROL_PARAM_NAME).ifPresent(this::setSecondaryVoltageControl);
         config.getOptionalEnumProperty(SECONDARY_VOLTAGE_CONTROL_ALIGNMENT_MODE_PARAM_NAME, LfSecondaryVoltageControl.AlignmentMode.class)
             .ifPresent(this::setSecondaryVoltageControlAlignmentMode);
+        config.getOptionalDoubleProperty(SECONDARY_VOLTAGE_CONTROL_MAX_TARGET_VOLTAGE_STEP_PARAM_NAME).ifPresent(this::setSecondaryVoltageControlMaxTargetVoltageStep);
+        config.getOptionalBooleanProperty(SECONDARY_VOLTAGE_CONTROL_STALL_DETECTION_PARAM_NAME).ifPresent(this::setSecondaryVoltageControlStallDetection);
         config.getOptionalIntProperty(REACTIVE_LIMITS_MAX_SWITCH_PQ_PV_PARAM_NAME).ifPresent(this::setReactiveLimitsMaxPqPvSwitch);
         config.getOptionalEnumProperty(PHASE_SHIFTER_CONTROL_MODE_PARAM_NAME, PhaseShifterControlMode.class)
             .ifPresent(this::setPhaseShifterControlMode);
@@ -1956,6 +1991,10 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 .ifPresent(prop -> this.setSecondaryVoltageControl(Boolean.parseBoolean(prop)));
         Optional.ofNullable(properties.get(SECONDARY_VOLTAGE_CONTROL_ALIGNMENT_MODE_PARAM_NAME))
                 .ifPresent(prop -> this.setSecondaryVoltageControlAlignmentMode(LfSecondaryVoltageControl.AlignmentMode.valueOf(prop)));
+        Optional.ofNullable(properties.get(SECONDARY_VOLTAGE_CONTROL_MAX_TARGET_VOLTAGE_STEP_PARAM_NAME))
+                .ifPresent(prop -> this.setSecondaryVoltageControlMaxTargetVoltageStep(Double.parseDouble(prop)));
+        Optional.ofNullable(properties.get(SECONDARY_VOLTAGE_CONTROL_STALL_DETECTION_PARAM_NAME))
+                .ifPresent(prop -> this.setSecondaryVoltageControlStallDetection(Boolean.parseBoolean(prop)));
         Optional.ofNullable(properties.get(REACTIVE_LIMITS_MAX_SWITCH_PQ_PV_PARAM_NAME))
                 .ifPresent(prop -> this.setReactiveLimitsMaxPqPvSwitch(Integer.parseInt(prop)));
         Optional.ofNullable(properties.get(PHASE_SHIFTER_CONTROL_MODE_PARAM_NAME))
@@ -2101,6 +2140,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
         map.put(INCREMENTAL_TRANSFORMER_RATIO_TAP_CONTROL_OUTER_LOOP_MAX_TAP_SHIFT_PARAM_NAME, incrementalTransformerRatioTapControlOuterLoopMaxTapShift);
         map.put(SECONDARY_VOLTAGE_CONTROL_PARAM_NAME, secondaryVoltageControl);
         map.put(SECONDARY_VOLTAGE_CONTROL_ALIGNMENT_MODE_PARAM_NAME, secondaryVoltageControlAlignmentMode);
+        map.put(SECONDARY_VOLTAGE_CONTROL_MAX_TARGET_VOLTAGE_STEP_PARAM_NAME, secondaryVoltageControlMaxTargetVoltageStep);
+        map.put(SECONDARY_VOLTAGE_CONTROL_STALL_DETECTION_PARAM_NAME, secondaryVoltageControlStallDetection);
         map.put(REACTIVE_LIMITS_MAX_SWITCH_PQ_PV_PARAM_NAME, reactiveLimitsMaxPqPvSwitch);
         map.put(PHASE_SHIFTER_CONTROL_MODE_PARAM_NAME, phaseShifterControlMode);
         map.put(ALWAYS_UPDATE_NETWORK_PARAM_NAME, alwaysUpdateNetwork);
@@ -2535,6 +2576,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 extension1.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift() == extension2.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift() &&
                 extension1.isSecondaryVoltageControl() == extension2.isSecondaryVoltageControl() &&
                 extension1.getSecondaryVoltageControlAlignmentMode() == extension2.getSecondaryVoltageControlAlignmentMode() &&
+                extension1.getSecondaryVoltageControlMaxTargetVoltageStep() == extension2.getSecondaryVoltageControlMaxTargetVoltageStep() &&
+                extension1.isSecondaryVoltageControlStallDetection() == extension2.isSecondaryVoltageControlStallDetection() &&
                 extension1.getReactiveLimitsMaxPqPvSwitch() == extension2.getReactiveLimitsMaxPqPvSwitch() &&
                 extension1.getPhaseShifterControlMode() == extension2.getPhaseShifterControlMode() &&
                 extension1.isAlwaysUpdateNetwork() == extension2.isAlwaysUpdateNetwork() &&
@@ -2625,6 +2668,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 .setIncrementalTransformerRatioTapControlOuterLoopMaxTapShift(extension.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift())
                 .setSecondaryVoltageControl(extension.isSecondaryVoltageControl())
                 .setSecondaryVoltageControlAlignmentMode(extension.getSecondaryVoltageControlAlignmentMode())
+                .setSecondaryVoltageControlMaxTargetVoltageStep(extension.getSecondaryVoltageControlMaxTargetVoltageStep())
+                .setSecondaryVoltageControlStallDetection(extension.isSecondaryVoltageControlStallDetection())
                 .setReactiveLimitsMaxPqPvSwitch(extension.getReactiveLimitsMaxPqPvSwitch())
                 .setPhaseShifterControlMode(extension.getPhaseShifterControlMode())
                 .setAlwaysUpdateNetwork(extension.isAlwaysUpdateNetwork())

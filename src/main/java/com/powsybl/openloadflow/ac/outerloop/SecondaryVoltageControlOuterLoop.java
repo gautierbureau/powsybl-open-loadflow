@@ -39,7 +39,9 @@ public class SecondaryVoltageControlOuterLoop implements AcOuterLoop {
     private static final double DV_EPS = 1E-4; // 0.1 kV
     private static final double DK_DIFF_MAX_EPS = 1E-3; // 1 MVar
     private static final double K_SATURATION_EPS = 5E-2;
-    private static final double MAX_TARGET_VOLTAGE_STEP_KV = 2;
+    public static final double MAX_TARGET_VOLTAGE_STEP_KV_DEFAULT_VALUE = 2;
+
+    public static final boolean STALL_DETECTION_DEFAULT_VALUE = true;
 
     /**
      * A zone error (pilot point voltage difference and controller buses k difference) has to decrease by at least this
@@ -56,14 +58,31 @@ public class SecondaryVoltageControlOuterLoop implements AcOuterLoop {
 
     private final double maxPlausibleTargetVoltage;
 
+    /**
+     * Maximum controlled bus target voltage change per adjustment (kV); a value <= 0 disables the clipping.
+     */
+    private final double maxTargetVoltageStepKv;
+
+    /**
+     * Whether zones whose error does not decrease anymore are given up.
+     */
+    private final boolean stallDetection;
+
     @Override
     public String getName() {
         return NAME;
     }
 
     public SecondaryVoltageControlOuterLoop(double minPlausibleTargetVoltage, double maxPlausibleTargetVoltage) {
+        this(minPlausibleTargetVoltage, maxPlausibleTargetVoltage, MAX_TARGET_VOLTAGE_STEP_KV_DEFAULT_VALUE, STALL_DETECTION_DEFAULT_VALUE);
+    }
+
+    public SecondaryVoltageControlOuterLoop(double minPlausibleTargetVoltage, double maxPlausibleTargetVoltage,
+                                            double maxTargetVoltageStepKv, boolean stallDetection) {
         this.minPlausibleTargetVoltage = minPlausibleTargetVoltage;
         this.maxPlausibleTargetVoltage = maxPlausibleTargetVoltage;
+        this.maxTargetVoltageStepKv = maxTargetVoltageStepKv;
+        this.stallDetection = stallDetection;
     }
 
     /**
@@ -304,28 +323,29 @@ public class SecondaryVoltageControlOuterLoop implements AcOuterLoop {
     private record TargetVoltage(double value, boolean clipped) {
     }
 
-    private static TargetVoltageChange clipTargetVoltageChange(List<LfBus> controlledBuses, DenseMatrix dv,
-                                                               Map<Integer, Integer> controlledBusIndex) {
+    private TargetVoltageChange clipTargetVoltageChange(List<LfBus> controlledBuses, DenseMatrix dv,
+                                                        Map<Integer, Integer> controlledBusIndex) {
         DenseMatrix clippedDv = new DenseMatrix(dv.getRowCount(), dv.getColumnCount());
         int clippedTargetVoltageCount = 0;
-        double maxTargetVoltageStepKv = 0;
+        double maxStepKv = 0;
+        boolean clip = maxTargetVoltageStepKv > 0;
         for (LfBus controlledBus : controlledBuses) {
             int i = controlledBusIndex.get(controlledBus.getNum());
             double dvValue = dv.get(i, 0);
             double stepKv = dvValue * controlledBus.getNominalV();
             double absStepKv = Math.abs(stepKv);
-            maxTargetVoltageStepKv = Math.max(maxTargetVoltageStepKv, absStepKv);
-            if (stepKv > MAX_TARGET_VOLTAGE_STEP_KV) {
-                clippedDv.set(i, 0, MAX_TARGET_VOLTAGE_STEP_KV / controlledBus.getNominalV());
+            maxStepKv = Math.max(maxStepKv, absStepKv);
+            if (clip && stepKv > maxTargetVoltageStepKv) {
+                clippedDv.set(i, 0, maxTargetVoltageStepKv / controlledBus.getNominalV());
                 clippedTargetVoltageCount++;
-            } else if (stepKv < -MAX_TARGET_VOLTAGE_STEP_KV) {
-                clippedDv.set(i, 0, -MAX_TARGET_VOLTAGE_STEP_KV / controlledBus.getNominalV());
+            } else if (clip && stepKv < -maxTargetVoltageStepKv) {
+                clippedDv.set(i, 0, -maxTargetVoltageStepKv / controlledBus.getNominalV());
                 clippedTargetVoltageCount++;
             } else {
                 clippedDv.set(i, 0, dvValue);
             }
         }
-        return new TargetVoltageChange(clippedDv, clippedTargetVoltageCount, maxTargetVoltageStepKv);
+        return new TargetVoltageChange(clippedDv, clippedTargetVoltageCount, maxStepKv);
     }
 
     private TargetVoltage clipTargetVoltageToPlausibleRange(double targetV) {
@@ -358,7 +378,7 @@ public class SecondaryVoltageControlOuterLoop implements AcOuterLoop {
                     LOGGER.debug("Secondary voltage control of zone '{}': {}/{} controller buses available, pilot point dv is {} kV, controller buses dk diff max is {} (k average is {})",
                             zoneName, controllerBuses.size(), allControllerBusesCount, pilotDv * pilotBus.getNominalV(), kStats.dkDiffMax(), kStats.kAverage());
                 }
-                if (isStalled(contextData, zoneName, new ZoneError(Math.abs(pilotDv), kStats.dkDiffMax()), pilotBus.getNominalV())) {
+                if (stallDetection && isStalled(contextData, zoneName, new ZoneError(Math.abs(pilotDv), kStats.dkDiffMax()), pilotBus.getNominalV())) {
                     continue;
                 }
                 adjustedZoneNames.add(zoneName);
@@ -426,7 +446,7 @@ public class SecondaryVoltageControlOuterLoop implements AcOuterLoop {
         TargetVoltageChange targetVoltageChange = clipTargetVoltageChange(allControlledBuses, dv, controlledBusIndex);
         if (targetVoltageChange.clippedTargetVoltageCount() > 0) {
             LOGGER.info("Clip {} secondary voltage control target voltage changes to {} kV (unclipped max step was {} kV)",
-                    targetVoltageChange.clippedTargetVoltageCount(), MAX_TARGET_VOLTAGE_STEP_KV,
+                    targetVoltageChange.clippedTargetVoltageCount(), maxTargetVoltageStepKv,
                     targetVoltageChange.maxTargetVoltageStepKv());
         }
 
