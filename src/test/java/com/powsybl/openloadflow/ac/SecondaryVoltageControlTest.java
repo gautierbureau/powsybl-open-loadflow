@@ -29,6 +29,7 @@ import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFa
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkParameters;
 import com.powsybl.openloadflow.network.LfSecondaryVoltageControl;
+import com.powsybl.openloadflow.network.NodeBreakerNetworkFactory;
 import com.powsybl.openloadflow.network.impl.LfNetworkLoaderImpl;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisProvider;
 import com.powsybl.openloadflow.util.report.PowsyblOpenLoadFlowReportResourceBundle;
@@ -946,5 +947,33 @@ class SecondaryVoltageControlTest {
         // Compare voltage in pu
         assertEquals(1.066, b6.getV() / b6.getVoltageLevel().getNominalV(), 1e-3);
         assertEquals(0.92, b991.getV() / b991.getVoltageLevel().getNominalV(), 1e-3);
+    }
+
+    @Test
+    void testPilotBusOfNodeBreakerVoltageLevel() {
+        // in a node/breaker voltage level, the pilot point can be given by a busbar section id, by the id of a bus of
+        // the bus/breaker view (a calculated bus, which is not a busbar section) or by the id of a bus of the bus view
+        Network nbNetwork = NodeBreakerNetworkFactory.create();
+        VoltageLevel vl2 = nbNetwork.getVoltageLevel("VL2");
+        String busBreakerViewBusId = vl2.getBusBreakerView().getBusStream().findFirst().orElseThrow().getId();
+        String busViewBusId = vl2.getBusView().getBusStream().findFirst().orElseThrow().getId();
+        LoadFlowResult result = loadFlowRunner.run(nbNetwork, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        double v0 = vl2.getBusView().getBusStream().findFirst().orElseThrow().getV();
+        double targetV = v0 + 2;
+        parametersExt.setSecondaryVoltageControl(true);
+        for (String pilotId : List.of("BBS3", busBreakerViewBusId, busViewBusId)) {
+            Network n = NodeBreakerNetworkFactory.create();
+            n.newExtension(SecondaryVoltageControlAdder.class)
+                    .newControlZone()
+                    .withName("z1")
+                    .newPilotPoint().withTargetV(targetV).withBusbarSectionsOrBusesIds(List.of(pilotId)).add()
+                    .newControlUnit().withId("G").add()
+                    .add()
+                    .add();
+            result = loadFlowRunner.run(n, parameters);
+            assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus(), pilotId);
+            assertEquals(targetV, n.getVoltageLevel("VL2").getBusView().getBusStream().findFirst().orElseThrow().getV(), DELTA_V, pilotId);
+        }
     }
 }
