@@ -45,7 +45,7 @@ class OpenSensitivityAnalysisProviderTest extends AbstractSensitivityAnalysisTes
     void specificParametersTest() {
         var provider = new OpenSensitivityAnalysisProvider();
 
-        assertEquals(8, provider.getSpecificParametersNames().size());
+        assertEquals(9, provider.getSpecificParametersNames().size());
 
         SensitivityAnalysisParameters parameters = new SensitivityAnalysisParameters();
 
@@ -85,6 +85,11 @@ class OpenSensitivityAnalysisProviderTest extends AbstractSensitivityAnalysisTes
         assertEquals(30.0, smoothing.getAdjointReactiveLimitsSmoothingVoltageScale());
         assertEquals(3, smoothing.getAdjointReactiveLimitsSmoothingPolishIterations());
         assertThrows(IllegalArgumentException.class, () -> smoothing.setAdjointReactiveLimitsSmoothingPolishIterations(-1));
+
+        assertFalse(defaults.isAdjointTransformerVoltageControl());
+        assertTrue(((OpenSensitivityAnalysisParameters) provider.loadSpecificParameters(Map.of(
+                OpenSensitivityAnalysisParameters.ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_PARAM_NAME, "true")).orElseThrow())
+                .isAdjointTransformerVoltageControl());
     }
 
     @Test
