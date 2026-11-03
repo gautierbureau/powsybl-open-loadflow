@@ -60,6 +60,7 @@
         "debugDir" : null,
         "incrementalTransformerRatioTapControlOuterLoopMaxTapShift" : 3,
         "secondaryVoltageControl" : false,
+        "secondaryVoltageControlAlignmentMode" : "K",
         "reactiveLimitsMaxPqPvSwitch" : 3,
         "phaseShifterControlMode" : "CONTINUOUS_WITH_DISCRETISATION",
         "alwaysUpdateNetwork" : false,
