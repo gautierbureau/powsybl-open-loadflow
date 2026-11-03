@@ -124,6 +124,12 @@ public class AcEquationSystemCreator {
                 .filter(voltageControl -> voltageControl.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                 .ifPresent(voltageControl -> {
                     if (bus.isGeneratorVoltageControlled()) {
+                        if (voltageControl.isLocalControl() && creationParameters.getReactiveLimitsSmoothing() != null
+                                && !bus.hasGeneratorsWithSlope()) {
+                            // no PV/PQ switch to follow: the equations are the same whatever the bus state
+                            createGeneratorSmoothedReactiveLimitsEquations(bus, equationSystem, creationParameters.getReactiveLimitsSmoothing());
+                            return;
+                        }
                         if (voltageControl.isLocalControl()) {
                             createGeneratorLocalVoltageControlEquation(bus, equationSystem);
                         } else {
@@ -133,6 +139,32 @@ public class AcEquationSystemCreator {
                         updateGeneratorVoltageControl(voltageControl, equationSystem);
                     }
                 });
+    }
+
+    /**
+     * Smoothed reactive limits of a bus controlling its own voltage: its reactive generation {@code Q} and the
+     * voltage slacks {@code vPlus}, {@code vMinus} become unknowns, the reactive balance stays active with a
+     * {@code -Q} term, the voltage target equation becomes {@code V + vPlus - vMinus = Vset}, and two smoothed
+     * complementarity equations tie {@code Q} to its limits (see {@link GeneratorReactiveSplitFbEquationTerm}).
+     * {@code Q} is the bus total reactive generation, as its limits are.
+     */
+    private static void createGeneratorSmoothedReactiveLimitsEquations(LfBus bus, EquationSystem<AcVariableType, AcEquationType> equationSystem,
+                                                                       ReactiveLimitsSmoothing smoothing) {
+        VariableSet<AcVariableType> variableSet = equationSystem.getVariableSet();
+        Variable<AcVariableType> q = variableSet.getVariable(bus.getNum(), AcVariableType.GENERATOR_Q);
+        Variable<AcVariableType> vPlus = variableSet.getVariable(bus.getNum(), AcVariableType.GENERATOR_V_PLUS);
+        Variable<AcVariableType> vMinus = variableSet.getVariable(bus.getNum(), AcVariableType.GENERATOR_V_MINUS);
+        equationSystem.getEquation(bus.getNum(), AcEquationType.BUS_TARGET_Q).orElseThrow()
+                .addTerm(q.<AcEquationType>createTerm().minus())
+                .setActive(true);
+        equationSystem.getEquation(bus.getNum(), AcEquationType.BUS_TARGET_V).orElseThrow()
+                .addTerm(vPlus.createTerm())
+                .addTerm(vMinus.<AcEquationType>createTerm().minus())
+                .setActive(true);
+        equationSystem.createEquation(bus, AcEquationType.BUS_Q_LIMIT_UP)
+                .addTerm(new GeneratorReactiveSplitFbEquationTerm(bus, q, vPlus, true, bus.getMinQ(), bus.getMaxQ(), smoothing));
+        equationSystem.createEquation(bus, AcEquationType.BUS_Q_LIMIT_LO)
+                .addTerm(new GeneratorReactiveSplitFbEquationTerm(bus, q, vMinus, false, bus.getMinQ(), bus.getMaxQ(), smoothing));
     }
 
     private void createGeneratorLocalVoltageControlEquation(LfBus bus,

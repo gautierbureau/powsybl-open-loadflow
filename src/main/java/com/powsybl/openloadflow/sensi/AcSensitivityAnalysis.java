@@ -27,7 +27,9 @@ import com.powsybl.openloadflow.ac.equations.*;
 import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.equations.Equation;
+import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationTerm;
+import com.powsybl.openloadflow.equations.StateVector;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
@@ -66,6 +68,8 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
 
     private boolean adjointOnNetworkCopy = false;
 
+    private ReactiveLimitsSmoothing adjointReactiveLimitsSmoothing;
+
     public AcSensitivityAnalysis(MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory, SensitivityAnalysisParameters parameters) {
         super(matrixFactory, connectivityFactory, parameters);
     }
@@ -77,6 +81,18 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      */
     AcSensitivityAnalysis setAdjointOnNetworkCopy(boolean adjointOnNetworkCopy) {
         this.adjointOnNetworkCopy = adjointOnNetworkCopy;
+        return this;
+    }
+
+    /**
+     * Makes {@link #runAdjoint} differentiate a load flow whose reactive limits are smoothed (see
+     * {@link ReactiveLimitsSmoothing}), at the solution of the exact one: on its own system on a copy of the solved
+     * network, a bus controlling its own voltage counts for how far it is from its reactive limit, whether the load
+     * flow left it PV or switched it PQ. {@code null} (the default) keeps the exact equations. Package-private
+     * until it is a sensitivity parameter.
+     */
+    AcSensitivityAnalysis setAdjointReactiveLimitsSmoothing(ReactiveLimitsSmoothing adjointReactiveLimitsSmoothing) {
+        this.adjointReactiveLimitsSmoothing = adjointReactiveLimitsSmoothing;
         return this;
     }
 
@@ -266,6 +282,18 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
     private static Map<Integer, RhsColumn> describeSvcPilotFactorsRhs(
             SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups,
             AcLoadFlowContext context) {
+        return describeSvcPilotFactorsRhs(factorGroups, context, context);
+    }
+
+    /**
+     * As {@link #describeSvcPilotFactorsRhs(SensitivityFactorGroupList, AcLoadFlowContext)}, the coordination
+     * weights being those of {@code coordinationContext}, the load flow's, and the columns those of
+     * {@code context}'s equation system, buses being matched by id: an adjoint on its own system keeps the
+     * coordination the load flow ran with.
+     */
+    private static Map<Integer, RhsColumn> describeSvcPilotFactorsRhs(
+            SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups,
+            AcLoadFlowContext coordinationContext, AcLoadFlowContext context) {
         boolean hasSvcPilot = factorGroups.getList().stream()
                 .anyMatch(group -> group.getVariableType() == SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE);
         if (!hasSvcPilot) {
@@ -273,7 +301,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         }
         // the coordination matrix is pilot-independent: factorize it once for every queried pilot
         try (SvcPilotPointClosedLoopSensitivity.Coordination coordination =
-                     SvcPilotPointClosedLoopSensitivity.buildCoordination(context)) {
+                     SvcPilotPointClosedLoopSensitivity.buildCoordination(coordinationContext)) {
             if (coordination == null) {
                 return Map.of(); // no active SVC zone
             }
@@ -285,10 +313,11 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                 }
                 LfBus pilotBus = (LfBus) ((SingleVariableLfSensitivityFactor<AcVariableType, AcEquationType>)
                         group.getFirstFactor()).getVariableElement();
-                Map<LfBus, Double> weights = weightsByPilot.computeIfAbsent(pilotBus, coordination::weightsForPilot);
+                LfBus coordinationPilotBus = coordinationContext.getNetwork().getBusById(pilotBus.getId());
+                Map<LfBus, Double> weights = weightsByPilot.computeIfAbsent(coordinationPilotBus, coordination::weightsForPilot);
                 RhsColumnBuilder builder = new RhsColumnBuilder(weights.size());
                 for (var entry : weights.entrySet()) {
-                    LfBus controlled = entry.getKey();
+                    LfBus controlled = context.getNetwork().getBusById(entry.getKey().getId());
                     double w = entry.getValue();
                     context.getEquationSystem()
                             .getEquation(controlled.getNum(), AcEquationType.BUS_TARGET_V)
@@ -308,7 +337,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      * @param cotangents dL/dfunction keyed by the base-network sensitivity factor, non-zero entries only.
      * @return dL/dvariable indexed by factor-group index.
      */
-    private double[] analyseAdjoint(AcLoadFlowContext context,
+    private double[] analyseAdjoint(AcLoadFlowContext context, AcLoadFlowContext coordinationContext,
                                    SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups,
                                    Map<LfSensitivityFactor<AcVariableType, AcEquationType>, Double> cotangents,
                                    Map<LfBus, Double> slackParticipationByBus,
@@ -321,7 +350,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         for (var group : factorGroups.getList()) {
             parameterRhs[group.getIndex()] = group.describeRhs(slackParticipationByBus);
         }
-        describeSvcPilotFactorsRhs(factorGroups, context).forEach((col, column) -> parameterRhs[col] = column);
+        describeSvcPilotFactorsRhs(factorGroups, coordinationContext, context).forEach((col, column) -> parameterRhs[col] = column);
 
         // the stored matrix is the transposed Jacobian, so solve() is the adjoint solve
         double[] lambda = computeStateCotangent(equationCount, cotangents); // solved in place
@@ -543,9 +572,10 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         AcLoadFlowContext cachedContext = value.getContext();
         // on its own system, the adjoint works on a copy of the solved network: the cached one, which the next
         // load flow reuses, is never touched (null resource: nothing to close)
-        try (AcLoadFlowContext ownContext = adjointOnNetworkCopy ? createAdjointContext(cachedContext) : null) {
+        boolean ownSystem = adjointOnNetworkCopy || adjointReactiveLimitsSmoothing != null;
+        try (AcLoadFlowContext ownContext = ownSystem ? createAdjointContext(cachedContext, adjointReactiveLimitsSmoothing) : null) {
             return runAdjoint(network, variableSets, factors, cotangentsByFunction, variables,
-                    ownContext != null ? ownContext : cachedContext);
+                    ownContext != null ? ownContext : cachedContext, cachedContext);
         }
     }
 
@@ -554,8 +584,10 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      * equation system, with the controls in the state the load flow left them (a PV bus switched PQ stays PQ, a
      * tap held at its position stays held), and the state vector at the solution. Its Jacobian is factorized again
      * on first use. The copy selects its slack and reference buses again, which must be the cached ones.
+     * With {@code smoothing}, a bus controlling its own voltage gets smoothed reactive limits, their unknowns set
+     * from the solution.
      */
-    private static AcLoadFlowContext createAdjointContext(AcLoadFlowContext cachedContext) {
+    private static AcLoadFlowContext createAdjointContext(AcLoadFlowContext cachedContext, ReactiveLimitsSmoothing smoothing) {
         LfNetwork lfNetwork = cachedContext.getNetwork();
         LfNetwork copy = LfNetworkCopier.copy(lfNetwork, LoadFlowModel.AC, ReportNode.NO_OP);
         for (LfSynchronousNetwork sc : lfNetwork.getSynchronousNetworks()) {
@@ -565,14 +597,51 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                 throw new PowsyblException("Adjoint on a network copy: the copy selected other slack or reference buses than the load flow");
             }
         }
-        AcLoadFlowContext context = new AcLoadFlowContext(copy, cachedContext.getParameters());
+        AcLoadFlowParameters parameters = cachedContext.getParameters();
+        if (smoothing != null) {
+            // the vectorized creator keeps the bus balances in arrays, which the smoothed rows do not extend
+            parameters = new AcLoadFlowParameters(parameters)
+                    .setEquationSystemCreationParameters(new AcEquationSystemCreationParameters(
+                            parameters.getEquationSystemCreationParameters().isForceA1Var(), smoothing))
+                    .setVectorized(false);
+        }
+        AcLoadFlowContext context = new AcLoadFlowContext(copy, parameters);
         AcSolverUtil.initStateVector(copy, context.getEquationSystem(), new PreviousValueVoltageInitializer());
+        if (smoothing != null) {
+            initSmoothedReactiveLimitsState(copy, context.getEquationSystem());
+        }
         return context;
+    }
+
+    /**
+     * The smoothed reactive limits unknowns at the load flow's solution: the bus reactive generation that closes its
+     * reactive balance, and the voltage slacks that close {@code V + vPlus - vMinus = Vset}. The complementarity
+     * equations are not solved there: the adjoint linearizes the smoothed system at the exact solution.
+     */
+    private static void initSmoothedReactiveLimitsState(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        StateVector stateVector = equationSystem.getStateVector();
+        double[] x = stateVector.get().clone();
+        for (Variable<AcVariableType> v : equationSystem.getIndex().getSortedVariablesToFind()) {
+            LfBus bus = network.getBus(v.getElementNum());
+            switch (v.getType()) {
+                // its own -Q term is still 0, so the balance is the flows out of the bus: plus the load, the generation
+                case GENERATOR_Q -> x[v.getRow()] = ((Equation<?, ?>) bus.getQ()).eval() + bus.getLoadTargetQ();
+                case GENERATOR_V_PLUS, GENERATOR_V_MINUS -> {
+                    double deviation = bus.getV() - bus.getGeneratorVoltageControl().orElseThrow().getTargetValue();
+                    x[v.getRow()] = Math.max(0, v.getType() == AcVariableType.GENERATOR_V_PLUS ? -deviation : deviation);
+                }
+                default -> {
+                    // set from the network by initStateVector
+                }
+            }
+        }
+        stateVector.set(x);
     }
 
     private Map<VariableRef, Double> runAdjoint(Network network, List<SensitivityVariableSet> variableSets,
                                                 List<SensitivityFactor> factors, Map<FunctionRef, Double> cotangentsByFunction,
-                                                List<AdjointVariable> variables, AcLoadFlowContext context) {
+                                                List<AdjointVariable> variables, AcLoadFlowContext context,
+                                                AcLoadFlowContext cachedContext) {
         LfNetwork lfNetwork = context.getNetwork();
         boolean breakers = context.getParameters().getNetworkParameters().isBreakers();
 
@@ -624,7 +693,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             slackDistribution = SlackDistribution.create(context, lfNetwork, activeParticipationByBus(lfNetwork, lfParameters));
             rhsParticipationByBus = Map.of();
         }
-        double[] thetaBar = analyseAdjoint(context, factorGroups, cotangents, rhsParticipationByBus, slackDistribution);
+        double[] thetaBar = analyseAdjoint(context, cachedContext, factorGroups, cotangents, rhsParticipationByBus, slackDistribution);
 
         Map<VariableRef, Double> gradientByGroup = new HashMap<>();
         for (var group : factorGroups.getList()) {

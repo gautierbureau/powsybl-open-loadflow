@@ -22,6 +22,7 @@ import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
+import com.powsybl.openloadflow.ac.equations.ReactiveLimitsSmoothing;
 import com.powsybl.openloadflow.graph.dtree.DTreeGraphConnectivityFactory;
 import com.powsybl.openloadflow.network.VoltageControlNetworkFactory;
 import com.powsybl.sensitivity.*;
@@ -1515,5 +1516,99 @@ class AcSensitivityAnalysisAdjointTest {
                 concat(levers(SensitivityVariableType.INJECTION_REACTIVE_POWER, List.of("LOAD_2", "LOAD_3")),
                         levers(SensitivityVariableType.BUS_TARGET_VOLTAGE, List.of("GEN_1"))));
         assertEquals(3, t2wt.getRatioTapChanger().getSolvedTapPosition(), "the tap must have moved to hold BUS_3");
+    }
+
+    // ---- the adjoint with smoothed reactive limits ----
+
+    private static Map<AcSensitivityAnalysis.VariableRef, Double> runAdjoint(Network network, LoadFlowParameters lfp,
+                                                                             ReactiveLimitsSmoothing smoothing,
+                                                                             Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents,
+                                                                             List<AcSensitivityAnalysis.AdjointVariable> variables) {
+        return newAnalysis(lfp).setAdjointReactiveLimitsSmoothing(smoothing)
+                .runAdjoint(network, network.getVariantManager().getWorkingVariantId(), List.of(), cotangents, variables);
+    }
+
+    private static double maxAbsDifference(Map<AcSensitivityAnalysis.VariableRef, Double> a,
+                                           Map<AcSensitivityAnalysis.VariableRef, Double> b) {
+        assertEquals(a.keySet(), b.keySet());
+        return a.keySet().stream().mapToDouble(k -> Math.abs(a.get(k) - b.get(k))).max().orElseThrow();
+    }
+
+    private static double maxAbs(Map<AcSensitivityAnalysis.VariableRef, Double> a) {
+        return a.values().stream().mapToDouble(Math::abs).max().orElseThrow();
+    }
+
+    /** IEEE-14 with B2-G's upper reactive limit at {@code maxQ}: binding when below its free output. */
+    private static Network ieee14WithB2MaxQ(double maxQ) {
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getGenerator("B2-G").newMinMaxReactiveLimits().setMinQ(-40).setMaxQ(maxQ).add();
+        return network;
+    }
+
+    @Test
+    void smoothedAdjointTendsToTheExactOneAsTheSmoothingVanishes() {
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        for (Network network : List.of(IeeeCdfNetworkFactory.create14(), ieee14WithB2MaxQ(20))) {
+            assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+            var exact = runAdjoint(network, lfp, null, ieee14Cotangents(), ieee14Levers());
+            var smoothed = runAdjoint(network, lfp, new ReactiveLimitsSmoothing(1e-7), ieee14Cotangents(), ieee14Levers());
+            assertEquals(0, maxAbsDifference(exact, smoothed), 1e-6 * maxAbs(exact));
+        }
+        // and with an SVC pilot lever, whose coordination is the load flow's
+        Network zoned = ieee14WithZone(13.0);
+        LoadFlowParameters svcLfp = svcCacheEnabledParameters();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(zoned, svcLfp).isFullyConverged());
+        Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents = Map.of(
+                new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "B4"), 1.0);
+        var zoneLever = levers(SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE, List.of("z1"));
+        var exact = runAdjoint(zoned, svcLfp, null, cotangents, zoneLever);
+        var smoothed = runAdjoint(zoned, svcLfp, new ReactiveLimitsSmoothing(1e-7), cotangents, zoneLever);
+        assertEquals(0, maxAbsDifference(exact, smoothed), 1e-6 * maxAbs(exact));
+    }
+
+    /**
+     * What the smoothing is for: B2-G's upper limit just above its free output (PV) and just below it (switched
+     * PQ) are nearly the same operating point, but the exact gradient jumps between them, the PQ switch removing
+     * B2 from the voltage control. The smoothed gradient changes little across the switch.
+     */
+    @Test
+    void smoothedAdjointDoesNotJumpWhenAGeneratorCrossesItsLimit() {
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        Network free = IeeeCdfNetworkFactory.create14();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(free, lfp).isFullyConverged());
+        double freeQ = -free.getGenerator("B2-G").getTerminal().getQ();
+        double delta = 0.5; // Mvar
+
+        Network pv = ieee14WithB2MaxQ(freeQ + delta);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(pv, lfp).isFullyConverged());
+        assertEquals(free.getGenerator("B2-G").getTargetV(), busVoltage(pv, "B2"), 1e-6, "B2 must still hold its voltage");
+        Network pq = ieee14WithB2MaxQ(freeQ - delta);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(pq, lfp).isFullyConverged());
+        assertEquals(-(freeQ - delta), pq.getGenerator("B2-G").getTerminal().getQ(), 1e-6, "B2 must be held at its limit");
+
+        ReactiveLimitsSmoothing smoothing = new ReactiveLimitsSmoothing(ReactiveLimitsSmoothing.DEFAULT_MU);
+        var exactPv = runAdjoint(pv, lfp, null, ieee14Cotangents(), ieee14Levers());
+        var exactPq = runAdjoint(pq, lfp, null, ieee14Cotangents(), ieee14Levers());
+        var smoothedPv = runAdjoint(pv, lfp, smoothing, ieee14Cotangents(), ieee14Levers());
+        var smoothedPq = runAdjoint(pq, lfp, smoothing, ieee14Cotangents(), ieee14Levers());
+
+        // B2's own target is a lever on the PV side and none on the PQ side
+        var b2Target = varKey(SensitivityVariableType.BUS_TARGET_VOLTAGE, "B2-G");
+        assertTrue(exactPv.get(b2Target) > 0.1);
+        assertEquals(0, exactPq.get(b2Target), 0.0);
+        double exactJump = maxAbsDifference(exactPv, exactPq);
+        double smoothedJump = maxAbsDifference(smoothedPv, smoothedPq);
+        assertTrue(smoothedJump < 0.1 * exactJump, "the smoothed gradient must not jump, got " + smoothedJump + " against " + exactJump);
+        // at the switch every target lever blends the two sides: between its PV and PQ exact values, B2's own
+        // counting partly instead of all or nothing
+        for (String g : List.of("B1-G", "B2-G", "B6-G")) {
+            var k = varKey(SensitivityVariableType.BUS_TARGET_VOLTAGE, g);
+            double lo = Math.min(exactPv.get(k), exactPq.get(k));
+            double hi = Math.max(exactPv.get(k), exactPq.get(k));
+            for (var smoothed : List.of(smoothedPv, smoothedPq)) {
+                assertTrue(smoothed.get(k) > lo && smoothed.get(k) < hi,
+                        g + ": smoothed " + smoothed.get(k) + " outside [" + lo + ", " + hi + "]");
+            }
+        }
     }
 }
