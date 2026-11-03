@@ -48,8 +48,8 @@ public final class AcStateVectorUtil {
                 case DUMMY_P,
                      DUMMY_Q,
                      GENERATOR_Q,
-                     GENERATOR_V_PLUS,
-                     GENERATOR_V_MINUS,
+                     BUS_V_PLUS,
+                     BUS_V_MINUS,
                      BUS_PHI_ZERO,
                      BUS_PHI_NEGATIVE:
                     x[v.getRow()] = 0;
