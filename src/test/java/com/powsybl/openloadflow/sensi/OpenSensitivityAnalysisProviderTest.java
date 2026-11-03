@@ -86,6 +86,15 @@ class OpenSensitivityAnalysisProviderTest extends AbstractSensitivityAnalysisTes
         assertEquals(3, smoothing.getAdjointSmoothingPolishIterations());
         assertThrows(IllegalArgumentException.class, () -> smoothing.setAdjointSmoothingPolishIterations(-1));
 
+        // an extension already configured is updated, the parameters not given kept
+        OpenSensitivityAnalysisParameters configured = new OpenSensitivityAnalysisParameters().setThreadCount(3);
+        provider.updateSpecificParameters(configured, Map.of(
+                OpenSensitivityAnalysisParameters.ADJOINT_REACTIVE_LIMITS_SMOOTHING_PARAM_NAME, "true",
+                OpenSensitivityAnalysisParameters.ADJOINT_REACTIVE_LIMITS_SMOOTHING_MU_PARAM_NAME, "0.02"));
+        assertTrue(configured.isAdjointReactiveLimitsSmoothing());
+        assertEquals(0.02, configured.getAdjointReactiveLimitsSmoothingMu());
+        assertEquals(3, configured.getThreadCount());
+
         assertFalse(defaults.isAdjointTransformerVoltageControl());
         assertTrue(((OpenSensitivityAnalysisParameters) provider.loadSpecificParameters(Map.of(
                 OpenSensitivityAnalysisParameters.ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_PARAM_NAME, "true")).orElseThrow())

@@ -125,6 +125,12 @@ public class OpenSensitivityAnalysisProvider implements SensitivityAnalysisProvi
         return Optional.of(OpenSensitivityAnalysisParameters.load(properties));
     }
 
+    /** Without it, the parameters of an extension already configured (pypowsybl reads the configuration) were ignored. */
+    @Override
+    public void updateSpecificParameters(Extension<SensitivityAnalysisParameters> extension, Map<String, String> properties) {
+        ((OpenSensitivityAnalysisParameters) extension).update(properties);
+    }
+
     @Override
     public List<String> getSpecificParametersNames() {
         return OpenSensitivityAnalysisParameters.SPECIFIC_PARAMETERS_NAMES;
