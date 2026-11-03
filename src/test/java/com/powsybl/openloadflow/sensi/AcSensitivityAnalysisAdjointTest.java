@@ -14,6 +14,7 @@ import com.powsybl.iidm.network.Generator;
 import com.powsybl.iidm.network.Line;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.ShuntCompensatorLinearModel;
+import com.powsybl.iidm.network.TwoWindingsTransformer;
 import com.powsybl.iidm.network.extensions.SecondaryVoltageControl;
 import com.powsybl.iidm.network.extensions.SecondaryVoltageControlAdder;
 import com.powsybl.loadflow.LoadFlow;
@@ -22,6 +23,7 @@ import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.graph.dtree.DTreeGraphConnectivityFactory;
+import com.powsybl.openloadflow.network.VoltageControlNetworkFactory;
 import com.powsybl.sensitivity.*;
 import org.junit.jupiter.api.Test;
 
@@ -1408,5 +1410,110 @@ class AcSensitivityAnalysisAdjointTest {
             AcSensitivityAnalysis.VariableRef key = varKey(SensitivityVariableType.INJECTION_ACTIVE_POWER, g);
             assertEquals(off.get(key), on.get(key), 0.0, "option without a distributed slack for " + g);
         }
+    }
+
+    // ---- the adjoint on its own equation system (a copy of the solved network) ----
+
+    /**
+     * Runs the adjoint on the cached load flow's system, on a system of its own built on a copy of the solved
+     * network, then on the cached system again: with the same equations the copy must give the same gradient,
+     * and must leave the cached context as it was.
+     */
+    private static void assertCopyRouteMatchesCachedRoute(Network network, LoadFlowParameters lfp,
+                                                          OpenSensitivityAnalysisParameters sensiExt,
+                                                          Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents,
+                                                          List<AcSensitivityAnalysis.AdjointVariable> variables) {
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        sensiParams.addExtension(OpenSensitivityAnalysisParameters.class, sensiExt);
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new DTreeGraphConnectivityFactory<>(), sensiParams);
+        String variantId = network.getVariantManager().getWorkingVariantId();
+
+        Map<AcSensitivityAnalysis.VariableRef, Double> cached = analysis.runAdjoint(network, variantId, List.of(), cotangents, variables);
+        Map<AcSensitivityAnalysis.VariableRef, Double> copied = analysis.setAdjointOnNetworkCopy(true)
+                .runAdjoint(network, variantId, List.of(), cotangents, variables);
+        Map<AcSensitivityAnalysis.VariableRef, Double> cachedAgain = analysis.setAdjointOnNetworkCopy(false)
+                .runAdjoint(network, variantId, List.of(), cotangents, variables);
+
+        assertEquals(List.copyOf(cached.keySet()), List.copyOf(copied.keySet()));
+        double scale = cached.values().stream().mapToDouble(Math::abs).max().orElse(0);
+        assertTrue(scale > 1e-3, "the gradient must be non-trivial, got max |θ̄| = " + scale);
+        for (var e : cached.entrySet()) {
+            assertEquals(e.getValue(), copied.get(e.getKey()), 1e-9 * scale, "copy route for " + e.getKey());
+        }
+        assertEquals(cached, cachedAgain, "the copy route must leave the cached context untouched");
+    }
+
+    private static List<AcSensitivityAnalysis.AdjointVariable> ieee14Levers() {
+        // levers a bus voltage can be differentiated against (not an active injection)
+        return concat(levers(SensitivityVariableType.BUS_TARGET_VOLTAGE, List.of("B1-G", "B2-G", "B6-G")),
+                levers(SensitivityVariableType.BRANCH_ADMITTANCE, List.of("L4-5-1", "L6-13-1")));
+    }
+
+    private static Map<AcSensitivityAnalysis.FunctionRef, Double> ieee14Cotangents() {
+        Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents = new LinkedHashMap<>(FLOW_COTANGENTS);
+        cotangents.put(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "B10"), 2.0);
+        cotangents.put(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "B14"), -1.0);
+        return cotangents;
+    }
+
+    @Test
+    void runAdjointOnANetworkCopyMatchesTheCachedSystem() {
+        assertCopyRouteMatchesCachedRoute(IeeeCdfNetworkFactory.create14(), cacheEnabledParameters(),
+                new OpenSensitivityAnalysisParameters(), ieee14Cotangents(), ieee14Levers());
+    }
+
+    @Test
+    void runAdjointOnANetworkCopyKeepsAGeneratorSwitchedToItsReactiveLimit() {
+        Network network = IeeeCdfNetworkFactory.create14();
+        Generator b2 = network.getGenerator("B2-G");
+        b2.newMinMaxReactiveLimits().setMinQ(-40).setMaxQ(20).add();
+        assertCopyRouteMatchesCachedRoute(network, cacheEnabledParameters(),
+                new OpenSensitivityAnalysisParameters(), ieee14Cotangents(), ieee14Levers());
+        // the load flow switched B2 to PQ at its upper limit, and the copy kept it so
+        assertEquals(-20, b2.getTerminal().getQ(), 1e-6);
+        assertTrue(Math.abs(busVoltage(network, "B2") - b2.getTargetV()) > 0.1, "B2 must have left its target voltage");
+    }
+
+    @Test
+    void runAdjointOnANetworkCopyMatchesWithTheSlackDistribution() {
+        assertCopyRouteMatchesCachedRoute(IeeeCdfNetworkFactory.create14(), distributedSlackCacheEnabledParameters(),
+                new OpenSensitivityAnalysisParameters().setAdjointSlackDistribution(true), FLOW_COTANGENTS,
+                concat(levers(SensitivityVariableType.INJECTION_ACTIVE_POWER, GENS), ieee14Levers()));
+    }
+
+    @Test
+    void runAdjointOnANetworkCopyMatchesForAnSvcPilotLever() {
+        Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents = new LinkedHashMap<>();
+        cotangents.put(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "B10"), 1.0);
+        cotangents.put(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "B4"), 0.5);
+        assertCopyRouteMatchesCachedRoute(ieee14WithZone(13.0), svcCacheEnabledParameters(),
+                new OpenSensitivityAnalysisParameters(), cotangents,
+                concat(levers(SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE, List.of("z1")),
+                        levers(SensitivityVariableType.BUS_TARGET_VOLTAGE, List.of("B2-G"))));
+    }
+
+    @Test
+    void runAdjointOnANetworkCopyKeepsATapHeldByTheTransformerVoltageControl() {
+        Network network = VoltageControlNetworkFactory.createNetworkWithT2wt();
+        TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("T2wT");
+        t2wt.getRatioTapChanger()
+                .setTapPosition(0)
+                .getVoltageRegulation()
+                    .setTerminal(t2wt.getTerminal2(), 34.0)
+                    .setTargetDeadband(0)
+                    .setRegulating(true);
+        LoadFlowParameters lfp = cacheEnabledParameters().setTransformerVoltageControlOn(true);
+        OpenLoadFlowParameters.get(lfp)
+                .setTransformerVoltageControlMode(OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
+        Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents = new LinkedHashMap<>();
+        cotangents.put(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "BUS_3"), 1.0);
+        cotangents.put(powerKey("LINE_12"), 0.5);
+        assertCopyRouteMatchesCachedRoute(network, lfp, new OpenSensitivityAnalysisParameters(), cotangents,
+                concat(levers(SensitivityVariableType.INJECTION_REACTIVE_POWER, List.of("LOAD_2", "LOAD_3")),
+                        levers(SensitivityVariableType.BUS_TARGET_VOLTAGE, List.of("GEN_1"))));
+        assertEquals(3, t2wt.getRatioTapChanger().getSolvedTapPosition(), "the tap must have moved to hold BUS_3");
     }
 }

@@ -33,6 +33,7 @@ import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
 import com.powsybl.openloadflow.network.*;
 import com.powsybl.openloadflow.network.action.*;
+import com.powsybl.openloadflow.network.impl.LfNetworkCopier;
 import com.powsybl.openloadflow.network.impl.LfNetworkList;
 import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
@@ -63,8 +64,20 @@ import java.util.stream.Collectors;
  */
 public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariableType, AcEquationType> {
 
+    private boolean adjointOnNetworkCopy = false;
+
     public AcSensitivityAnalysis(MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory, SensitivityAnalysisParameters parameters) {
         super(matrixFactory, connectivityFactory, parameters);
+    }
+
+    /**
+     * Makes {@link #runAdjoint} build its own equation system on a copy of the solved network instead of reusing
+     * the cached load flow's, at the cost of one more factorization. With the same equations the gradient is the
+     * same: this is the route a smoothed adjoint system will take. Package-private until that system exists.
+     */
+    AcSensitivityAnalysis setAdjointOnNetworkCopy(boolean adjointOnNetworkCopy) {
+        this.adjointOnNetworkCopy = adjointOnNetworkCopy;
+        return this;
     }
 
     private void calculateSensitivityValues(List<LfSensitivityFactor<AcVariableType, AcEquationType>> lfFactors,
@@ -527,8 +540,40 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                         .orElseThrow(() -> new PowsyblException("No cached AC load flow for this network, "
                                 + "run a load flow with networkCacheEnabled=true before runAdjoint."));
         NetworkCache.AcLfValue value = entry.getValues().get(0); // main synchronous network
-        AcLoadFlowContext context = value.getContext();
-        LfNetwork lfNetwork = value.getNetwork();
+        AcLoadFlowContext cachedContext = value.getContext();
+        // on its own system, the adjoint works on a copy of the solved network: the cached one, which the next
+        // load flow reuses, is never touched (null resource: nothing to close)
+        try (AcLoadFlowContext ownContext = adjointOnNetworkCopy ? createAdjointContext(cachedContext) : null) {
+            return runAdjoint(network, variableSets, factors, cotangentsByFunction, variables,
+                    ownContext != null ? ownContext : cachedContext);
+        }
+    }
+
+    /**
+     * A context of its own for the adjoint, on a copy of the solved network of {@code cachedContext}: a new
+     * equation system, with the controls in the state the load flow left them (a PV bus switched PQ stays PQ, a
+     * tap held at its position stays held), and the state vector at the solution. Its Jacobian is factorized again
+     * on first use. The copy selects its slack and reference buses again, which must be the cached ones.
+     */
+    private static AcLoadFlowContext createAdjointContext(AcLoadFlowContext cachedContext) {
+        LfNetwork lfNetwork = cachedContext.getNetwork();
+        LfNetwork copy = LfNetworkCopier.copy(lfNetwork, LoadFlowModel.AC, ReportNode.NO_OP);
+        for (LfSynchronousNetwork sc : lfNetwork.getSynchronousNetworks()) {
+            LfSynchronousNetwork copySc = copy.getSynchronousNetwork(sc.getNumSC());
+            if (!copySc.getSlackBuses().stream().map(LfBus::getId).toList().equals(sc.getSlackBuses().stream().map(LfBus::getId).toList())
+                    || !copySc.getReferenceBus().getId().equals(sc.getReferenceBus().getId())) {
+                throw new PowsyblException("Adjoint on a network copy: the copy selected other slack or reference buses than the load flow");
+            }
+        }
+        AcLoadFlowContext context = new AcLoadFlowContext(copy, cachedContext.getParameters());
+        AcSolverUtil.initStateVector(copy, context.getEquationSystem(), new PreviousValueVoltageInitializer());
+        return context;
+    }
+
+    private Map<VariableRef, Double> runAdjoint(Network network, List<SensitivityVariableSet> variableSets,
+                                                List<SensitivityFactor> factors, Map<FunctionRef, Double> cotangentsByFunction,
+                                                List<AdjointVariable> variables, AcLoadFlowContext context) {
+        LfNetwork lfNetwork = context.getNetwork();
         boolean breakers = context.getParameters().getNetworkParameters().isBreakers();
 
         Map<String, SensitivityVariableSet> variableSetsById = variableSets.stream()
