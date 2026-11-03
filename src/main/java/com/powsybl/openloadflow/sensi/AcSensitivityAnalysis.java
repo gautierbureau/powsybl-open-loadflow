@@ -52,6 +52,7 @@ import com.powsybl.openloadflow.util.Lists2;
 import com.powsybl.openloadflow.util.Reports;
 import com.powsybl.openloadflow.util.mt.ContingencyMultiThreadHelper;
 import com.powsybl.sensitivity.*;
+import org.apache.commons.lang3.Range;
 import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.*;
@@ -565,9 +566,11 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                 ? new ReactiveLimitsSmoothing(sensiParametersExt.getAdjointReactiveLimitsSmoothingMu(),
                                               sensiParametersExt.getAdjointReactiveLimitsSmoothingVoltageScale())
                 : null;
-        boolean ownSystem = adjointOnNetworkCopy || smoothing != null;
+        boolean transformerVoltageControl = sensiParametersExt.isAdjointTransformerVoltageControl();
+        boolean ownSystem = adjointOnNetworkCopy || smoothing != null || transformerVoltageControl;
         try (AcLoadFlowContext ownContext = ownSystem
-                ? createAdjointContext(cachedContext, smoothing, sensiParametersExt.getAdjointReactiveLimitsSmoothingPolishIterations())
+                ? createAdjointContext(cachedContext, smoothing, sensiParametersExt.getAdjointReactiveLimitsSmoothingPolishIterations(),
+                                       transformerVoltageControl)
                 : null) {
             return runAdjoint(network, variableSets, factors, cotangentsByFunction, variables,
                     ownContext != null ? ownContext : cachedContext, cachedContext);
@@ -581,10 +584,11 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      * on first use. The copy selects its slack and reference buses again, which must be the cached ones.
      * With {@code smoothing}, a bus controlling its own voltage gets smoothed reactive limits, their unknowns set
      * from the solution, and {@code polishIterations} Newton iterations move the state towards the smoothed load
-     * flow's solution. Package-private for tests.
+     * flow's solution. With {@code transformerVoltageControl}, the taps the load flow left regulating, away from a
+     * tap limit, regulate again (see {@link #enableTransformerVoltageControls}). Package-private for tests.
      */
     static AcLoadFlowContext createAdjointContext(AcLoadFlowContext cachedContext, ReactiveLimitsSmoothing smoothing,
-                                                  int polishIterations) {
+                                                  int polishIterations, boolean transformerVoltageControl) {
         LfNetwork lfNetwork = cachedContext.getNetwork();
         LfNetwork copy = LfNetworkCopier.copy(lfNetwork, LoadFlowModel.AC, ReportNode.NO_OP);
         for (LfSynchronousNetwork sc : lfNetwork.getSynchronousNetworks()) {
@@ -593,6 +597,9 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                     || !copySc.getReferenceBus().getId().equals(sc.getReferenceBus().getId())) {
                 throw new PowsyblException("Adjoint on a network copy: the copy selected other slack or reference buses than the load flow");
             }
+        }
+        if (transformerVoltageControl) {
+            enableTransformerVoltageControls(copy);
         }
         AcLoadFlowParameters parameters = cachedContext.getParameters();
         if (smoothing != null) {
@@ -632,6 +639,33 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             }
         }
         return largestMismatches;
+    }
+
+    /**
+     * The tap changers' voltage control as the adjoint of a continuous ratio: the load flow ends with every tap
+     * rounded and its control off, which leaves the bus it holds free for the adjoint. Here a tap's control is on
+     * again, its ratio an unknown and its controlled bus voltage held, unless the load flow would not run it: the tap
+     * is at an end of its range (it cannot move further), its controlled bus is held by a generator, or (as the load
+     * flow decides) no bus controlling its voltage remains on the side it does not control. The deadband is ignored:
+     * a discrete tap answers a small change by nothing, then by a whole step, and on average as a continuous one.
+     */
+    private static void enableTransformerVoltageControls(LfNetwork network) {
+        for (LfBranch branch : network.<LfBranch>getControllerElements(VoltageControl.Type.TRANSFORMER)) {
+            Optional<TransformerVoltageControl> voltageControl = branch.getVoltageControl();
+            if (voltageControl.isEmpty() || branch.isDisabled() || !branch.isConnectedAtBothSides()) {
+                continue;
+            }
+            LfBus controlledBus = voltageControl.get().getControlledBus();
+            if (controlledBus.isGeneratorVoltageControlled() && controlledBus.isGeneratorVoltageControlEnabled()) {
+                continue;
+            }
+            int tapPosition = branch.getPiModel().getTapPosition();
+            Range<Integer> tapPositionRange = branch.getPiModel().getTapPositionRange();
+            if (tapPosition > tapPositionRange.getMinimum() && tapPosition < tapPositionRange.getMaximum()) {
+                branch.setVoltageControlEnabled(true);
+            }
+        }
+        network.fixTransformerVoltageControls();
     }
 
     /**

@@ -29,6 +29,7 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
     private double adjointReactiveLimitsSmoothingMu = ADJOINT_REACTIVE_LIMITS_SMOOTHING_MU_DEFAULT_VALUE;
     private double adjointReactiveLimitsSmoothingVoltageScale = ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_DEFAULT_VALUE;
     private int adjointReactiveLimitsSmoothingPolishIterations = ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_DEFAULT_VALUE;
+    private boolean adjointTransformerVoltageControl = ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_DEFAULT_VALUE;
 
     public static final String DEBUG_DIR_PARAM_NAME = "debugDir";
     public static final String DEBUG_DIR_DEFAULT_VALUE = "";
@@ -46,10 +47,13 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
     public static final double ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_DEFAULT_VALUE = ReactiveLimitsSmoothing.DEFAULT_VOLTAGE_SCALE;
     public static final String ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME = "adjointReactiveLimitsSmoothingPolishIterations";
     public static final int ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_DEFAULT_VALUE = 0;
+    public static final String ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_PARAM_NAME = "adjointTransformerVoltageControl";
+    public static final boolean ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_DEFAULT_VALUE = false;
 
     public static final List<String> SPECIFIC_PARAMETERS_NAMES = List.of(DEBUG_DIR_PARAM_NAME, START_WITH_FROZEN_AC_EMULATION_PARAM_NAME, THREAD_COUNT_PARAM_NAME,
             ADJOINT_SLACK_DISTRIBUTION_PARAM_NAME, ADJOINT_REACTIVE_LIMITS_SMOOTHING_PARAM_NAME, ADJOINT_REACTIVE_LIMITS_SMOOTHING_MU_PARAM_NAME,
-            ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME, ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME);
+            ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME, ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME,
+            ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_PARAM_NAME);
 
     @Override
     public String getName() {
@@ -152,6 +156,21 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
         return this;
     }
 
+    public boolean isAdjointTransformerVoltageControl() {
+        return adjointTransformerVoltageControl;
+    }
+
+    /**
+     * Makes the AC adjoint differentiate the ratio tap changers' voltage control: the load flow ends with every tap
+     * rounded and held, so the adjoint otherwise sees a bus a tap regulates as free. With this on, the adjoint works on
+     * a copy of the solved network where every regulating tap that is not at a tap limit regulates again, its ratio
+     * continuous, so that the bus it holds stays held. It costs one more factorization. Off by default.
+     */
+    public OpenSensitivityAnalysisParameters setAdjointTransformerVoltageControl(boolean adjointTransformerVoltageControl) {
+        this.adjointTransformerVoltageControl = adjointTransformerVoltageControl;
+        return this;
+    }
+
     public static OpenSensitivityAnalysisParameters getOrDefault(SensitivityAnalysisParameters sensitivityAnalysisParameters) {
         OpenSensitivityAnalysisParameters sensiParametersExt = sensitivityAnalysisParameters.getExtension(OpenSensitivityAnalysisParameters.class);
         if (sensiParametersExt == null) {
@@ -177,7 +196,9 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
                         .setAdjointReactiveLimitsSmoothingVoltageScale(config.getDoubleProperty(ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME,
                                 ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_DEFAULT_VALUE))
                         .setAdjointReactiveLimitsSmoothingPolishIterations(config.getIntProperty(ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME,
-                                ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_DEFAULT_VALUE)));
+                                ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_DEFAULT_VALUE))
+                        .setAdjointTransformerVoltageControl(config.getBooleanProperty(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_PARAM_NAME,
+                                ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_DEFAULT_VALUE)));
         return parameters;
     }
 
@@ -198,6 +219,8 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
                 .ifPresent(value -> parameters.setAdjointReactiveLimitsSmoothingVoltageScale(Double.parseDouble(value)));
         Optional.ofNullable(properties.get(ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME))
                 .ifPresent(value -> parameters.setAdjointReactiveLimitsSmoothingPolishIterations(Integer.parseInt(value)));
+        Optional.ofNullable(properties.get(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_PARAM_NAME))
+                .ifPresent(value -> parameters.setAdjointTransformerVoltageControl(Boolean.parseBoolean(value)));
         return parameters;
     }
 }

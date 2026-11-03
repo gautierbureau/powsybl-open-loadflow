@@ -121,7 +121,8 @@
       "adjointReactiveLimitsSmoothing" : false,
       "adjointReactiveLimitsSmoothingMu" : 0.05,
       "adjointReactiveLimitsSmoothingVoltageScale" : 50.0,
-      "adjointReactiveLimitsSmoothingPolishIterations" : 0
+      "adjointReactiveLimitsSmoothingPolishIterations" : 0,
+      "adjointTransformerVoltageControl" : false
     }
   }
 }
