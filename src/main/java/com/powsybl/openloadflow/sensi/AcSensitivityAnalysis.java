@@ -560,17 +560,21 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         AcLoadFlowContext cachedContext = value.getContext();
         // on its own system, the adjoint works on a copy of the solved network: the cached one, which the next
         // load flow reuses, is never touched (null resource: nothing to close)
-        // smoothed reactive limits (adjointReactiveLimitsSmoothing): the copy gets the smoothed equations
+        // smoothed reactive limits, tap changers regulating again (and their smoothed ratio limits): on the copy
         OpenSensitivityAnalysisParameters sensiParametersExt = OpenSensitivityAnalysisParameters.getOrDefault(parameters);
-        ReactiveLimitsSmoothing smoothing = sensiParametersExt.isAdjointReactiveLimitsSmoothing()
-                ? new ReactiveLimitsSmoothing(sensiParametersExt.getAdjointReactiveLimitsSmoothingMu(),
-                                              sensiParametersExt.getAdjointReactiveLimitsSmoothingVoltageScale())
+        LimitsSmoothing reactiveSmoothing = sensiParametersExt.isAdjointReactiveLimitsSmoothing()
+                ? new LimitsSmoothing(sensiParametersExt.getAdjointReactiveLimitsSmoothingMu(),
+                                      sensiParametersExt.getAdjointReactiveLimitsSmoothingVoltageScale())
                 : null;
         boolean transformerVoltageControl = sensiParametersExt.isAdjointTransformerVoltageControl();
-        boolean ownSystem = adjointOnNetworkCopy || smoothing != null || transformerVoltageControl;
+        LimitsSmoothing ratioSmoothing = transformerVoltageControl && sensiParametersExt.isAdjointTransformerVoltageControlSmoothing()
+                ? new LimitsSmoothing(sensiParametersExt.getAdjointTransformerVoltageControlSmoothingMu(),
+                                      sensiParametersExt.getAdjointTransformerVoltageControlSmoothingVoltageScale())
+                : null;
+        boolean ownSystem = adjointOnNetworkCopy || reactiveSmoothing != null || transformerVoltageControl;
         try (AcLoadFlowContext ownContext = ownSystem
-                ? createAdjointContext(cachedContext, smoothing, sensiParametersExt.getAdjointReactiveLimitsSmoothingPolishIterations(),
-                                       transformerVoltageControl)
+                ? createAdjointContext(cachedContext, reactiveSmoothing, transformerVoltageControl, ratioSmoothing,
+                                       sensiParametersExt.getAdjointSmoothingPolishIterations())
                 : null) {
             return runAdjoint(network, variableSets, factors, cotangentsByFunction, variables,
                     ownContext != null ? ownContext : cachedContext, cachedContext);
@@ -582,13 +586,15 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      * equation system, with the controls in the state the load flow left them (a PV bus switched PQ stays PQ, a
      * tap held at its position stays held), and the state vector at the solution. Its Jacobian is factorized again
      * on first use. The copy selects its slack and reference buses again, which must be the cached ones.
-     * With {@code smoothing}, a bus controlling its own voltage gets smoothed reactive limits, their unknowns set
-     * from the solution, and {@code polishIterations} Newton iterations move the state towards the smoothed load
-     * flow's solution. With {@code transformerVoltageControl}, the taps the load flow left regulating, away from a
-     * tap limit, regulate again (see {@link #enableTransformerVoltageControls}). Package-private for tests.
+     * With {@code reactiveSmoothing}, a bus controlling its own voltage gets smoothed reactive limits. With
+     * {@code transformerVoltageControl}, the taps regulate again (see {@link #enableTransformerVoltageControls}), and
+     * with {@code ratioSmoothing} their ratio limits are smoothed. The smoothed unknowns are set from the solution,
+     * then {@code polishIterations} Newton iterations move the state towards the smoothed load flow's solution.
+     * Package-private for tests.
      */
-    static AcLoadFlowContext createAdjointContext(AcLoadFlowContext cachedContext, ReactiveLimitsSmoothing smoothing,
-                                                  int polishIterations, boolean transformerVoltageControl) {
+    static AcLoadFlowContext createAdjointContext(AcLoadFlowContext cachedContext, LimitsSmoothing reactiveSmoothing,
+                                                  boolean transformerVoltageControl, LimitsSmoothing ratioSmoothing,
+                                                  int polishIterations) {
         LfNetwork lfNetwork = cachedContext.getNetwork();
         LfNetwork copy = LfNetworkCopier.copy(lfNetwork, LoadFlowModel.AC, ReportNode.NO_OP);
         for (LfSynchronousNetwork sc : lfNetwork.getSynchronousNetworks()) {
@@ -599,20 +605,21 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             }
         }
         if (transformerVoltageControl) {
-            enableTransformerVoltageControls(copy);
+            enableTransformerVoltageControls(copy, ratioSmoothing != null);
         }
         AcLoadFlowParameters parameters = cachedContext.getParameters();
-        if (smoothing != null) {
+        boolean smoothed = reactiveSmoothing != null || ratioSmoothing != null;
+        if (smoothed) {
             // the vectorized creator keeps the bus balances in arrays, which the smoothed rows do not extend
             parameters = new AcLoadFlowParameters(parameters)
                     .setEquationSystemCreationParameters(new AcEquationSystemCreationParameters(
-                            parameters.getEquationSystemCreationParameters().isForceA1Var(), smoothing))
+                            parameters.getEquationSystemCreationParameters().isForceA1Var(), reactiveSmoothing, ratioSmoothing))
                     .setVectorized(false);
         }
         AcLoadFlowContext context = new AcLoadFlowContext(copy, parameters);
         AcSolverUtil.initStateVector(copy, context.getEquationSystem(), new PreviousValueVoltageInitializer());
-        if (smoothing != null) {
-            initSmoothedReactiveLimitsState(copy, context.getEquationSystem());
+        if (smoothed) {
+            initSmoothedLimitsState(copy, context.getEquationSystem());
             polish(context, polishIterations);
         }
         return context;
@@ -648,8 +655,10 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      * is at an end of its range (it cannot move further), its controlled bus is held by a generator, or (as the load
      * flow decides) no bus controlling its voltage remains on the side it does not control. The deadband is ignored:
      * a discrete tap answers a small change by nothing, then by a whole step, and on average as a continuous one.
+     * With {@code smoothRatioLimits}, a tap at the end of its range whose limits can be smoothed (see
+     * {@link AcEquationSystemCreator#canSmoothRatioLimits}) regulates too: its limit equations decide how much.
      */
-    private static void enableTransformerVoltageControls(LfNetwork network) {
+    private static void enableTransformerVoltageControls(LfNetwork network, boolean smoothRatioLimits) {
         for (LfBranch branch : network.<LfBranch>getControllerElements(VoltageControl.Type.TRANSFORMER)) {
             Optional<TransformerVoltageControl> voltageControl = branch.getVoltageControl();
             if (voltageControl.isEmpty() || branch.isDisabled() || !branch.isConnectedAtBothSides()) {
@@ -661,7 +670,8 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             }
             int tapPosition = branch.getPiModel().getTapPosition();
             Range<Integer> tapPositionRange = branch.getPiModel().getTapPositionRange();
-            if (tapPosition > tapPositionRange.getMinimum() && tapPosition < tapPositionRange.getMaximum()) {
+            boolean insideRange = tapPosition > tapPositionRange.getMinimum() && tapPosition < tapPositionRange.getMaximum();
+            if (insideRange || smoothRatioLimits && AcEquationSystemCreator.canSmoothRatioLimits(voltageControl.get())) {
                 branch.setVoltageControlEnabled(true);
             }
         }
@@ -669,21 +679,26 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
     }
 
     /**
-     * The smoothed reactive limits unknowns at the load flow's solution: the bus reactive generation that closes its
-     * reactive balance, and the voltage slacks that close {@code V + vPlus - vMinus = Vset}. The complementarity
-     * equations are not solved there: the adjoint linearizes the smoothed system at the exact solution.
+     * The smoothed limits unknowns at the load flow's solution: the bus reactive generation that closes its reactive
+     * balance, and the voltage slacks that close {@code V + vPlus - vMinus = Vset} (the target of the control holding
+     * the bus, as in its voltage equation); a tap ratio is the solved one. A tap inside its range is on its target up
+     * to the rounding to a step, which is no saturation: its slacks are 0. The complementarity equations are not
+     * solved there: the adjoint linearizes the smoothed system at the exact solution.
      */
-    private static void initSmoothedReactiveLimitsState(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+    private static void initSmoothedLimitsState(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
         StateVector stateVector = equationSystem.getStateVector();
         double[] x = stateVector.get().clone();
         for (Variable<AcVariableType> v : equationSystem.getIndex().getSortedVariablesToFind()) {
-            LfBus bus = network.getBus(v.getElementNum());
             switch (v.getType()) {
                 // its own -Q term is still 0, so the balance is the flows out of the bus: plus the load, the generation
-                case GENERATOR_Q -> x[v.getRow()] = ((Equation<?, ?>) bus.getQ()).eval() + bus.getLoadTargetQ();
-                case GENERATOR_V_PLUS, GENERATOR_V_MINUS -> {
-                    double deviation = bus.getV() - bus.getGeneratorVoltageControl().orElseThrow().getTargetValue();
-                    x[v.getRow()] = Math.max(0, v.getType() == AcVariableType.GENERATOR_V_PLUS ? -deviation : deviation);
+                case GENERATOR_Q -> {
+                    LfBus bus = network.getBus(v.getElementNum());
+                    x[v.getRow()] = ((Equation<?, ?>) bus.getQ()).eval() + bus.getLoadTargetQ();
+                }
+                case BUS_V_PLUS, BUS_V_MINUS -> {
+                    LfBus bus = network.getBus(v.getElementNum());
+                    double deviation = isHeldByATapInsideItsRange(bus) ? 0 : bus.getV() - bus.getHighestPriorityTargetV().orElseThrow();
+                    x[v.getRow()] = Math.max(0, v.getType() == AcVariableType.BUS_V_PLUS ? -deviation : deviation);
                 }
                 default -> {
                     // set from the network by initStateVector
@@ -691,6 +706,19 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             }
         }
         stateVector.set(x);
+    }
+
+    private static boolean isHeldByATapInsideItsRange(LfBus bus) {
+        if (bus.isGeneratorVoltageControlled() && bus.isGeneratorVoltageControlEnabled()) {
+            return false;
+        }
+        return bus.getTransformerVoltageControl()
+                .map(vc -> vc.getMergedControllerElements().stream().allMatch(branch -> {
+                    Range<Integer> range = branch.getPiModel().getTapPositionRange();
+                    int tapPosition = branch.getPiModel().getTapPosition();
+                    return tapPosition > range.getMinimum() && tapPosition < range.getMaximum();
+                }))
+                .orElse(false);
     }
 
     private Map<VariableRef, Double> runAdjoint(Network network, List<SensitivityVariableSet> variableSets,

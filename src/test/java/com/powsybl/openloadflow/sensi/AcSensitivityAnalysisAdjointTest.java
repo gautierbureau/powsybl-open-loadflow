@@ -25,7 +25,7 @@ import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.NetworkCache;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
-import com.powsybl.openloadflow.ac.equations.ReactiveLimitsSmoothing;
+import com.powsybl.openloadflow.ac.equations.LimitsSmoothing;
 import com.powsybl.openloadflow.graph.dtree.DTreeGraphConnectivityFactory;
 import com.powsybl.openloadflow.network.VoltageControlNetworkFactory;
 import com.powsybl.sensitivity.*;
@@ -1524,14 +1524,14 @@ class AcSensitivityAnalysisAdjointTest {
     // ---- the adjoint with smoothed reactive limits ----
 
     private static Map<AcSensitivityAnalysis.VariableRef, Double> runAdjoint(Network network, LoadFlowParameters lfp,
-                                                                             ReactiveLimitsSmoothing smoothing,
+                                                                             LimitsSmoothing smoothing,
                                                                              Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents,
                                                                              List<AcSensitivityAnalysis.AdjointVariable> variables) {
         return runAdjoint(network, lfp, smoothing, 0, cotangents, variables);
     }
 
     private static Map<AcSensitivityAnalysis.VariableRef, Double> runAdjoint(Network network, LoadFlowParameters lfp,
-                                                                             ReactiveLimitsSmoothing smoothing, int polishIterations,
+                                                                             LimitsSmoothing smoothing, int polishIterations,
                                                                              Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents,
                                                                              List<AcSensitivityAnalysis.AdjointVariable> variables) {
         SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
@@ -1541,7 +1541,7 @@ class AcSensitivityAnalysisAdjointTest {
             sensiExt.setAdjointReactiveLimitsSmoothing(true)
                     .setAdjointReactiveLimitsSmoothingMu(smoothing.mu())
                     .setAdjointReactiveLimitsSmoothingVoltageScale(smoothing.voltageScale())
-                    .setAdjointReactiveLimitsSmoothingPolishIterations(polishIterations);
+                    .setAdjointSmoothingPolishIterations(polishIterations);
         }
         sensiParams.addExtension(OpenSensitivityAnalysisParameters.class, sensiExt);
         return new AcSensitivityAnalysis(new SparseMatrixFactory(), new DTreeGraphConnectivityFactory<>(), sensiParams)
@@ -1571,7 +1571,7 @@ class AcSensitivityAnalysisAdjointTest {
         for (Network network : List.of(IeeeCdfNetworkFactory.create14(), ieee14WithB2MaxQ(20))) {
             assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
             var exact = runAdjoint(network, lfp, null, ieee14Cotangents(), ieee14Levers());
-            var smoothed = runAdjoint(network, lfp, new ReactiveLimitsSmoothing(1e-7), ieee14Cotangents(), ieee14Levers());
+            var smoothed = runAdjoint(network, lfp, new LimitsSmoothing(1e-7, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), ieee14Cotangents(), ieee14Levers());
             assertEquals(0, maxAbsDifference(exact, smoothed), 1e-6 * maxAbs(exact));
         }
         // and with an SVC pilot lever, whose coordination is the load flow's
@@ -1582,7 +1582,7 @@ class AcSensitivityAnalysisAdjointTest {
                 new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "B4"), 1.0);
         var zoneLever = levers(SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE, List.of("z1"));
         var exact = runAdjoint(zoned, svcLfp, null, cotangents, zoneLever);
-        var smoothed = runAdjoint(zoned, svcLfp, new ReactiveLimitsSmoothing(1e-7), cotangents, zoneLever);
+        var smoothed = runAdjoint(zoned, svcLfp, new LimitsSmoothing(1e-7, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), cotangents, zoneLever);
         assertEquals(0, maxAbsDifference(exact, smoothed), 1e-6 * maxAbs(exact));
     }
 
@@ -1606,7 +1606,7 @@ class AcSensitivityAnalysisAdjointTest {
         assertTrue(LoadFlow.find("OpenLoadFlow").run(pq, lfp).isFullyConverged());
         assertEquals(-(freeQ - delta), pq.getGenerator("B2-G").getTerminal().getQ(), 1e-6, "B2 must be held at its limit");
 
-        ReactiveLimitsSmoothing smoothing = new ReactiveLimitsSmoothing(ReactiveLimitsSmoothing.DEFAULT_MU);
+        LimitsSmoothing smoothing = new LimitsSmoothing(LimitsSmoothing.REACTIVE_DEFAULT_MU, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE);
         var exactPv = runAdjoint(pv, lfp, null, ieee14Cotangents(), ieee14Levers());
         var exactPq = runAdjoint(pq, lfp, null, ieee14Cotangents(), ieee14Levers());
         var smoothedPv = runAdjoint(pv, lfp, smoothing, ieee14Cotangents(), ieee14Levers());
@@ -1644,7 +1644,7 @@ class AcSensitivityAnalysisAdjointTest {
         AcLoadFlowContext cachedContext = NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow()
                 .getValues().get(0).getContext();
         try (AcLoadFlowContext context = AcSensitivityAnalysis.createAdjointContext(cachedContext,
-                new ReactiveLimitsSmoothing(ReactiveLimitsSmoothing.DEFAULT_MU), 0, false)) {
+                new LimitsSmoothing(LimitsSmoothing.REACTIVE_DEFAULT_MU, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), false, null, 0)) {
             double[] mismatches = AcSensitivityAnalysis.polish(context, 6);
             assertTrue(mismatches[0] > 1e-4, "the exact solution is not the smoothed one, got " + mismatches[0]);
             assertTrue(mismatches[6] < 1e-10, "the polish must converge, got " + Arrays.toString(mismatches));
@@ -1660,11 +1660,11 @@ class AcSensitivityAnalysisAdjointTest {
         Network network = ieee14WithB2MaxQ(20);
         assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
         var exact = runAdjoint(network, lfp, null, ieee14Cotangents(), ieee14Levers());
-        var polished = runAdjoint(network, lfp, new ReactiveLimitsSmoothing(1e-6), 3, ieee14Cotangents(), ieee14Levers());
+        var polished = runAdjoint(network, lfp, new LimitsSmoothing(1e-6, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), 3, ieee14Cotangents(), ieee14Levers());
         assertEquals(0, maxAbsDifference(exact, polished), 1e-5 * maxAbs(exact));
         // with the default smoothing the polish changes the gradient, but not its scale
-        var linearized = runAdjoint(network, lfp, new ReactiveLimitsSmoothing(ReactiveLimitsSmoothing.DEFAULT_MU), 0, ieee14Cotangents(), ieee14Levers());
-        var polishedDefault = runAdjoint(network, lfp, new ReactiveLimitsSmoothing(ReactiveLimitsSmoothing.DEFAULT_MU), 5, ieee14Cotangents(), ieee14Levers());
+        var linearized = runAdjoint(network, lfp, new LimitsSmoothing(LimitsSmoothing.REACTIVE_DEFAULT_MU, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), 0, ieee14Cotangents(), ieee14Levers());
+        var polishedDefault = runAdjoint(network, lfp, new LimitsSmoothing(LimitsSmoothing.REACTIVE_DEFAULT_MU, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), 5, ieee14Cotangents(), ieee14Levers());
         assertTrue(maxAbsDifference(linearized, polishedDefault) < 0.1 * maxAbs(linearized));
     }
 
@@ -1770,5 +1770,69 @@ class AcSensitivityAnalysisAdjointTest {
         assertEquals(frozen, load3Gradient(network, lfp, true, "BUS_3"), 0.0);
         // against a +-2 Mvar central difference, which carries the curvature of the load flow
         assertEquals(-busVoltagePerLoad3Q(36, lfp, "BUS_3"), frozen, 5e-3 * Math.abs(frozen));
+    }
+
+    private static double load3GradientSmoothed(Network network, LoadFlowParameters lfp, double mu, double scale, int polish, String bus) {
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        sensiParams.addExtension(OpenSensitivityAnalysisParameters.class, new OpenSensitivityAnalysisParameters()
+                .setAdjointTransformerVoltageControl(true).setAdjointTransformerVoltageControlSmoothing(true)
+                .setAdjointTransformerVoltageControlSmoothingMu(mu).setAdjointTransformerVoltageControlSmoothingVoltageScale(scale)
+                .setAdjointSmoothingPolishIterations(polish));
+        return new AcSensitivityAnalysis(new SparseMatrixFactory(), new DTreeGraphConnectivityFactory<>(), sensiParams)
+                .runAdjoint(network, network.getVariantManager().getWorkingVariantId(), List.of(),
+                        Map.of(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, bus), 1.0),
+                        levers(SensitivityVariableType.INJECTION_REACTIVE_POWER, List.of("LOAD_3")))
+                .get(varKey(SensitivityVariableType.INJECTION_REACTIVE_POWER, "LOAD_3"));
+    }
+
+    @Test
+    void smoothedRatioLimitsTendToTheExactTapsAsTheSmoothingVanishes() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        // inside the range, two steps from its end (the rounding leaves BUS_3 just under its target), at its end
+        for (double targetV : new double[] {32, 34.40, 36}) {
+            Network network = t2wtWithFineTaps(targetV);
+            double exact = load3Gradient(network, lfp, true, "BUS_3");
+            assertEquals(exact, load3GradientSmoothed(network, lfp, 1e-7, 1.0, 0, "BUS_3"), 1e-6, "target " + targetV);
+        }
+    }
+
+    /**
+     * At the end of its range a tap cannot follow a push past it but follows one back: the load flow's response is
+     * one-sided, and the exact gradient jumps from regulating to held between the last step and the end. The smoothed
+     * gradient does not jump, and at the end lies between the two one-sided responses.
+     */
+    @Test
+    void smoothedRatioLimitsDoNotJumpAtTheEndOfTheRange() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        double mu = LimitsSmoothing.RATIO_DEFAULT_MU;
+        Network inside = t2wtWithFineTaps(34.40);
+        double exactInside = load3Gradient(inside, lfp, true, "BUS_3");
+        double smoothedInside = load3GradientSmoothed(inside, lfp, mu, 1.0, 0, "BUS_3");
+        assertEquals(398, inside.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getSolvedTapPosition());
+        Network atEnd = t2wtWithFineTaps(34.45);
+        double exactAtEnd = load3Gradient(atEnd, lfp, true, "BUS_3");
+        double smoothedAtEnd = load3GradientSmoothed(atEnd, lfp, mu, 1.0, 0, "BUS_3");
+        assertEquals(400, atEnd.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getSolvedTapPosition());
+
+        assertTrue(Math.abs(exactAtEnd - exactInside) > 0.3, "the exact gradient jumps: " + exactInside + " -> " + exactAtEnd);
+        assertTrue(Math.abs(smoothedAtEnd - smoothedInside) < 0.03 * Math.abs(exactAtEnd - exactInside),
+                "the smoothed one must not: " + smoothedInside + " -> " + smoothedAtEnd);
+
+        // one-sided load flow responses at the end, per Mvar of injection: more load (the tap cannot follow), less
+        double dq = 1.0;
+        double v0 = busVoltage(atEnd, "BUS_3");
+        Network moreLoad = t2wtWithFineTaps(34.45);
+        moreLoad.getLoad("LOAD_3").setQ0(moreLoad.getLoad("LOAD_3").getQ0() + dq);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(moreLoad, lfp).isFullyConverged());
+        Network lessLoad = t2wtWithFineTaps(34.45);
+        lessLoad.getLoad("LOAD_3").setQ0(lessLoad.getLoad("LOAD_3").getQ0() - dq);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(lessLoad, lfp).isFullyConverged());
+        double heldSlope = (v0 - busVoltage(moreLoad, "BUS_3")) / dq;
+        double followedSlope = (busVoltage(lessLoad, "BUS_3") - v0) / dq;
+        assertTrue(heldSlope > 0.3 && Math.abs(followedSlope) < 0.05, heldSlope + " / " + followedSlope);
+        assertTrue(smoothedAtEnd > followedSlope && smoothedAtEnd < heldSlope,
+                "smoothed " + smoothedAtEnd + " outside [" + followedSlope + ", " + heldSlope + "]");
     }
 }

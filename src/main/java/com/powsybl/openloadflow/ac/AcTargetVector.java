@@ -146,6 +146,8 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
 
             case BUS_Q_LIMIT_UP,
                  BUS_Q_LIMIT_LO,
+                 BRANCH_RHO1_LIMIT_UP,
+                 BRANCH_RHO1_LIMIT_LO,
                  DISTR_RHO,
                  DISTR_SHUNT_B,
                  DUMMY_TARGET_P,
