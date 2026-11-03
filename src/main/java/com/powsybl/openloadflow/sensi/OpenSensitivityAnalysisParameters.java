@@ -254,7 +254,12 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
     }
 
     public static OpenSensitivityAnalysisParameters load(Map<String, String> properties) {
-        OpenSensitivityAnalysisParameters parameters = new OpenSensitivityAnalysisParameters();
+        return new OpenSensitivityAnalysisParameters().update(properties);
+    }
+
+    /** Sets the parameters present in {@code properties}, leaving the others as they are. */
+    public OpenSensitivityAnalysisParameters update(Map<String, String> properties) {
+        OpenSensitivityAnalysisParameters parameters = this;
         Optional.ofNullable(properties.get(DEBUG_DIR_PARAM_NAME)).ifPresent(parameters::setDebugDir);
         Optional.ofNullable(properties.get(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME))
                 .ifPresent(value -> parameters.setStartWithFrozenACEmulation(Boolean.parseBoolean(value)));
