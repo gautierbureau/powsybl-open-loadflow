@@ -98,6 +98,15 @@ public class LfSecondaryVoltageControl implements LfCopyable<LfSecondaryVoltageC
 
     private final AlignmentMode alignmentMode;
 
+    /**
+     * Number of times each controller bus has been re-enabled after having been switched to PQ by the reactive limits,
+     * bounded by {@link #maxReEnableCount} to avoid an endless ping-pong between the secondary voltage control and the
+     * reactive limits outer loops.
+     */
+    private final Map<String, Integer> reEnableCount = new HashMap<>();
+
+    private int maxReEnableCount = Integer.MAX_VALUE;
+
     public LfSecondaryVoltageControl(String zoneName, LfBus pilotBus, double targetValue, List<ControlUnit> controlUnits) {
         this(zoneName, pilotBus, targetValue, controlUnits, AlignmentMode.K);
     }
@@ -122,6 +131,14 @@ public class LfSecondaryVoltageControl implements LfCopyable<LfSecondaryVoltageC
 
     public AlignmentMode getAlignmentMode() {
         return alignmentMode;
+    }
+
+    public void setMaxReEnableCount(int maxReEnableCount) {
+        this.maxReEnableCount = maxReEnableCount;
+    }
+
+    public void resetReEnableCount() {
+        reEnableCount.clear();
     }
 
     /**
@@ -332,12 +349,27 @@ public class LfSecondaryVoltageControl implements LfCopyable<LfSecondaryVoltageC
         // if there is at least one of the generator to the limit but not all, re-enable all generators to help
         // the secondary voltage control to get a reactive power alignment
         if (!controllerBusesToLimit.isEmpty() && controllerBusesToLimit.size() < allControllerBuses.size()) {
+            List<LfBus> reEnabledControllerBuses = new ArrayList<>(controllerBusesToLimit.size());
+            List<LfBus> blockedControllerBuses = new ArrayList<>();
             for (LfBus controllerBus : controllerBusesToLimit) {
+                int count = reEnableCount.getOrDefault(controllerBus.getId(), 0);
+                if (count >= maxReEnableCount) {
+                    blockedControllerBuses.add(controllerBus);
+                    continue;
+                }
+                reEnableCount.put(controllerBus.getId(), count + 1);
                 controllerBus.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(true);
                 controllerBus.setQLimitType(null);
+                reEnabledControllerBuses.add(controllerBus);
             }
-            LOGGER.debug("Secondary voltage control of zone '{}': controller buses {} have been re-enabled because might help to reach pilot bus target",
-                    getZoneName(), controllerBusesToLimit);
+            if (!reEnabledControllerBuses.isEmpty()) {
+                LOGGER.debug("Secondary voltage control of zone '{}': controller buses {} have been re-enabled because might help to reach pilot bus target",
+                        getZoneName(), reEnabledControllerBuses);
+            }
+            if (!blockedControllerBuses.isEmpty()) {
+                LOGGER.debug("Secondary voltage control of zone '{}': controller buses {} are kept at their reactive limit because they have already been re-enabled {} times",
+                        getZoneName(), blockedControllerBuses, maxReEnableCount);
+            }
         }
     }
 

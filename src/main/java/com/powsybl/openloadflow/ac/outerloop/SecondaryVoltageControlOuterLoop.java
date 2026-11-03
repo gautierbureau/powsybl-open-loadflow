@@ -44,6 +44,13 @@ public class SecondaryVoltageControlOuterLoop implements AcOuterLoop {
     public static final boolean STALL_DETECTION_DEFAULT_VALUE = true;
 
     /**
+     * Maximum number of times a controller bus switched to PQ by the reactive limits outer loop is re-enabled by the
+     * secondary voltage control (independent of the reactive limits PQ -> PV switch limit, so that the secondary voltage
+     * control can still re-enable units when that one is 0), to avoid an endless ping-pong between the two outer loops.
+     */
+    public static final int MAX_RE_ENABLE_COUNT_DEFAULT_VALUE = 3;
+
+    /**
      * A zone error (pilot point voltage difference and controller buses k difference) has to decrease by at least this
      * ratio from one adjustment to the next one to be considered as progressing.
      */
@@ -68,21 +75,29 @@ public class SecondaryVoltageControlOuterLoop implements AcOuterLoop {
      */
     private final boolean stallDetection;
 
+    /**
+     * Maximum number of times a controller bus switched to PQ by the reactive limits outer loop can be re-enabled by
+     * the secondary voltage control.
+     */
+    private final int maxReEnableCount;
+
     @Override
     public String getName() {
         return NAME;
     }
 
     public SecondaryVoltageControlOuterLoop(double minPlausibleTargetVoltage, double maxPlausibleTargetVoltage) {
-        this(minPlausibleTargetVoltage, maxPlausibleTargetVoltage, MAX_TARGET_VOLTAGE_STEP_KV_DEFAULT_VALUE, STALL_DETECTION_DEFAULT_VALUE);
+        this(minPlausibleTargetVoltage, maxPlausibleTargetVoltage, MAX_TARGET_VOLTAGE_STEP_KV_DEFAULT_VALUE, STALL_DETECTION_DEFAULT_VALUE,
+                MAX_RE_ENABLE_COUNT_DEFAULT_VALUE);
     }
 
     public SecondaryVoltageControlOuterLoop(double minPlausibleTargetVoltage, double maxPlausibleTargetVoltage,
-                                            double maxTargetVoltageStepKv, boolean stallDetection) {
+                                            double maxTargetVoltageStepKv, boolean stallDetection, int maxReEnableCount) {
         this.minPlausibleTargetVoltage = minPlausibleTargetVoltage;
         this.maxPlausibleTargetVoltage = maxPlausibleTargetVoltage;
         this.maxTargetVoltageStepKv = maxTargetVoltageStepKv;
         this.stallDetection = stallDetection;
+        this.maxReEnableCount = maxReEnableCount;
     }
 
     /**
@@ -110,6 +125,10 @@ public class SecondaryVoltageControlOuterLoop implements AcOuterLoop {
     @Override
     public void initialize(AcOuterLoopContext context) {
         context.setData(new ContextData());
+        for (LfSecondaryVoltageControl secondaryVoltageControl : context.getNetwork().getSecondaryVoltageControls()) {
+            secondaryVoltageControl.setMaxReEnableCount(maxReEnableCount);
+            secondaryVoltageControl.resetReEnableCount();
+        }
     }
 
     public static class SensitivityContext {
