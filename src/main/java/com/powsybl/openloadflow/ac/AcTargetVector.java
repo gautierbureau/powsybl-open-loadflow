@@ -68,6 +68,11 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
 
     public static void init(SingleEquation<AcVariableType, AcEquationType> equation, LfNetwork network, double[] targets) {
         init(equation.getType(), equation.getColumn(), equation.getElementNum(), network, targets);
+        if (equation.getType() == AcEquationType.BUS_TARGET_Q
+                && equation.getEquationSystem().getEquation(equation.getElementNum(), AcEquationType.BUS_Q_LIMIT_UP).isPresent()) {
+            // smoothed reactive limits: the bus reactive generation, fixed generators included, is an unknown
+            targets[equation.getColumn()] = -network.getBus(equation.getElementNum()).getLoadTargetQ();
+        }
         targets[equation.getColumn()] -= equation.rhs();
     }
 

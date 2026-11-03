@@ -21,7 +21,9 @@ import com.powsybl.loadflow.LoadFlow;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.math.matrix.SparseMatrixFactory;
+import com.powsybl.openloadflow.NetworkCache;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
+import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.equations.ReactiveLimitsSmoothing;
 import com.powsybl.openloadflow.graph.dtree.DTreeGraphConnectivityFactory;
 import com.powsybl.openloadflow.network.VoltageControlNetworkFactory;
@@ -1524,7 +1526,24 @@ class AcSensitivityAnalysisAdjointTest {
                                                                              ReactiveLimitsSmoothing smoothing,
                                                                              Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents,
                                                                              List<AcSensitivityAnalysis.AdjointVariable> variables) {
-        return newAnalysis(lfp).setAdjointReactiveLimitsSmoothing(smoothing)
+        return runAdjoint(network, lfp, smoothing, 0, cotangents, variables);
+    }
+
+    private static Map<AcSensitivityAnalysis.VariableRef, Double> runAdjoint(Network network, LoadFlowParameters lfp,
+                                                                             ReactiveLimitsSmoothing smoothing, int polishIterations,
+                                                                             Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents,
+                                                                             List<AcSensitivityAnalysis.AdjointVariable> variables) {
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        OpenSensitivityAnalysisParameters sensiExt = new OpenSensitivityAnalysisParameters();
+        if (smoothing != null) {
+            sensiExt.setAdjointReactiveLimitsSmoothing(true)
+                    .setAdjointReactiveLimitsSmoothingMu(smoothing.mu())
+                    .setAdjointReactiveLimitsSmoothingVoltageScale(smoothing.voltageScale())
+                    .setAdjointReactiveLimitsSmoothingPolishIterations(polishIterations);
+        }
+        sensiParams.addExtension(OpenSensitivityAnalysisParameters.class, sensiExt);
+        return new AcSensitivityAnalysis(new SparseMatrixFactory(), new DTreeGraphConnectivityFactory<>(), sensiParams)
                 .runAdjoint(network, network.getVariantManager().getWorkingVariantId(), List.of(), cotangents, variables);
     }
 
@@ -1610,5 +1629,41 @@ class AcSensitivityAnalysisAdjointTest {
                         g + ": smoothed " + smoothed.get(k) + " outside [" + lo + ", " + hi + "]");
             }
         }
+    }
+
+    /**
+     * The polish moves the state from the exact solution to the smoothed load flow's, quadratically: the
+     * complementarity rows start off by about mu^2 / headroom at a bus far from its limit.
+     */
+    @Test
+    void polishConvergesToTheSmoothedLoadFlowSolution() {
+        Network network = ieee14WithB2MaxQ(20);
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        AcLoadFlowContext cachedContext = NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow()
+                .getValues().get(0).getContext();
+        try (AcLoadFlowContext context = AcSensitivityAnalysis.createAdjointContext(cachedContext,
+                new ReactiveLimitsSmoothing(ReactiveLimitsSmoothing.DEFAULT_MU), 0)) {
+            double[] mismatches = AcSensitivityAnalysis.polish(context, 6);
+            assertTrue(mismatches[0] > 1e-4, "the exact solution is not the smoothed one, got " + mismatches[0]);
+            assertTrue(mismatches[6] < 1e-10, "the polish must converge, got " + Arrays.toString(mismatches));
+            for (int i = 1; i < mismatches.length; i++) {
+                assertTrue(mismatches[i] < mismatches[i - 1] || mismatches[i] < 1e-12, Arrays.toString(mismatches));
+            }
+        }
+    }
+
+    @Test
+    void polishedAdjointTendsToTheExactOneAsTheSmoothingVanishes() {
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        Network network = ieee14WithB2MaxQ(20);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        var exact = runAdjoint(network, lfp, null, ieee14Cotangents(), ieee14Levers());
+        var polished = runAdjoint(network, lfp, new ReactiveLimitsSmoothing(1e-6), 3, ieee14Cotangents(), ieee14Levers());
+        assertEquals(0, maxAbsDifference(exact, polished), 1e-5 * maxAbs(exact));
+        // with the default smoothing the polish changes the gradient, but not its scale
+        var linearized = runAdjoint(network, lfp, new ReactiveLimitsSmoothing(ReactiveLimitsSmoothing.DEFAULT_MU), 0, ieee14Cotangents(), ieee14Levers());
+        var polishedDefault = runAdjoint(network, lfp, new ReactiveLimitsSmoothing(ReactiveLimitsSmoothing.DEFAULT_MU), 5, ieee14Cotangents(), ieee14Levers());
+        assertTrue(maxAbsDifference(linearized, polishedDefault) < 0.1 * maxAbs(linearized));
     }
 }

@@ -31,6 +31,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationTerm;
 import com.powsybl.openloadflow.equations.StateVector;
 import com.powsybl.openloadflow.equations.Variable;
+import com.powsybl.openloadflow.equations.Vectors;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
 import com.powsybl.openloadflow.network.*;
@@ -68,8 +69,6 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
 
     private boolean adjointOnNetworkCopy = false;
 
-    private ReactiveLimitsSmoothing adjointReactiveLimitsSmoothing;
-
     public AcSensitivityAnalysis(MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory, SensitivityAnalysisParameters parameters) {
         super(matrixFactory, connectivityFactory, parameters);
     }
@@ -81,18 +80,6 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      */
     AcSensitivityAnalysis setAdjointOnNetworkCopy(boolean adjointOnNetworkCopy) {
         this.adjointOnNetworkCopy = adjointOnNetworkCopy;
-        return this;
-    }
-
-    /**
-     * Makes {@link #runAdjoint} differentiate a load flow whose reactive limits are smoothed (see
-     * {@link ReactiveLimitsSmoothing}), at the solution of the exact one: on its own system on a copy of the solved
-     * network, a bus controlling its own voltage counts for how far it is from its reactive limit, whether the load
-     * flow left it PV or switched it PQ. {@code null} (the default) keeps the exact equations. Package-private
-     * until it is a sensitivity parameter.
-     */
-    AcSensitivityAnalysis setAdjointReactiveLimitsSmoothing(ReactiveLimitsSmoothing adjointReactiveLimitsSmoothing) {
-        this.adjointReactiveLimitsSmoothing = adjointReactiveLimitsSmoothing;
         return this;
     }
 
@@ -572,8 +559,16 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         AcLoadFlowContext cachedContext = value.getContext();
         // on its own system, the adjoint works on a copy of the solved network: the cached one, which the next
         // load flow reuses, is never touched (null resource: nothing to close)
-        boolean ownSystem = adjointOnNetworkCopy || adjointReactiveLimitsSmoothing != null;
-        try (AcLoadFlowContext ownContext = ownSystem ? createAdjointContext(cachedContext, adjointReactiveLimitsSmoothing) : null) {
+        // smoothed reactive limits (adjointReactiveLimitsSmoothing): the copy gets the smoothed equations
+        OpenSensitivityAnalysisParameters sensiParametersExt = OpenSensitivityAnalysisParameters.getOrDefault(parameters);
+        ReactiveLimitsSmoothing smoothing = sensiParametersExt.isAdjointReactiveLimitsSmoothing()
+                ? new ReactiveLimitsSmoothing(sensiParametersExt.getAdjointReactiveLimitsSmoothingMu(),
+                                              sensiParametersExt.getAdjointReactiveLimitsSmoothingVoltageScale())
+                : null;
+        boolean ownSystem = adjointOnNetworkCopy || smoothing != null;
+        try (AcLoadFlowContext ownContext = ownSystem
+                ? createAdjointContext(cachedContext, smoothing, sensiParametersExt.getAdjointReactiveLimitsSmoothingPolishIterations())
+                : null) {
             return runAdjoint(network, variableSets, factors, cotangentsByFunction, variables,
                     ownContext != null ? ownContext : cachedContext, cachedContext);
         }
@@ -585,9 +580,11 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      * tap held at its position stays held), and the state vector at the solution. Its Jacobian is factorized again
      * on first use. The copy selects its slack and reference buses again, which must be the cached ones.
      * With {@code smoothing}, a bus controlling its own voltage gets smoothed reactive limits, their unknowns set
-     * from the solution.
+     * from the solution, and {@code polishIterations} Newton iterations move the state towards the smoothed load
+     * flow's solution. Package-private for tests.
      */
-    private static AcLoadFlowContext createAdjointContext(AcLoadFlowContext cachedContext, ReactiveLimitsSmoothing smoothing) {
+    static AcLoadFlowContext createAdjointContext(AcLoadFlowContext cachedContext, ReactiveLimitsSmoothing smoothing,
+                                                  int polishIterations) {
         LfNetwork lfNetwork = cachedContext.getNetwork();
         LfNetwork copy = LfNetworkCopier.copy(lfNetwork, LoadFlowModel.AC, ReportNode.NO_OP);
         for (LfSynchronousNetwork sc : lfNetwork.getSynchronousNetworks()) {
@@ -609,8 +606,32 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         AcSolverUtil.initStateVector(copy, context.getEquationSystem(), new PreviousValueVoltageInitializer());
         if (smoothing != null) {
             initSmoothedReactiveLimitsState(copy, context.getEquationSystem());
+            polish(context, polishIterations);
         }
         return context;
+    }
+
+    /**
+     * Newton iterations on the system of {@code context} from its current state, without outer loops nor state
+     * scaling. Package-private for tests.
+     *
+     * @return the largest mismatch before each iteration and after the last one
+     */
+    static double[] polish(AcLoadFlowContext context, int iterations) {
+        double[] largestMismatches = new double[iterations + 1];
+        for (int i = 0; i <= iterations; i++) {
+            double[] mismatch = context.getEquationVector().getArray().clone();
+            Vectors.minus(mismatch, context.getTargetVector().getArray());
+            largestMismatches[i] = Arrays.stream(mismatch).map(Math::abs).max().orElse(0);
+            if (!Double.isFinite(largestMismatches[i])) {
+                throw new PowsyblException("Adjoint smoothed reactive limits: the polish diverged at iteration " + i);
+            }
+            if (i < iterations) {
+                context.getJacobianMatrix().solveTransposed(mismatch);
+                context.getEquationSystem().getStateVector().minus(mismatch);
+            }
+        }
+        return largestMismatches;
     }
 
     /**
