@@ -582,6 +582,39 @@ class AcSensitivityAnalysisAdjointTest {
         }
     }
 
+    /**
+     * A lever outside the component, anchored on a function outside it too, reads 0 when another monitored
+     * function resolves: only the first lever is paired with every function, so the second one's factors are
+     * all SKIP, and it used to throw although the request has a function to differentiate.
+     */
+    @Test
+    void runAdjointAnswersZeroForALeverOutsideTheComponentAnchoredOnAnUnresolvableFunction() {
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getLine("L1-5-1").getTerminal1().disconnect();
+        network.getLine("L1-5-1").getTerminal2().disconnect();
+        network.getGenerator("B6-G").getTerminal().disconnect();
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        AcSensitivityAnalysis analysis = newAnalysis(lfp);
+        String variantId = network.getVariantManager().getWorkingVariantId();
+        Map<AcSensitivityAnalysis.FunctionRef, Double> liveOnly = Map.of(powerKey("L2-3-1"), 0.75);
+        Map<AcSensitivityAnalysis.FunctionRef, Double> withDeadAnchor = new LinkedHashMap<>(liveOnly);
+        withDeadAnchor.put(powerKey("L1-5-1"), 0.0); // sorts first, so it anchors the second lever
+        List<AcSensitivityAnalysis.AdjointVariable> vars =
+                levers(SensitivityVariableType.INJECTION_ACTIVE_POWER, List.of("B3-G", "B6-G"));
+
+        Map<AcSensitivityAnalysis.VariableRef, Double> expected =
+                analysis.runAdjoint(network, variantId, List.of(), liveOnly, vars);
+        Map<AcSensitivityAnalysis.VariableRef, Double> actual =
+                analysis.runAdjoint(network, variantId, List.of(), withDeadAnchor, vars);
+
+        assertEquals(0.0, actual.get(varKey(SensitivityVariableType.INJECTION_ACTIVE_POWER, "B6-G")), 0);
+        var live = varKey(SensitivityVariableType.INJECTION_ACTIVE_POWER, "B3-G");
+        assertTrue(Math.abs(expected.get(live)) > 0.1, "the live lever is trivially zero: " + expected.get(live));
+        assertEquals(expected.get(live), actual.get(live), 1e-12 * Math.abs(expected.get(live)));
+    }
+
     /** The emitted factors as a comparable set, since SensitivityFactor has no value equality. */
     private static Set<String> factorKeys(List<SensitivityFactor> factors) {
         return factors.stream()

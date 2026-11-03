@@ -784,42 +784,29 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             gradientByGroup.put(new VariableRef(declared.getVariableType(), declared.getVariableId()),
                     thetaBar[group.getIndex()]);
         }
-        return assembleGradients(variables, gradientByGroup, statusesByLever(factors, allLfFactors));
+        boolean anyFunctionResolves = allLfFactors.stream().anyMatch(f -> f.getStatus() == LfSensitivityFactor.Status.VALID
+                || f.getStatus() == LfSensitivityFactor.Status.VALID_ONLY_FOR_FUNCTION);
+        return assembleGradients(variables, gradientByGroup, anyFunctionResolves);
     }
 
     /**
-     * Factor statuses per declared lever: VALID_ONLY_FOR_FUNCTION or SKIP when the variable element did not
-     * resolve, VALID or ZERO when it did.
-     */
-    private static Map<VariableRef, Set<LfSensitivityFactor.Status>> statusesByLever(
-            List<SensitivityFactor> factors, List<LfSensitivityFactor<AcVariableType, AcEquationType>> allLfFactors) {
-        Map<VariableRef, Set<LfSensitivityFactor.Status>> statuses = new HashMap<>();
-        for (var lfFactor : allLfFactors) {
-            SensitivityFactor declared = factors.get(lfFactor.getIndex());
-            statuses.computeIfAbsent(new VariableRef(declared.getVariableType(), declared.getVariableId()),
-                    k -> EnumSet.noneOf(LfSensitivityFactor.Status.class)).add(lfFactor.getStatus());
-        }
-        return statuses;
-    }
-
-    /**
-     * One entry per declared lever, in declaration order. A lever without a group but with a
-     * VALID_ONLY_FOR_FUNCTION factor is outside the main component and reads 0, as the forward path writes.
-     * A SKIP lever (neither it nor any monitored function resolved) throws: the forward path writes NaN and
-     * reports the id separately, but a NaN in a gradient cannot be traced back by an optimiser.
+     * One entry per declared lever, in declaration order. A lever without a group is outside the main component
+     * and reads 0, as the forward path writes, when any monitored function of the request resolves, whatever the
+     * status of its own factors: only the first lever is paired with every function, the others with the anchor
+     * alone, which can be outside the component too. When no monitored function resolves, the
+     * request throws: the forward path writes NaN and reports the id separately, but a NaN in a gradient cannot
+     * be traced back by an optimiser.
      */
     private static Map<VariableRef, Double> assembleGradients(List<AdjointVariable> variables,
                                                               Map<VariableRef, Double> gradientByGroup,
-                                                              Map<VariableRef, Set<LfSensitivityFactor.Status>> statusesByLever) {
+                                                              boolean anyFunctionResolves) {
         List<VariableRef> unresolved = new ArrayList<>();
         Map<VariableRef, Double> gradientByVariable = new LinkedHashMap<>();
         for (AdjointVariable v : variables) {
             Double gradient = gradientByGroup.get(v.ref());
-            Set<LfSensitivityFactor.Status> statuses =
-                    statusesByLever.getOrDefault(v.ref(), EnumSet.noneOf(LfSensitivityFactor.Status.class));
             if (gradient != null) {
                 gradientByVariable.put(v.ref(), gradient);
-            } else if (statuses.contains(LfSensitivityFactor.Status.VALID_ONLY_FOR_FUNCTION)) {
+            } else if (anyFunctionResolves) {
                 gradientByVariable.put(v.ref(), 0.0);
             } else {
                 unresolved.add(v.ref());
