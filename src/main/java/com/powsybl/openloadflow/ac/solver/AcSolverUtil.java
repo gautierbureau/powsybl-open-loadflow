@@ -64,7 +64,10 @@ public final class AcSolverUtil {
                     break;
 
                 case DUMMY_P,
-                     DUMMY_Q:
+                     DUMMY_Q,
+                     GENERATOR_Q,
+                     GENERATOR_V_PLUS,
+                     GENERATOR_V_MINUS:
                     // nothing to do
                     break;
 

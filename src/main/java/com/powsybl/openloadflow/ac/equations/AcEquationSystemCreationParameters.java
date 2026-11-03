@@ -14,22 +14,38 @@ public class AcEquationSystemCreationParameters {
 
     private final boolean forceA1Var;
 
+    private final ReactiveLimitsSmoothing reactiveLimitsSmoothing;
+
     public AcEquationSystemCreationParameters() {
         this(false);
     }
 
     public AcEquationSystemCreationParameters(boolean forceA1Var) {
+        this(forceA1Var, null);
+    }
+
+    /**
+     * @param reactiveLimitsSmoothing when not null, a bus controlling its own voltage gets smoothed reactive limits
+     *                                (see {@link GeneratorReactiveSplitFbEquationTerm}) instead of the PV/PQ switch
+     */
+    public AcEquationSystemCreationParameters(boolean forceA1Var, ReactiveLimitsSmoothing reactiveLimitsSmoothing) {
         this.forceA1Var = forceA1Var;
+        this.reactiveLimitsSmoothing = reactiveLimitsSmoothing;
     }
 
     public boolean isForceA1Var() {
         return forceA1Var;
     }
 
+    public ReactiveLimitsSmoothing getReactiveLimitsSmoothing() {
+        return reactiveLimitsSmoothing;
+    }
+
     @Override
     public String toString() {
         return "AcEquationSystemCreationParameters(" +
                 "forceA1Var=" + forceA1Var +
+                (reactiveLimitsSmoothing != null ? ", reactiveLimitsSmoothing=" + reactiveLimitsSmoothing : "") +
                 ')';
     }
 }
