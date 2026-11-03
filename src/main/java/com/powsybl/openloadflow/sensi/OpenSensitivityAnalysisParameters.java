@@ -9,7 +9,7 @@ package com.powsybl.openloadflow.sensi;
 
 import com.powsybl.commons.config.PlatformConfig;
 import com.powsybl.commons.extensions.AbstractExtension;
-import com.powsybl.openloadflow.ac.equations.ReactiveLimitsSmoothing;
+import com.powsybl.openloadflow.ac.equations.LimitsSmoothing;
 import com.powsybl.sensitivity.SensitivityAnalysisParameters;
 
 import java.util.List;
@@ -28,8 +28,11 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
     private boolean adjointReactiveLimitsSmoothing = ADJOINT_REACTIVE_LIMITS_SMOOTHING_DEFAULT_VALUE;
     private double adjointReactiveLimitsSmoothingMu = ADJOINT_REACTIVE_LIMITS_SMOOTHING_MU_DEFAULT_VALUE;
     private double adjointReactiveLimitsSmoothingVoltageScale = ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_DEFAULT_VALUE;
-    private int adjointReactiveLimitsSmoothingPolishIterations = ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_DEFAULT_VALUE;
+    private int adjointSmoothingPolishIterations = ADJOINT_SMOOTHING_POLISH_ITERATIONS_DEFAULT_VALUE;
     private boolean adjointTransformerVoltageControl = ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_DEFAULT_VALUE;
+    private boolean adjointTransformerVoltageControlSmoothing = ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_DEFAULT_VALUE;
+    private double adjointTransformerVoltageControlSmoothingMu = ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_MU_DEFAULT_VALUE;
+    private double adjointTransformerVoltageControlSmoothingVoltageScale = ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_DEFAULT_VALUE;
 
     public static final String DEBUG_DIR_PARAM_NAME = "debugDir";
     public static final String DEBUG_DIR_DEFAULT_VALUE = "";
@@ -42,18 +45,25 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
     public static final String ADJOINT_REACTIVE_LIMITS_SMOOTHING_PARAM_NAME = "adjointReactiveLimitsSmoothing";
     public static final boolean ADJOINT_REACTIVE_LIMITS_SMOOTHING_DEFAULT_VALUE = false;
     public static final String ADJOINT_REACTIVE_LIMITS_SMOOTHING_MU_PARAM_NAME = "adjointReactiveLimitsSmoothingMu";
-    public static final double ADJOINT_REACTIVE_LIMITS_SMOOTHING_MU_DEFAULT_VALUE = ReactiveLimitsSmoothing.DEFAULT_MU;
+    public static final double ADJOINT_REACTIVE_LIMITS_SMOOTHING_MU_DEFAULT_VALUE = LimitsSmoothing.REACTIVE_DEFAULT_MU;
     public static final String ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME = "adjointReactiveLimitsSmoothingVoltageScale";
-    public static final double ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_DEFAULT_VALUE = ReactiveLimitsSmoothing.DEFAULT_VOLTAGE_SCALE;
-    public static final String ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME = "adjointReactiveLimitsSmoothingPolishIterations";
-    public static final int ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_DEFAULT_VALUE = 0;
+    public static final double ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_DEFAULT_VALUE = LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE;
+    public static final String ADJOINT_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME = "adjointSmoothingPolishIterations";
+    public static final int ADJOINT_SMOOTHING_POLISH_ITERATIONS_DEFAULT_VALUE = 0;
     public static final String ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_PARAM_NAME = "adjointTransformerVoltageControl";
     public static final boolean ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_DEFAULT_VALUE = false;
+    public static final String ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_PARAM_NAME = "adjointTransformerVoltageControlSmoothing";
+    public static final boolean ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_DEFAULT_VALUE = false;
+    public static final String ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_MU_PARAM_NAME = "adjointTransformerVoltageControlSmoothingMu";
+    public static final double ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_MU_DEFAULT_VALUE = LimitsSmoothing.RATIO_DEFAULT_MU;
+    public static final String ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME = "adjointTransformerVoltageControlSmoothingVoltageScale";
+    public static final double ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_DEFAULT_VALUE = LimitsSmoothing.RATIO_DEFAULT_VOLTAGE_SCALE;
 
     public static final List<String> SPECIFIC_PARAMETERS_NAMES = List.of(DEBUG_DIR_PARAM_NAME, START_WITH_FROZEN_AC_EMULATION_PARAM_NAME, THREAD_COUNT_PARAM_NAME,
             ADJOINT_SLACK_DISTRIBUTION_PARAM_NAME, ADJOINT_REACTIVE_LIMITS_SMOOTHING_PARAM_NAME, ADJOINT_REACTIVE_LIMITS_SMOOTHING_MU_PARAM_NAME,
-            ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME, ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME,
-            ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_PARAM_NAME);
+            ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME, ADJOINT_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME,
+            ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_PARAM_NAME, ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_PARAM_NAME,
+            ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_MU_PARAM_NAME, ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME);
 
     @Override
     public String getName() {
@@ -140,19 +150,19 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
         return this;
     }
 
-    public int getAdjointReactiveLimitsSmoothingPolishIterations() {
-        return adjointReactiveLimitsSmoothingPolishIterations;
+    public int getAdjointSmoothingPolishIterations() {
+        return adjointSmoothingPolishIterations;
     }
 
     /**
      * Newton iterations on the smoothed load flow, from the exact solution, before the adjoint: 0 (the default)
      * linearizes the smoothed equations at the exact solution, more moves to the smoothed load flow's solution.
      */
-    public OpenSensitivityAnalysisParameters setAdjointReactiveLimitsSmoothingPolishIterations(int adjointReactiveLimitsSmoothingPolishIterations) {
-        if (adjointReactiveLimitsSmoothingPolishIterations < 0) {
-            throw new IllegalArgumentException("Polish iterations must be >= 0: " + adjointReactiveLimitsSmoothingPolishIterations);
+    public OpenSensitivityAnalysisParameters setAdjointSmoothingPolishIterations(int adjointSmoothingPolishIterations) {
+        if (adjointSmoothingPolishIterations < 0) {
+            throw new IllegalArgumentException("Polish iterations must be >= 0: " + adjointSmoothingPolishIterations);
         }
-        this.adjointReactiveLimitsSmoothingPolishIterations = adjointReactiveLimitsSmoothingPolishIterations;
+        this.adjointSmoothingPolishIterations = adjointSmoothingPolishIterations;
         return this;
     }
 
@@ -168,6 +178,41 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
      */
     public OpenSensitivityAnalysisParameters setAdjointTransformerVoltageControl(boolean adjointTransformerVoltageControl) {
         this.adjointTransformerVoltageControl = adjointTransformerVoltageControl;
+        return this;
+    }
+
+    public boolean isAdjointTransformerVoltageControlSmoothing() {
+        return adjointTransformerVoltageControlSmoothing;
+    }
+
+    /**
+     * With {@link #setAdjointTransformerVoltageControl adjointTransformerVoltageControl}, smooths the ratio limits of
+     * the tap changers: a tap near or at the end of its range counts for how far it is from it, instead of regulating
+     * fully up to the last step and not at all at the end. Applies to a single transformer controlling the voltage of
+     * one of its ends; the others keep the exact rows. Off by default.
+     */
+    public OpenSensitivityAnalysisParameters setAdjointTransformerVoltageControlSmoothing(boolean adjointTransformerVoltageControlSmoothing) {
+        this.adjointTransformerVoltageControlSmoothing = adjointTransformerVoltageControlSmoothing;
+        return this;
+    }
+
+    public double getAdjointTransformerVoltageControlSmoothingMu() {
+        return adjointTransformerVoltageControlSmoothingMu;
+    }
+
+    /** The smoothing of the ratio limits, in ratio units: about one tap step. */
+    public OpenSensitivityAnalysisParameters setAdjointTransformerVoltageControlSmoothingMu(double adjointTransformerVoltageControlSmoothingMu) {
+        this.adjointTransformerVoltageControlSmoothingMu = adjointTransformerVoltageControlSmoothingMu;
+        return this;
+    }
+
+    public double getAdjointTransformerVoltageControlSmoothingVoltageScale() {
+        return adjointTransformerVoltageControlSmoothingVoltageScale;
+    }
+
+    /** The weight of a per unit voltage deviation against a ratio headroom: about 1, a ratio change moving the voltage as much. */
+    public OpenSensitivityAnalysisParameters setAdjointTransformerVoltageControlSmoothingVoltageScale(double adjointTransformerVoltageControlSmoothingVoltageScale) {
+        this.adjointTransformerVoltageControlSmoothingVoltageScale = adjointTransformerVoltageControlSmoothingVoltageScale;
         return this;
     }
 
@@ -195,10 +240,16 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
                         .setAdjointReactiveLimitsSmoothingMu(config.getDoubleProperty(ADJOINT_REACTIVE_LIMITS_SMOOTHING_MU_PARAM_NAME, ADJOINT_REACTIVE_LIMITS_SMOOTHING_MU_DEFAULT_VALUE))
                         .setAdjointReactiveLimitsSmoothingVoltageScale(config.getDoubleProperty(ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME,
                                 ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_DEFAULT_VALUE))
-                        .setAdjointReactiveLimitsSmoothingPolishIterations(config.getIntProperty(ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME,
-                                ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_DEFAULT_VALUE))
+                        .setAdjointSmoothingPolishIterations(config.getIntProperty(ADJOINT_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME,
+                                ADJOINT_SMOOTHING_POLISH_ITERATIONS_DEFAULT_VALUE))
                         .setAdjointTransformerVoltageControl(config.getBooleanProperty(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_PARAM_NAME,
-                                ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_DEFAULT_VALUE)));
+                                ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_DEFAULT_VALUE))
+                        .setAdjointTransformerVoltageControlSmoothing(config.getBooleanProperty(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_PARAM_NAME,
+                                ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_DEFAULT_VALUE))
+                        .setAdjointTransformerVoltageControlSmoothingMu(config.getDoubleProperty(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_MU_PARAM_NAME,
+                                ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_MU_DEFAULT_VALUE))
+                        .setAdjointTransformerVoltageControlSmoothingVoltageScale(config.getDoubleProperty(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME,
+                                ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_DEFAULT_VALUE)));
         return parameters;
     }
 
@@ -217,10 +268,16 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
                 .ifPresent(value -> parameters.setAdjointReactiveLimitsSmoothingMu(Double.parseDouble(value)));
         Optional.ofNullable(properties.get(ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME))
                 .ifPresent(value -> parameters.setAdjointReactiveLimitsSmoothingVoltageScale(Double.parseDouble(value)));
-        Optional.ofNullable(properties.get(ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME))
-                .ifPresent(value -> parameters.setAdjointReactiveLimitsSmoothingPolishIterations(Integer.parseInt(value)));
+        Optional.ofNullable(properties.get(ADJOINT_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME))
+                .ifPresent(value -> parameters.setAdjointSmoothingPolishIterations(Integer.parseInt(value)));
         Optional.ofNullable(properties.get(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_PARAM_NAME))
                 .ifPresent(value -> parameters.setAdjointTransformerVoltageControl(Boolean.parseBoolean(value)));
+        Optional.ofNullable(properties.get(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_PARAM_NAME))
+                .ifPresent(value -> parameters.setAdjointTransformerVoltageControlSmoothing(Boolean.parseBoolean(value)));
+        Optional.ofNullable(properties.get(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_MU_PARAM_NAME))
+                .ifPresent(value -> parameters.setAdjointTransformerVoltageControlSmoothingMu(Double.parseDouble(value)));
+        Optional.ofNullable(properties.get(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME))
+                .ifPresent(value -> parameters.setAdjointTransformerVoltageControlSmoothingVoltageScale(Double.parseDouble(value)));
         return parameters;
     }
 }

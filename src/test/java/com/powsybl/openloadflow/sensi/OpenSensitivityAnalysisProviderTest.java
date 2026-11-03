@@ -45,7 +45,7 @@ class OpenSensitivityAnalysisProviderTest extends AbstractSensitivityAnalysisTes
     void specificParametersTest() {
         var provider = new OpenSensitivityAnalysisProvider();
 
-        assertEquals(9, provider.getSpecificParametersNames().size());
+        assertEquals(12, provider.getSpecificParametersNames().size());
 
         SensitivityAnalysisParameters parameters = new SensitivityAnalysisParameters();
 
@@ -74,17 +74,17 @@ class OpenSensitivityAnalysisProviderTest extends AbstractSensitivityAnalysisTes
         assertFalse(defaults.isAdjointReactiveLimitsSmoothing());
         assertEquals(0.05, defaults.getAdjointReactiveLimitsSmoothingMu());
         assertEquals(50.0, defaults.getAdjointReactiveLimitsSmoothingVoltageScale());
-        assertEquals(0, defaults.getAdjointReactiveLimitsSmoothingPolishIterations());
+        assertEquals(0, defaults.getAdjointSmoothingPolishIterations());
         OpenSensitivityAnalysisParameters smoothing = (OpenSensitivityAnalysisParameters) provider.loadSpecificParameters(Map.of(
                 OpenSensitivityAnalysisParameters.ADJOINT_REACTIVE_LIMITS_SMOOTHING_PARAM_NAME, "true",
                 OpenSensitivityAnalysisParameters.ADJOINT_REACTIVE_LIMITS_SMOOTHING_MU_PARAM_NAME, "0.01",
                 OpenSensitivityAnalysisParameters.ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME, "30",
-                OpenSensitivityAnalysisParameters.ADJOINT_REACTIVE_LIMITS_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME, "3")).orElseThrow();
+                OpenSensitivityAnalysisParameters.ADJOINT_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME, "3")).orElseThrow();
         assertTrue(smoothing.isAdjointReactiveLimitsSmoothing());
         assertEquals(0.01, smoothing.getAdjointReactiveLimitsSmoothingMu());
         assertEquals(30.0, smoothing.getAdjointReactiveLimitsSmoothingVoltageScale());
-        assertEquals(3, smoothing.getAdjointReactiveLimitsSmoothingPolishIterations());
-        assertThrows(IllegalArgumentException.class, () -> smoothing.setAdjointReactiveLimitsSmoothingPolishIterations(-1));
+        assertEquals(3, smoothing.getAdjointSmoothingPolishIterations());
+        assertThrows(IllegalArgumentException.class, () -> smoothing.setAdjointSmoothingPolishIterations(-1));
 
         assertFalse(defaults.isAdjointTransformerVoltageControl());
         assertTrue(((OpenSensitivityAnalysisParameters) provider.loadSpecificParameters(Map.of(
