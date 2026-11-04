@@ -25,6 +25,7 @@ import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.OpenLoadFlowProvider;
 import com.powsybl.openloadflow.ServiceParameterResolver;
+import com.powsybl.openloadflow.ac.outerloop.SecondaryVoltageControlOuterLoop;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkParameters;
@@ -52,6 +53,8 @@ import static org.junit.jupiter.api.Assertions.*;
 class SecondaryVoltageControlTest {
 
     private static final double TARGET_V_SATURATION = 14.5;
+    private static final String COMPONENT_VS_SCALING_ITERATION_COUNT = "29/15";
+    private static final String STALL_VS_BLOCKED_ITERATION_COUNT = "8/6";
 
     private final CommonTestConfig commonTestConfig;
 
@@ -1029,5 +1032,67 @@ class SecondaryVoltageControlTest {
         assertReactivePowerEquals(-161.669, g8.getTerminal());
         assertEquals(0.628, qToK(g6), DELTA_POWER);
         assertEquals(0.628, qToK(g8), DELTA_POWER);
+    }
+
+    private void createSaturationZone() {
+        network.newExtension(SecondaryVoltageControlAdder.class)
+                .newControlZone()
+                .withName("z1")
+                .newPilotPoint().withTargetV(TARGET_V_SATURATION).withBusbarSectionsOrBusesIds(List.of("B10")).add()
+                .newControlUnit().withId("B6-G").add()
+                .newControlUnit().withId("B8-G").add()
+                .add()
+                .add();
+    }
+
+    @Test
+    void testZoneScalingStepClipping() {
+        // with a small maximum step the component clipping and the zone scaling follow different paths to the same target
+        createSaturationZone();
+        parametersExt.setSecondaryVoltageControl(true)
+                .setMaxOuterLoopIterations(60)
+                .setSecondaryVoltageControlMaxTargetVoltageStep(1);
+
+        LoadFlowResult result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        int componentIterationCount = result.getComponentResults().get(0).getIterationCount();
+        assertVoltageEquals(14.5, b10);
+        assertEquals(0.628, qToK(g6), DELTA_POWER);
+        assertEquals(0.628, qToK(g8), DELTA_POWER);
+
+        parametersExt.setSecondaryVoltageControlStepClippingMode(SecondaryVoltageControlOuterLoop.StepClippingMode.ZONE_SCALING);
+        result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        assertEquals(COMPONENT_VS_SCALING_ITERATION_COUNT, componentIterationCount + "/" + result.getComponentResults().get(0).getIterationCount());
+        assertVoltageEquals(14.5, b10);
+        assertEquals(0.628, qToK(g6), DELTA_POWER);
+        assertEquals(0.628, qToK(g8), DELTA_POWER);
+    }
+
+    @Test
+    void testBlockedZoneDetectionAndReArm() {
+        // with a tight plausible range the controlled bus target voltages reach the bound before the pilot point target:
+        // the zone is given up by the stall detection by default, and as soon as the bound is reached with the blocked
+        // zone detection; re-arming does not trigger because nothing else moves the pilot point
+        createSaturationZone();
+        parametersExt.setSecondaryVoltageControl(true)
+                .setMaxPlausibleTargetVoltage(1.05);
+
+        LoadFlowResult result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        int stallIterationCount = result.getComponentResults().get(0).getIterationCount();
+        double stallB10V = b10.getV();
+        assertTrue(stallB10V < TARGET_V_SATURATION - 0.1);
+        assertVoltageEquals(1.05 * b6.getVoltageLevel().getNominalV(), b6);
+        assertVoltageEquals(1.05 * b8.getVoltageLevel().getNominalV(), b8);
+
+        parametersExt.setSecondaryVoltageControlBlockedZoneDetection(true)
+                .setSecondaryVoltageControlStallReArm(true);
+        result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        assertEquals(STALL_VS_BLOCKED_ITERATION_COUNT, stallIterationCount + "/" + result.getComponentResults().get(0).getIterationCount());
+        assertVoltageEquals(stallB10V, b10);
+        assertVoltageEquals(1.05 * b6.getVoltageLevel().getNominalV(), b6);
+        assertVoltageEquals(1.05 * b8.getVoltageLevel().getNominalV(), b8);
     }
 }

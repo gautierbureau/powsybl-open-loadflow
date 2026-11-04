@@ -861,6 +861,48 @@ voltage target is reached. Available values are:
 
 The default value is `K`.
 
+(param-lf-secondary-voltage-control-max-target-voltage-step)=
+#### secondaryVoltageControlMaxTargetVoltageStep
+Maximum change of a controlled bus target voltage per secondary voltage control adjustment, in kV. A value lower than or
+equal to `0` disables the clipping.
+
+The default value is `2`.
+
+(param-lf-secondary-voltage-control-step-clipping-mode)=
+#### secondaryVoltageControlStepClippingMode
+How the target voltage changes computed by the secondary voltage control coordination system are limited to
+`secondaryVoltageControlMaxTargetVoltageStep`. Available values are:
+- `COMPONENT`: each controlled bus target voltage change is clipped independently, so the direction of the step is not kept.
+- `ZONE_SCALING`: the whole step of a zone is scaled so that its largest controlled bus target voltage change is the
+  maximum step, so the direction computed by the coordination system is kept (experimental).
+
+The default value is `COMPONENT`.
+
+(param-lf-secondary-voltage-control-stall-detection)=
+#### secondaryVoltageControlStallDetection
+When `true`, a secondary voltage control zone whose pilot point voltage error and reactive power alignment stop improving
+over two consecutive adjustments is given up: it is not adjusted anymore during the load flow. This avoids repeating an
+ineffective adjustment (for instance when the controlled bus target voltages are at the plausible voltage range bound)
+until the maximum number of outer loop iterations is reached. When `false`, zones are adjusted as long as their pilot
+point target is not reached.
+
+The default value is `true`.
+
+(param-lf-secondary-voltage-control-stall-re-arm)=
+#### secondaryVoltageControlStallReArm
+When `true`, a zone given up by the stall detection is adjusted again if its pilot point voltage error later grows above
+the error it had when it stalled, which happens when other zones or reactive limit changes move its pilot point. A zone
+is re-armed at most twice per load flow (experimental).
+
+The default value is `false`.
+
+(param-lf-secondary-voltage-control-blocked-zone-detection)=
+#### secondaryVoltageControlBlockedZoneDetection
+When `true`, a zone is given up as soon as none of its controlled bus target voltages can move anymore because they are
+all at the plausible voltage range bound, without waiting for the stall detection (experimental).
+
+The default value is `false`.
+
 (param-lf-voltage-target-priorities)=
 #### voltageTargetPriorities
 When multiple equipment regulate the same bus with different voltage targets,
