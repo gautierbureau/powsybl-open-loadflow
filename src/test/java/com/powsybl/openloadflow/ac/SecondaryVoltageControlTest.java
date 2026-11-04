@@ -55,6 +55,8 @@ class SecondaryVoltageControlTest {
     private static final double TARGET_V_SATURATION = 14.5;
     private static final String COMPONENT_VS_SCALING_ITERATION_COUNT = "29/15";
     private static final String STALL_VS_BLOCKED_ITERATION_COUNT = "8/6";
+    private static final double PINNED_TEST_BOUND = 1.06;
+    private static final String PINNED_TEST_EXPECTED = "5/12451/12720/21200 4/12452/12720/21200";
 
     private final CommonTestConfig commonTestConfig;
 
@@ -1094,5 +1096,25 @@ class SecondaryVoltageControlTest {
         assertVoltageEquals(stallB10V, b10);
         assertVoltageEquals(1.05 * b6.getVoltageLevel().getNominalV(), b6);
         assertVoltageEquals(1.05 * b8.getVoltageLevel().getNominalV(), b8);
+    }
+
+    @Test
+    void testExcludePinnedUnits() {
+        // with a tight plausible bound both controlled buses end at the bound: the units are pinned and left out of the
+        // coordination as soon as they reach it, so the zone stops in fewer iterations with the same solution
+        createSaturationZone();
+        parametersExt.setSecondaryVoltageControl(true)
+                .setMaxPlausibleTargetVoltage(PINNED_TEST_BOUND);
+
+        LoadFlowResult result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        String defaultState = result.getComponentResults().get(0).getIterationCount() + "/" + Math.round(b10.getV() * 1000) + "/" + Math.round(b6.getV() * 1000) + "/" + Math.round(b8.getV() * 1000);
+
+        parametersExt.setSecondaryVoltageControlExcludePinnedUnits(true);
+        result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        String pinnedState = result.getComponentResults().get(0).getIterationCount() + "/" + Math.round(b10.getV() * 1000) + "/" + Math.round(b6.getV() * 1000) + "/" + Math.round(b8.getV() * 1000);
+        assertEquals(PINNED_TEST_EXPECTED, defaultState + " " + pinnedState);
+        assertVoltageEquals(PINNED_TEST_BOUND * b8.getVoltageLevel().getNominalV(), b8); // pinned at the bound
     }
 }

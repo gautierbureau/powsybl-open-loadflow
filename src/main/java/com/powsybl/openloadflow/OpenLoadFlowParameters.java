@@ -245,6 +245,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
 
     public static final String SECONDARY_VOLTAGE_CONTROL_BLOCKED_ZONE_DETECTION_PARAM_NAME = "secondaryVoltageControlBlockedZoneDetection";
 
+    public static final String SECONDARY_VOLTAGE_CONTROL_EXCLUDE_PINNED_UNITS_PARAM_NAME = "secondaryVoltageControlExcludePinnedUnits";
+
     public static final String REACTIVE_LIMITS_MAX_SWITCH_PQ_PV_PARAM_NAME = "reactiveLimitsMaxPqPvSwitch";
 
     public static final String PHASE_SHIFTER_CONTROL_MODE_PARAM_NAME = "phaseShifterControlMode";
@@ -519,6 +521,9 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
         new Parameter(SECONDARY_VOLTAGE_CONTROL_BLOCKED_ZONE_DETECTION_PARAM_NAME, ParameterType.BOOLEAN,
             "Secondary voltage control zones given up as soon as all their controlled bus target voltages are at the plausible range bound",
             SecondaryVoltageControlOuterLoop.BLOCKED_ZONE_DETECTION_DEFAULT_VALUE, ParameterScope.FUNCTIONAL, VOLTAGE_CONTROLS_CATEGORY_KEY),
+        new Parameter(SECONDARY_VOLTAGE_CONTROL_EXCLUDE_PINNED_UNITS_PARAM_NAME, ParameterType.BOOLEAN,
+            "Secondary voltage control units pinned at the plausible range bound left out of the coordination",
+            SecondaryVoltageControlOuterLoop.EXCLUDE_PINNED_UNITS_DEFAULT_VALUE, ParameterScope.FUNCTIONAL, VOLTAGE_CONTROLS_CATEGORY_KEY),
         new Parameter(REACTIVE_LIMITS_MAX_SWITCH_PQ_PV_PARAM_NAME, ParameterType.INTEGER,
             "Reactive limits maximum Pq Pv switch",
             ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE, ParameterScope.FUNCTIONAL, GENERATOR_VOLTAGE_CONTROL_CATEGORY_KEY),
@@ -812,6 +817,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
     private boolean secondaryVoltageControlStallReArm = SecondaryVoltageControlOuterLoop.STALL_RE_ARM_DEFAULT_VALUE;
 
     private boolean secondaryVoltageControlBlockedZoneDetection = SecondaryVoltageControlOuterLoop.BLOCKED_ZONE_DETECTION_DEFAULT_VALUE;
+
+    private boolean secondaryVoltageControlExcludePinnedUnits = SecondaryVoltageControlOuterLoop.EXCLUDE_PINNED_UNITS_DEFAULT_VALUE;
 
     private int reactiveLimitsMaxPqPvSwitch = ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE;
 
@@ -1353,6 +1360,15 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
 
     public OpenLoadFlowParameters setSecondaryVoltageControlBlockedZoneDetection(boolean secondaryVoltageControlBlockedZoneDetection) {
         this.secondaryVoltageControlBlockedZoneDetection = secondaryVoltageControlBlockedZoneDetection;
+        return this;
+    }
+
+    public boolean isSecondaryVoltageControlExcludePinnedUnits() {
+        return secondaryVoltageControlExcludePinnedUnits;
+    }
+
+    public OpenLoadFlowParameters setSecondaryVoltageControlExcludePinnedUnits(boolean secondaryVoltageControlExcludePinnedUnits) {
+        this.secondaryVoltageControlExcludePinnedUnits = secondaryVoltageControlExcludePinnedUnits;
         return this;
     }
 
@@ -1900,6 +1916,7 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 .ifPresent(this::setSecondaryVoltageControlStepClippingMode);
         config.getOptionalBooleanProperty(SECONDARY_VOLTAGE_CONTROL_STALL_RE_ARM_PARAM_NAME).ifPresent(this::setSecondaryVoltageControlStallReArm);
         config.getOptionalBooleanProperty(SECONDARY_VOLTAGE_CONTROL_BLOCKED_ZONE_DETECTION_PARAM_NAME).ifPresent(this::setSecondaryVoltageControlBlockedZoneDetection);
+        config.getOptionalBooleanProperty(SECONDARY_VOLTAGE_CONTROL_EXCLUDE_PINNED_UNITS_PARAM_NAME).ifPresent(this::setSecondaryVoltageControlExcludePinnedUnits);
         config.getOptionalIntProperty(REACTIVE_LIMITS_MAX_SWITCH_PQ_PV_PARAM_NAME).ifPresent(this::setReactiveLimitsMaxPqPvSwitch);
         config.getOptionalEnumProperty(PHASE_SHIFTER_CONTROL_MODE_PARAM_NAME, PhaseShifterControlMode.class)
             .ifPresent(this::setPhaseShifterControlMode);
@@ -2054,6 +2071,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 .ifPresent(prop -> this.setSecondaryVoltageControlStallReArm(Boolean.parseBoolean(prop)));
         Optional.ofNullable(properties.get(SECONDARY_VOLTAGE_CONTROL_BLOCKED_ZONE_DETECTION_PARAM_NAME))
                 .ifPresent(prop -> this.setSecondaryVoltageControlBlockedZoneDetection(Boolean.parseBoolean(prop)));
+        Optional.ofNullable(properties.get(SECONDARY_VOLTAGE_CONTROL_EXCLUDE_PINNED_UNITS_PARAM_NAME))
+                .ifPresent(prop -> this.setSecondaryVoltageControlExcludePinnedUnits(Boolean.parseBoolean(prop)));
         Optional.ofNullable(properties.get(REACTIVE_LIMITS_MAX_SWITCH_PQ_PV_PARAM_NAME))
                 .ifPresent(prop -> this.setReactiveLimitsMaxPqPvSwitch(Integer.parseInt(prop)));
         Optional.ofNullable(properties.get(PHASE_SHIFTER_CONTROL_MODE_PARAM_NAME))
@@ -2204,6 +2223,7 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
         map.put(SECONDARY_VOLTAGE_CONTROL_STEP_CLIPPING_MODE_PARAM_NAME, secondaryVoltageControlStepClippingMode);
         map.put(SECONDARY_VOLTAGE_CONTROL_STALL_RE_ARM_PARAM_NAME, secondaryVoltageControlStallReArm);
         map.put(SECONDARY_VOLTAGE_CONTROL_BLOCKED_ZONE_DETECTION_PARAM_NAME, secondaryVoltageControlBlockedZoneDetection);
+        map.put(SECONDARY_VOLTAGE_CONTROL_EXCLUDE_PINNED_UNITS_PARAM_NAME, secondaryVoltageControlExcludePinnedUnits);
         map.put(REACTIVE_LIMITS_MAX_SWITCH_PQ_PV_PARAM_NAME, reactiveLimitsMaxPqPvSwitch);
         map.put(PHASE_SHIFTER_CONTROL_MODE_PARAM_NAME, phaseShifterControlMode);
         map.put(ALWAYS_UPDATE_NETWORK_PARAM_NAME, alwaysUpdateNetwork);
@@ -2643,6 +2663,7 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 extension1.getSecondaryVoltageControlStepClippingMode() == extension2.getSecondaryVoltageControlStepClippingMode() &&
                 extension1.isSecondaryVoltageControlStallReArm() == extension2.isSecondaryVoltageControlStallReArm() &&
                 extension1.isSecondaryVoltageControlBlockedZoneDetection() == extension2.isSecondaryVoltageControlBlockedZoneDetection() &&
+                extension1.isSecondaryVoltageControlExcludePinnedUnits() == extension2.isSecondaryVoltageControlExcludePinnedUnits() &&
                 extension1.getReactiveLimitsMaxPqPvSwitch() == extension2.getReactiveLimitsMaxPqPvSwitch() &&
                 extension1.getPhaseShifterControlMode() == extension2.getPhaseShifterControlMode() &&
                 extension1.isAlwaysUpdateNetwork() == extension2.isAlwaysUpdateNetwork() &&
@@ -2738,6 +2759,7 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 .setSecondaryVoltageControlStepClippingMode(extension.getSecondaryVoltageControlStepClippingMode())
                 .setSecondaryVoltageControlStallReArm(extension.isSecondaryVoltageControlStallReArm())
                 .setSecondaryVoltageControlBlockedZoneDetection(extension.isSecondaryVoltageControlBlockedZoneDetection())
+                .setSecondaryVoltageControlExcludePinnedUnits(extension.isSecondaryVoltageControlExcludePinnedUnits())
                 .setReactiveLimitsMaxPqPvSwitch(extension.getReactiveLimitsMaxPqPvSwitch())
                 .setPhaseShifterControlMode(extension.getPhaseShifterControlMode())
                 .setAlwaysUpdateNetwork(extension.isAlwaysUpdateNetwork())

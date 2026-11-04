@@ -903,6 +903,16 @@ all at the plausible voltage range bound, without waiting for the stall detectio
 
 The default value is `false`.
 
+(param-lf-secondary-voltage-control-exclude-pinned-units)=
+#### secondaryVoltageControlExcludePinnedUnits
+When `true`, the control units whose controlled bus target voltage has been clipped at a plausible voltage range bound are
+pinned: they keep their target voltage and are left out of the zone coordination, so that the other units of the zone carry
+the pilot point voltage target and the reactive power alignment, like the saturated reactive power control loops of the
+dynamic secondary voltage control models. Pinned units are put back in the coordination when the pilot point voltage error
+changes sign, at most three times per zone and load flow (experimental).
+
+The default value is `false`.
+
 (param-lf-voltage-target-priorities)=
 #### voltageTargetPriorities
 When multiple equipment regulate the same bus with different voltage targets,

@@ -66,6 +66,7 @@
         "secondaryVoltageControlStepClippingMode" : "COMPONENT",
         "secondaryVoltageControlStallReArm" : false,
         "secondaryVoltageControlBlockedZoneDetection" : false,
+        "secondaryVoltageControlExcludePinnedUnits" : false,
         "reactiveLimitsMaxPqPvSwitch" : 3,
         "phaseShifterControlMode" : "CONTINUOUS_WITH_DISCRETISATION",
         "alwaysUpdateNetwork" : false,
