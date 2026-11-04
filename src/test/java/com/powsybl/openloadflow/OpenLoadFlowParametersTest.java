@@ -550,7 +550,9 @@ class OpenLoadFlowParametersTest {
                 "minNominalVoltageRealisticVoltageCheck=0.0, reactiveRangeCheckMode=MAX, lowImpedanceThreshold=1.0E-8, networkCacheEnabled=false, " +
                 "svcVoltageMonitoring=true, stateVectorScalingMode=NONE, maxSlackBusCount=1, debugDir=null, " +
                 "incrementalTransformerRatioTapControlOuterLoopMaxTapShift=3, secondaryVoltageControl=false, secondaryVoltageControlAlignmentMode=K, " +
-                "secondaryVoltageControlMaxTargetVoltageStep=2.0, secondaryVoltageControlStallDetection=true, reactiveLimitsMaxPqPvSwitch=3, " +
+                "secondaryVoltageControlMaxTargetVoltageStep=2.0, secondaryVoltageControlStallDetection=true, secondaryVoltageControlStepClippingMode=COMPONENT, " +
+                "secondaryVoltageControlStallReArm=false, secondaryVoltageControlBlockedZoneDetection=false, secondaryVoltageControlExcludePinnedUnits=false, " +
+                "reactiveLimitsMaxPqPvSwitch=3, " +
                 "phaseShifterControlMode=CONTINUOUS_WITH_DISCRETISATION, alwaysUpdateNetwork=false, mostMeshedSlackBusSelectorMaxNominalVoltagePercentile=95.0, " +
                 "reportedFeatures=[], slackBusCountryFilter=[], actionableSwitchesIds=[], actionableTransformersIds=[], asymmetrical=false, " +
                 "minNominalVoltageTargetVoltageCheck=20.0, reactivePowerDispatchMode=Q_EQUAL_PROPORTION, outerLoopNames=null, " +

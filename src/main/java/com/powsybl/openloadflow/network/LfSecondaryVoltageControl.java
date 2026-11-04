@@ -107,6 +107,8 @@ public class LfSecondaryVoltageControl implements LfCopyable<LfSecondaryVoltageC
 
     private int maxReEnableCount = Integer.MAX_VALUE;
 
+    private final Set<LfBus> pinnedControllerBuses = new HashSet<>();
+
     public LfSecondaryVoltageControl(String zoneName, LfBus pilotBus, double targetValue, List<ControlUnit> controlUnits) {
         this(zoneName, pilotBus, targetValue, controlUnits, AlignmentMode.K);
     }
@@ -313,9 +315,10 @@ public class LfSecondaryVoltageControl implements LfCopyable<LfSecondaryVoltageC
                 .toList();
     }
 
-    private static Optional<LfBus> findAnyControllerBusWithVoltageControlEnabled(LfBus controlledBus) {
+    private Optional<LfBus> findAnyControllerBusWithVoltageControlEnabled(LfBus controlledBus) {
         return findControllerBuses(controlledBus).stream()
                 .filter(LfBus::isGeneratorVoltageControlEnabled)
+                .filter(bus -> !pinnedControllerBuses.contains(bus))
                 .findAny();
     }
 
@@ -331,9 +334,29 @@ public class LfSecondaryVoltageControl implements LfCopyable<LfSecondaryVoltageC
                 .toList();
     }
 
+    /**
+     * Controller buses that take part in the coordination: voltage control enabled and not pinned at a target voltage
+     * bound.
+     */
     public List<LfBus> getEnabledControllerBuses() {
         return getControllerBuses().stream()
                 .filter(LfBus::isGeneratorVoltageControlEnabled)
+                .filter(bus -> !pinnedControllerBuses.contains(bus))
+                .toList();
+    }
+
+    /**
+     * Controller buses whose controlled bus target voltage is at a plausible range bound and cannot move further in the
+     * direction the zone needs: they are left out of the coordination and keep their target voltage, the other
+     * controller buses carry the pilot point (as the saturated reactive power control loops of the dynamic models).
+     */
+    public Set<LfBus> getPinnedControllerBuses() {
+        return pinnedControllerBuses;
+    }
+
+    public List<LfBus> getNotPinnedControllerBuses() {
+        return getControllerBuses().stream()
+                .filter(bus -> !pinnedControllerBuses.contains(bus))
                 .toList();
     }
 
