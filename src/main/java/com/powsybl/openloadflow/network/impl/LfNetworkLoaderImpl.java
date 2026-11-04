@@ -1645,8 +1645,24 @@ public class LfNetworkLoaderImpl implements LfNetworkLoader<Network> {
             // bus/breaker case
             Bus configuredBus = network.getBusBreakerView().getBus(busbarSectionOrBusId);
             if (configuredBus != null) {
-                return breaker ? Optional.of(configuredBus)
-                        : Optional.ofNullable(configuredBus.getVoltageLevel().getBusView().getMergedBus(configuredBus.getId()));
+                if (breaker) {
+                    return Optional.of(configuredBus);
+                }
+                VoltageLevel voltageLevel = configuredBus.getVoltageLevel();
+                if (voltageLevel.getTopologyKind() == TopologyKind.BUS_BREAKER) {
+                    return Optional.ofNullable(voltageLevel.getBusView().getMergedBus(configuredBus.getId()));
+                }
+                // in a node/breaker voltage level, the bus/breaker view bus is a calculated one: its id is not a busbar
+                // section id, so the merged bus has to be found through one of its terminals
+                return configuredBus.getConnectedTerminalStream()
+                        .map(terminal -> terminal.getBusView().getBus())
+                        .filter(Objects::nonNull)
+                        .findFirst();
+            }
+            // bus view case
+            Bus mergedBus = network.getBusView().getBus(busbarSectionOrBusId);
+            if (mergedBus != null && !breaker) {
+                return Optional.of(mergedBus);
             }
         }
         return Optional.empty();
