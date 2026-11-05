@@ -25,6 +25,10 @@ For Bus/Breaker portions of the network, Security Analysis simulates the outage 
 
 For Node/Breaker portions of the network:
 - when `contingencyPropagation` is set to `false`, Security Analysis will simulate the outage of only the equipment(s) defined in the contingency.
+For a busbar section, the switches directly connected to it are opened. A switch is however only retained in the load flow network
+(as a zero impedance branch between two buses) when its opening really splits the bus in two parts that remain energized:
+when the part located behind the switch is a dead end bay (a single branch, or injections only), the equipment is simply
+disconnected at that side, which gives the same result without creating one additional bus per feeder bay.
 - when `contingencyPropagation` is set to `true` (default) Security Analysis will determine by topological search the switches with type circuit breakers
 (i.e. capable of opening fault currents) that must be opened to isolate the fault. Depending on the network structure,
 this could lead to more equipments to be simulated as tripped, because disconnectors and load break switches
