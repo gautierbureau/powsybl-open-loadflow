@@ -123,6 +123,8 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
 
     private final Map<LoadFlowModel, Set<LfZeroImpedanceNetwork>> zeroImpedanceNetworksByModel = new EnumMap<>(LoadFlowModel.class);
 
+    private boolean zeroImpedanceBusMerging = false;
+
     private ReportNode reportNode;
 
     private final List<LfSecondaryVoltageControl> secondaryVoltageControls = new ArrayList<>();
@@ -223,6 +225,16 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
     public LfNetwork(LfNetwork network, ReportNode reportNode) {
         this(network.numCC, network.slackBusSelector, network.maxSlackBusCount,
                 network.connectivityFactory, network.referenceBusSelector, reportNode);
+        this.zeroImpedanceBusMerging = network.zeroImpedanceBusMerging;
+    }
+
+    public boolean isZeroImpedanceBusMerging() {
+        return zeroImpedanceBusMerging;
+    }
+
+    public void setZeroImpedanceBusMerging(boolean zeroImpedanceBusMerging) {
+        this.zeroImpedanceBusMerging = zeroImpedanceBusMerging;
+        invalidateZeroImpedanceNetworks();
     }
 
     public int getNumCC() {
@@ -885,6 +897,7 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
         int deadComponentsCount = 0;
         for (LfNetwork lfNetwork : lfNetworks) {
             ReportNode networkReport = Reports.createNetworkInfoReporter(lfNetwork.getReportNode());
+            lfNetwork.setZeroImpedanceBusMerging(parameters.isZeroImpedanceBusMerging());
             lfNetwork.fix(parameters.isMinImpedance(), parameters.getLowImpedanceThreshold());
             lfNetwork.validate(parameters.getLoadFlowModel(), networkReport);
             switch (lfNetwork.getValidity()) {

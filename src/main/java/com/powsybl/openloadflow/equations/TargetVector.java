@@ -71,6 +71,16 @@ public class TargetVector<V extends Enum<V> & Quantity, E extends Enum<E> & Quan
         }
 
         @Override
+        public void onZeroImpedanceNetworkSplit(LfZeroImpedanceNetwork initialNetwork, List<LfZeroImpedanceNetwork> splitNetworks, LoadFlowModel loadFlowModel) {
+            invalidateValues();
+        }
+
+        @Override
+        public void onZeroImpedanceNetworkMerge(LfZeroImpedanceNetwork network1, LfZeroImpedanceNetwork network2, LfZeroImpedanceNetwork mergedNetwork, LoadFlowModel loadFlowModel) {
+            invalidateValues();
+        }
+
+        @Override
         public void onDisableChange(LfElement element, boolean disabled) {
             for (var equationTerm : equationSystem.getEquationTerms(element.getType(), element.getNum())) {
                 if (equationTerm.hasRhs()) {

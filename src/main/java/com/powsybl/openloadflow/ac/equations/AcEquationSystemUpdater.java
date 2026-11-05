@@ -24,10 +24,23 @@ public class AcEquationSystemUpdater extends AbstractEquationSystemUpdater<AcVar
 
     private final AcEquationSystemCreationParameters parameters;
 
+    private final ZeroImpedanceBusMerger merger;
+
     public AcEquationSystemUpdater(EquationSystem<AcVariableType, AcEquationType> equationSystem,
                                    AcEquationSystemCreationParameters parameters) {
+        this(equationSystem, parameters, null);
+    }
+
+    public AcEquationSystemUpdater(EquationSystem<AcVariableType, AcEquationType> equationSystem,
+                                   AcEquationSystemCreationParameters parameters, ZeroImpedanceBusMerger merger) {
         super(equationSystem, LoadFlowModel.AC);
         this.parameters = Objects.requireNonNull(parameters);
+        this.merger = merger;
+    }
+
+    @Override
+    protected boolean isMergedZeroImpedanceBranch(LfBranch branch) {
+        return LfZeroImpedanceNetwork.isMerged(branch);
     }
 
     private void updateVoltageControls(LfBus bus) {
@@ -110,6 +123,9 @@ public class AcEquationSystemUpdater extends AbstractEquationSystemUpdater<AcVar
                 bus.getShuntVoltageControl().ifPresent(vc -> updateVoltageControls(vc.getControlledBus()));
                 bus.getGeneratorReactivePowerControl()
                     .ifPresent(reactivePowerControl -> AcEquationSystemCreator.updateGeneratorReactivePowerControlBranchEquations(reactivePowerControl, equationSystem));
+                if (merger != null) {
+                    merger.onBusDisableChange(bus);
+                }
                 break;
             case BRANCH:
                 LfBranch branch = (LfBranch) element;
@@ -150,6 +166,9 @@ public class AcEquationSystemUpdater extends AbstractEquationSystemUpdater<AcVar
 
     @Override
     public void onZeroImpedanceNetworkSplit(LfZeroImpedanceNetwork initialNetwork, List<LfZeroImpedanceNetwork> splitNetworks, LoadFlowModel loadFlowModel) {
+        if (loadFlowModel == LoadFlowModel.AC && merger != null && initialNetwork.isMerged()) {
+            merger.update(splitNetworks);
+        }
         if (loadFlowModel == LoadFlowModel.AC) {
             // TODO
             // only recreate distribution equations if controllers buses are redistributed on the different
@@ -162,6 +181,9 @@ public class AcEquationSystemUpdater extends AbstractEquationSystemUpdater<AcVar
 
     @Override
     public void onZeroImpedanceNetworkMerge(LfZeroImpedanceNetwork network1, LfZeroImpedanceNetwork network2, LfZeroImpedanceNetwork mergedNetwork, LoadFlowModel loadFlowModel) {
+        if (loadFlowModel == LoadFlowModel.AC && merger != null && mergedNetwork.isMerged()) {
+            merger.update(List.of(mergedNetwork));
+        }
         if (loadFlowModel == LoadFlowModel.AC) {
             // TODO
             // only recreate distribution equations if controllers buses are merged (should be a rare case)

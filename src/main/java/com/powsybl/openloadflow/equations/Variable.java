@@ -24,6 +24,11 @@ public class Variable<V extends Enum<V> & Quantity> implements Comparable<Variab
 
     private final MutableInt row = new MutableInt(-1);
 
+    /**
+     * When not null, this variable is merged with another one (same unknown): it shares its row.
+     */
+    private Variable<V> alias;
+
     Variable(int elementNum, V type) {
         this.elementNum = elementNum;
         this.type = Objects.requireNonNull(type);
@@ -38,11 +43,33 @@ public class Variable<V extends Enum<V> & Quantity> implements Comparable<Variab
     }
 
     public int getRow() {
-        return row.intValue();
+        return alias != null ? alias.getRow() : row.intValue();
     }
 
     public Number getRowRef() {
-        return row;
+        return alias != null ? alias.getRowRef() : row;
+    }
+
+    public Variable<V> getAlias() {
+        return alias;
+    }
+
+    public void setAlias(Variable<V> alias) {
+        if (alias == this) {
+            throw new IllegalArgumentException("A variable cannot be its own alias");
+        }
+        this.alias = alias;
+    }
+
+    /**
+     * @return the variable actually solved: the alias (recursively) if any, this variable otherwise
+     */
+    public Variable<V> resolve() {
+        Variable<V> v = this;
+        while (v.alias != null) {
+            v = v.alias;
+        }
+        return v;
     }
 
     public void setRow(int row) {

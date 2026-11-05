@@ -87,7 +87,7 @@ class LfNetworkCopyFieldGuardTest {
         expected.put(LfLegBranch.class, Set.of("twtRef", "legRef"));
         expected.put(LfLoadImpl.class, Set.of("bus", "loadModel", "loadsRefs", "lccCsRefs", "targetQ", "ensurePowerFactorConstantByLoad", "loadsAbsVariableTargetP",
                 "absVariableTargetP", "distributedOnConformLoad", "loadsDisablingStatus", "p", "q"));
-        expected.put(LfNetwork.class, Set.of("numCC", "synchronousNetworks", "slackBusSelector", "referenceBusSelector", "maxSlackBusCount", "busesById", "busesByIndex",
+        expected.put(LfNetwork.class, Set.of("numCC", "zeroImpedanceBusMerging", "synchronousNetworks", "slackBusSelector", "referenceBusSelector", "maxSlackBusCount", "busesById", "busesByIndex",
                 "branches", "branchesById", "branchesByOriginalId", "shuntCount", "shuntsByIndex", "shuntsById", "generatorsById", "loadsById", "areasById", "areas", "hvdcs",
                 "hvdcsById", "dcBusByIndex", "dcBusById", "dcLinesByIndex", "voltageSourceConvertersByIndex", "listeners", "validity", "connectivityFactory", "connectivity",
                 "zeroImpedanceNetworksByModel", "reportNode", "secondaryVoltageControls", "voltageAngleLimits", "overloadManagementSystems", "connectivityRemovedBranches"));

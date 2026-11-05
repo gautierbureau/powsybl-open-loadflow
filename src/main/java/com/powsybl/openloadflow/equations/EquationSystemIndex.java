@@ -143,7 +143,8 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
     }
 
     private void updateVariablesToFind(Predicate<V> isSeparatedInFirstPart) {
-        sortedVariablesToFind = sortedMapVariablesToFindRefCount.keySet().stream().sorted().toList();
+        // variables merged with another one (alias) share its row: only the resolved variables get a row
+        sortedVariablesToFind = sortedMapVariablesToFindRefCount.keySet().stream().map(Variable::resolve).distinct().sorted().toList();
         rowCount = 0;
         if (isSeparatedInFirstPart == null) {
             for (Variable<V> variable : sortedVariablesToFind) {
@@ -289,10 +290,24 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
                     removeTerm(term);
                     break;
 
+                case EQUATION_TERM_REMOVED:
+                    if (term.isActive()) {
+                        removeTerm(term);
+                    }
+                    break;
+
                 default:
                     throw new IllegalStateException("Event type not supported: " + eventType);
             }
         }
+    }
+
+    /**
+     * To call when variable aliases have changed: rows have to be reassigned and the matrix structure rebuilt.
+     */
+    public void onVariableAliasChange() {
+        variablesIndexValid = false;
+        notifyEquationIndexOrderChange();
     }
 
     @Override

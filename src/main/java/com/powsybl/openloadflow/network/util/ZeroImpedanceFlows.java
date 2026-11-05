@@ -180,7 +180,13 @@ public class ZeroImpedanceFlows {
             double qShunt = getQShunt(bus.getShunt()) + getQShunt(bus.getControllerShunt()) + getQShunt(bus.getSvcShunt());
 
             // take care of the sign
-            PQ balancePQ = new PQ(-bus.getP().eval() + pShunt, -bus.getQ().eval() + qShunt);
+            // for a bus merged with the other buses of the zero impedance network, the power balance equation of the bus
+            // is not available (all the terms are in the representative bus equations): at convergence, the balance
+            // equals the bus target
+            boolean merged = loadFlowModel == LoadFlowModel.AC && LfZeroImpedanceNetwork.isMerged(bus);
+            PQ balancePQ = merged
+                    ? new PQ(-bus.getTargetP() + pShunt, -bus.getTargetQ() + qShunt)
+                    : new PQ(-bus.getP().eval() + pShunt, -bus.getQ().eval() + qShunt);
 
             // only lines with impedance
             List<LfBranch> adjacentBranchesWithImpedance = bus.getBranches().stream()

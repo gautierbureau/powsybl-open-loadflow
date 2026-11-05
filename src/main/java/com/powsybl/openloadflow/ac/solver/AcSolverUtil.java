@@ -89,6 +89,18 @@ public final class AcSolverUtil {
     public static void updateNetwork(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
         // update state variable
         StateVector stateVector = equationSystem.getStateVector();
+        // buses merged with another one (variable alias) are not in the index: they take the value of the variable they are merged with
+        for (Variable<AcVariableType> v : equationSystem.getVariableSet().getVariables()) {
+            if (v.getAlias() != null && v.getRow() != -1) {
+                switch (v.getType()) {
+                    case BUS_V -> network.getBus(v.getElementNum()).setV(stateVector.get(v.getRow()));
+                    case BUS_PHI -> network.getBus(v.getElementNum()).setAngle(stateVector.get(v.getRow()));
+                    default -> {
+                        // nothing to do
+                    }
+                }
+            }
+        }
         for (Variable<AcVariableType> v : equationSystem.getIndex().getSortedVariablesToFind()) {
             switch (v.getType()) {
                 case BUS_V:

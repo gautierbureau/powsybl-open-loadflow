@@ -374,7 +374,7 @@ public class AcEquationSystemCreator {
             EquationTerm<AcVariableType, AcEquationType> q;
             EquationTerm<AcVariableType, AcEquationType> openQ = null;
             if (branch.isZeroImpedance(LoadFlowModel.AC)) {
-                if (!branch.isSpanningTreeEdge(LoadFlowModel.AC)) {
+                if (!branch.isSpanningTreeEdge(LoadFlowModel.AC) || LfZeroImpedanceNetwork.isMerged(branch)) {
                     continue;
                 }
                 if (branch.getBus1() == controllerBus) {
@@ -1173,7 +1173,9 @@ public class AcEquationSystemCreator {
 
         // create zero and non zero impedance branch equations
         if (branch.isZeroImpedance(LoadFlowModel.AC)) {
-            createNonImpedantBranch(branch, branch.getBus1(), branch.getBus2(), equationSystem, branch.isSpanningTreeEdge(LoadFlowModel.AC));
+            if (!LfZeroImpedanceNetwork.isMerged(branch)) {
+                createNonImpedantBranch(branch, branch.getBus1(), branch.getBus2(), equationSystem, branch.isSpanningTreeEdge(LoadFlowModel.AC));
+            }
         } else {
             createImpedantBranch(branch, branch.getBus1(), branch.getBus2(), equationSystem);
         }
@@ -1202,7 +1204,7 @@ public class AcEquationSystemCreator {
         List<EquationTerm<AcVariableType, AcEquationType>> terms = new ArrayList<>();
         for (LfBranch branch : bus.getBranches()) {
             if (branch.isZeroImpedance(LoadFlowModel.AC)) {
-                if (branch.isSpanningTreeEdge(LoadFlowModel.AC)) {
+                if (branch.isSpanningTreeEdge(LoadFlowModel.AC) && !LfZeroImpedanceNetwork.isMerged(branch)) {
                     EquationTerm<AcVariableType, AcEquationType> p = variableSet.getVariable(branch.getNum(), AcVariableType.DUMMY_P).createTerm();
                     if (branch.getBus2() == bus) {
                         p = p.minus();
@@ -1286,6 +1288,9 @@ public class AcEquationSystemCreator {
     }
 
     protected void create(EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        // zero impedance networks (and their merged status) have to be known before creating any equation
+        network.updateZeroImpedanceCache(LoadFlowModel.AC);
+
         createBusesEquations(equationSystem);
         createMultipleSlackBusesEquations(equationSystem);
         createBranchesEquations(equationSystem);
@@ -1300,7 +1305,11 @@ public class AcEquationSystemCreator {
 
         EquationSystemPostProcessor.findAll().forEach(pp -> pp.onCreate(equationSystem));
 
-        network.addListener(LfNetworkListenerTracer.trace(new AcEquationSystemUpdater(equationSystem, creationParameters)));
+        // merge buses connected by zero impedance branches, where possible
+        ZeroImpedanceBusMerger merger = new ZeroImpedanceBusMerger(network, equationSystem);
+        merger.mergeAll();
+
+        network.addListener(LfNetworkListenerTracer.trace(new AcEquationSystemUpdater(equationSystem, creationParameters, merger)));
     }
 
     public EquationSystem<AcVariableType, AcEquationType> create() {
