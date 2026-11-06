@@ -162,9 +162,9 @@ public class AcEquationSystemCreator {
                 .addTerm(vMinus.<AcEquationType>createTerm().minus())
                 .setActive(true);
         equationSystem.createEquation(bus, AcEquationType.BUS_Q_LIMIT_UP)
-                .addTerm(LimitComplementarityEquationTerm.reactive(bus, q, vPlus, true, bus.getMinQ(), bus.getMaxQ(), smoothing));
+                .addTerm(LimitComplementarityEquationTerm.reactive(bus, q, vPlus, true, smoothing));
         equationSystem.createEquation(bus, AcEquationType.BUS_Q_LIMIT_LO)
-                .addTerm(LimitComplementarityEquationTerm.reactive(bus, q, vMinus, false, bus.getMinQ(), bus.getMaxQ(), smoothing));
+                .addTerm(LimitComplementarityEquationTerm.reactive(bus, q, vMinus, false, smoothing));
     }
 
     private void createGeneratorLocalVoltageControlEquation(LfBus bus,

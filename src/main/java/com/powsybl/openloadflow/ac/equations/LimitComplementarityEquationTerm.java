@@ -17,6 +17,7 @@ import net.jafama.FastMath;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.function.DoubleSupplier;
 
 /**
  * One of the two smoothed complementarity equations of the split-slack Fischer&ndash;Burmeister form of a voltage
@@ -53,7 +54,10 @@ public class LimitComplementarityEquationTerm<T extends LfElement> extends Abstr
 
     private final List<Variable<AcVariableType>> variables;
 
-    private final double bound;
+    /** Reads the bound, once, on first use: see {@link #reactive}. */
+    private final DoubleSupplier boundSupplier;
+
+    private double bound = Double.NaN;
 
     /** da/dx: -1 when the headroom is {@code bound - x}, +1 when it is {@code x - bound}. */
     private final double dadx;
@@ -67,10 +71,15 @@ public class LimitComplementarityEquationTerm<T extends LfElement> extends Abstr
      */
     public LimitComplementarityEquationTerm(T element, Variable<AcVariableType> controlVar, Variable<AcVariableType> slackVar,
                                             double bound, double dadx, LimitsSmoothing smoothing) {
+        this(element, controlVar, slackVar, () -> bound, dadx, smoothing);
+    }
+
+    private LimitComplementarityEquationTerm(T element, Variable<AcVariableType> controlVar, Variable<AcVariableType> slackVar,
+                                             DoubleSupplier boundSupplier, double dadx, LimitsSmoothing smoothing) {
         super(element);
         this.controlVar = Objects.requireNonNull(controlVar);
         this.slackVar = Objects.requireNonNull(slackVar);
-        this.bound = bound;
+        this.boundSupplier = Objects.requireNonNull(boundSupplier);
         this.dadx = dadx;
         this.mu = smoothing.mu();
         this.voltageScale = smoothing.voltageScale();
@@ -80,11 +89,15 @@ public class LimitComplementarityEquationTerm<T extends LfElement> extends Abstr
     /**
      * A generator bus reactive limit: {@code (qMax - Q) perp vPlus} when {@code upper}, {@code (Q - qMin) perp vMinus}
      * otherwise, an unbounded limit being capped (see {@link #MAX_REACTIVE}).
+     *
+     * <p>The bus limit is read on first use, at the state the system is evaluated at, and then kept: a VSC station
+     * of an HVDC line in AC emulation has limits that depend on its active power, which OLF evaluates from the
+     * line's flow equation, and that equation has no state while the system is being built.</p>
      */
     public static LimitComplementarityEquationTerm<LfBus> reactive(LfBus bus, Variable<AcVariableType> q, Variable<AcVariableType> slack,
-                                                                   boolean upper, double qMin, double qMax, LimitsSmoothing smoothing) {
-        return upper ? new LimitComplementarityEquationTerm<>(bus, q, slack, Math.min(qMax, MAX_REACTIVE), -1, smoothing)
-                     : new LimitComplementarityEquationTerm<>(bus, q, slack, Math.max(qMin, -MAX_REACTIVE), 1, smoothing);
+                                                                   boolean upper, LimitsSmoothing smoothing) {
+        return upper ? new LimitComplementarityEquationTerm<>(bus, q, slack, () -> Math.min(bus.getMaxQ(), MAX_REACTIVE), -1, smoothing)
+                     : new LimitComplementarityEquationTerm<>(bus, q, slack, () -> Math.max(bus.getMinQ(), -MAX_REACTIVE), 1, smoothing);
     }
 
     /**
@@ -105,6 +118,9 @@ public class LimitComplementarityEquationTerm<T extends LfElement> extends Abstr
     }
 
     private double a() {
+        if (Double.isNaN(bound)) {
+            bound = boundSupplier.getAsDouble();
+        }
         return dadx * (sv.get(controlVar.getRow()) - bound);
     }
 

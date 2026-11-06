@@ -15,6 +15,7 @@ import com.powsybl.iidm.network.Line;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.ShuntCompensatorLinearModel;
 import com.powsybl.iidm.network.TwoWindingsTransformer;
+import com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder;
 import com.powsybl.iidm.network.extensions.SecondaryVoltageControl;
 import com.powsybl.iidm.network.extensions.SecondaryVoltageControlAdder;
 import com.powsybl.iidm.network.regulation.RegulationMode;
@@ -27,6 +28,7 @@ import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.equations.LimitsSmoothing;
 import com.powsybl.openloadflow.graph.dtree.DTreeGraphConnectivityFactory;
+import com.powsybl.openloadflow.network.HvdcNetworkFactory;
 import com.powsybl.openloadflow.network.VoltageControlNetworkFactory;
 import com.powsybl.sensitivity.*;
 import org.junit.jupiter.api.Test;
@@ -1616,6 +1618,32 @@ class AcSensitivityAnalysisAdjointTest {
         var zoneLever = levers(SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE, List.of("z1"));
         var exact = runAdjoint(zoned, svcLfp, null, cotangents, zoneLever);
         var smoothed = runAdjoint(zoned, svcLfp, new LimitsSmoothing(1e-7, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), cotangents, zoneLever);
+        assertEquals(0, maxAbsDifference(exact, smoothed), 1e-6 * maxAbs(exact));
+    }
+
+    /**
+     * A VSC station of an HVDC line in AC emulation holds its bus voltage, and its reactive limits depend on its active
+     * power, which OLF evaluates from the line's flow equation: the smoothed limits read them once the system has a
+     * state, not while it is being built (a NullPointerException on real networks before).
+     */
+    @Test
+    void smoothedAdjointOnAVscStationInAcEmulation() {
+        Network network = HvdcNetworkFactory.createWithHvdcInAcEmulation();
+        network.getHvdcLine("hvdc34").newExtension(HvdcAngleDroopActivePowerControlAdder.class)
+                .withDroop(180)
+                .withP0(0.f)
+                .withEnabled(true)
+                .add();
+        LoadFlowParameters lfp = cacheEnabledParameters().setHvdcAcEmulation(true);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents = new LinkedHashMap<>();
+        cotangents.put(powerKey("l12"), 1.0);
+        cotangents.put(powerKey("l45"), 0.5);
+        var levers = concat(levers(SensitivityVariableType.INJECTION_REACTIVE_POWER, List.of("d2")),
+                levers(SensitivityVariableType.BUS_TARGET_VOLTAGE, List.of("g1", "g5")));
+        var exact = runAdjoint(network, lfp, null, cotangents, levers);
+        var smoothed = runAdjoint(network, lfp, new LimitsSmoothing(1e-7, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), cotangents, levers);
+        assertTrue(maxAbs(exact) > 0);
         assertEquals(0, maxAbsDifference(exact, smoothed), 1e-6 * maxAbs(exact));
     }
 
