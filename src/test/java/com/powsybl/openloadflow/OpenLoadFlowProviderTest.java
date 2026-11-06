@@ -62,7 +62,7 @@ class OpenLoadFlowProviderTest {
             new OpenLoadFlowParameters(), new DenseMatrixFactory(), new DTreeGraphConnectivityFactory<>(), true);
         assertEquals("DcLoadFlowParameters(networkParameters=LfNetworkParameters(slackBusSelector=NetworkSlackBusSelector, " +
                 "connectivityFactory=DTreeGraphConnectivityFactory, generatorVoltageRemoteControl=false, " +
-                "minImpedance=false, twtSplitShuntAdmittance=false, breakers=false, plausibleActivePowerLimit=10000.0, componentMode=MAIN_CONNECTED, " +
+                "minImpedance=false, zeroImpedanceBusMerging=true, twtSplitShuntAdmittance=false, breakers=false, plausibleActivePowerLimit=10000.0, componentMode=MAIN_CONNECTED, " +
                 "countriesToBalance=[], distributedOnConformLoad=false, phaseControl=false, transformerVoltageControl=false, " +
                 "voltagePerReactivePowerControl=false, generatorReactivePowerRemoteControl=false, transformerReactivePowerControl=false, " +
                 "loadFlowModel=DC, reactiveLimits=false, hvdcAcEmulation=true, minPlausibleTargetVoltage=0.8, maxPlausibleTargetVoltage=1.2, " +
@@ -86,7 +86,7 @@ class OpenLoadFlowProviderTest {
             new OpenLoadFlowParameters(), new DenseMatrixFactory(), new DTreeGraphConnectivityFactory<>(), false, false);
         assertEquals("AcLoadFlowParameters(networkParameters=LfNetworkParameters(slackBusSelector=NetworkSlackBusSelector, " +
                 "connectivityFactory=DTreeGraphConnectivityFactory, generatorVoltageRemoteControl=true, " +
-                "minImpedance=false, twtSplitShuntAdmittance=false, breakers=false, plausibleActivePowerLimit=10000.0, " +
+                "minImpedance=false, zeroImpedanceBusMerging=true, twtSplitShuntAdmittance=false, breakers=false, plausibleActivePowerLimit=10000.0, " +
                 "componentMode=MAIN_CONNECTED, countriesToBalance=[], distributedOnConformLoad=false, phaseControl=false, " +
                 "transformerVoltageControl=false, voltagePerReactivePowerControl=false, generatorReactivePowerRemoteControl=false, " +
                 "transformerReactivePowerControl=false, loadFlowModel=AC, reactiveLimits=true, hvdcAcEmulation=true, " +

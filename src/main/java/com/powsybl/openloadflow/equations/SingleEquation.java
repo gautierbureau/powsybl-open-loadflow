@@ -46,6 +46,42 @@ public class SingleEquation<V extends Enum<V> & Quantity, E extends Enum<E> & Qu
      */
     private int[] matrixElementIndexes;
 
+    /**
+     * Terms grouped by resolved variable (variables merged by alias share a row and so a matrix element): for each
+     * resolved variable, the list of (original variable, terms) entries.
+     */
+    private List<Map.Entry<Variable<V>, List<Map.Entry<Variable<V>, List<EquationTerm<V, E>>>>>> termsByResolvedVariable;
+
+    public void invalidateDerivativeCache() {
+        matrixElementIndexes = null;
+        termsByResolvedVariable = null;
+    }
+
+    public void removeTerm(EquationTerm<V, E> term) {
+        Objects.requireNonNull(term);
+        checkNotRemoved();
+        SingleEquationTerm<V, E> termImpl = (SingleEquationTerm<V, E>) term;
+        if (termImpl.getEquation() != this) {
+            throw new PowsyblException("Equation term does not belong to this equation");
+        }
+        // notify while the term is still attached, so that the index can update the variables reference counts
+        equationSystem.notifyEquationTermChange(termImpl, EquationTermEventType.EQUATION_TERM_REMOVED);
+        terms.remove(termImpl);
+        for (Variable<V> v : termImpl.getVariables()) {
+            List<EquationTerm<V, E>> termsOfVariable = termsByVariable.get(v);
+            if (termsOfVariable != null) {
+                termsOfVariable.remove(termImpl);
+                if (termsOfVariable.isEmpty()) {
+                    termsByVariable.remove(v);
+                }
+            }
+        }
+        invalidateDerivativeCache();
+        hasRhs = terms.stream().anyMatch(SingleEquationTerm::hasRhs);
+        equationSystem.removeEquationTerm(termImpl);
+        termImpl.setEquation(null);
+    }
+
     SingleEquation(int elementNum, E type, EquationSystem<V, E> equationSystem) {
         this.elementNum = elementNum;
         this.type = Objects.requireNonNull(type);
@@ -114,7 +150,7 @@ public class SingleEquation<V extends Enum<V> & Quantity, E extends Enum<E> & Qu
             termsByVariable.computeIfAbsent(v, k -> new ArrayList<>())
                     .add(termImpl);
         }
-        matrixElementIndexes = null;
+        invalidateDerivativeCache();
         termImpl.setEquation(this);
         equationSystem.addEquationTerm(termImpl);
         equationSystem.notifyEquationTermChange(termImpl, EquationTermEventType.EQUATION_TERM_ADDED);
@@ -183,25 +219,42 @@ public class SingleEquation<V extends Enum<V> & Quantity, E extends Enum<E> & Qu
         return value;
     }
 
+    private List<Map.Entry<Variable<V>, List<Map.Entry<Variable<V>, List<EquationTerm<V, E>>>>>> getTermsByResolvedVariable() {
+        if (termsByResolvedVariable == null) {
+            // group terms of variables resolving to the same variable, sorted by resolved variable so that rows
+            // are still filled in increasing order
+            Map<Variable<V>, List<Map.Entry<Variable<V>, List<EquationTerm<V, E>>>>> grouped = new TreeMap<>();
+            for (Map.Entry<Variable<V>, List<EquationTerm<V, E>>> e : termsByVariable.entrySet()) {
+                grouped.computeIfAbsent(e.getKey().resolve(), k -> new ArrayList<>(1)).add(e);
+            }
+            termsByResolvedVariable = new ArrayList<>(grouped.entrySet());
+        }
+        return termsByResolvedVariable;
+    }
+
     public void der(DerHandler<V> handler) {
         Objects.requireNonNull(handler);
         int variableIndex = 0;
-        for (Map.Entry<Variable<V>, List<EquationTerm<V, E>>> e : termsByVariable.entrySet()) {
-            Variable<V> variable = e.getKey();
+        var groups = getTermsByResolvedVariable();
+        for (var group : groups) {
+            Variable<V> variable = group.getKey();
             int row = variable.getRow();
             if (row != -1) {
                 double value = 0;
                 // create a derivative even if all terms are not active, to allow later reactivation of terms
                 // that won't create a new matrix element and a simple update of the matrix
-                for (EquationTerm<V, E> term : e.getValue()) {
-                    if (term.isActive()) {
-                        value += term.der(variable);
+                for (Map.Entry<Variable<V>, List<EquationTerm<V, E>>> e : group.getValue()) {
+                    Variable<V> originalVariable = e.getKey();
+                    for (EquationTerm<V, E> term : e.getValue()) {
+                        if (term.isActive()) {
+                            value += term.der(originalVariable);
+                        }
                     }
                 }
                 int oldMatrixElementIndex = matrixElementIndexes == null ? -1 : matrixElementIndexes[variableIndex];
                 int matrixElementIndex = handler.onDer(variable, value, oldMatrixElementIndex);
                 if (matrixElementIndexes == null) {
-                    matrixElementIndexes = new int[termsByVariable.size()];
+                    matrixElementIndexes = new int[groups.size()];
                 }
                 matrixElementIndexes[variableIndex] = matrixElementIndex;
                 variableIndex++;

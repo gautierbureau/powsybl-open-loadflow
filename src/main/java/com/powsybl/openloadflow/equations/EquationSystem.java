@@ -103,6 +103,25 @@ public class EquationSystem<V extends Enum<V> & Quantity, E extends Enum<E> & Qu
         attach(equationTerm);
     }
 
+    void removeEquationTerm(SingleEquationTerm<V, E> equationTerm) {
+        if (equationTermsByElement != null) {
+            deindexTerm(equationTerm);
+        }
+    }
+
+    /**
+     * To call once variable aliases have been changed (see {@link Variable#setAlias(Variable)}).
+     */
+    public void notifyVariableAliasChange() {
+        for (SingleEquation<V, E> equation : equations.values()) {
+            equation.invalidateDerivativeCache();
+        }
+        for (EquationArray<V, E> equationArray : equationArrays.values()) {
+            equationArray.invalidateEquationDerivativeVectors();
+        }
+        index.onVariableAliasChange();
+    }
+
     public List<SingleEquationTerm<V, E>> getEquationTerms(ElementType elementType, int elementNum) {
         Objects.requireNonNull(elementType);
         indexAllTerms();

@@ -30,10 +30,30 @@ public class LfZeroImpedanceNetwork {
 
     private SpanningTreeAlgorithm.SpanningTree<LfBranch> spanningTree;
 
+    /**
+     * When true, the buses of this zero impedance network are merged in the equation system: they share the voltage
+     * variables and the power balance equations of the representative bus, and the zero impedance branches have no
+     * equation at all.
+     */
+    private final boolean merged;
+
+    private final LfBus representative;
+
     public LfZeroImpedanceNetwork(LfNetwork network, LoadFlowModel loadFlowModel, Graph<LfBus, LfBranch> graph) {
+        this(network, loadFlowModel, graph, false);
+    }
+
+    public LfZeroImpedanceNetwork(LfNetwork network, LoadFlowModel loadFlowModel, Graph<LfBus, LfBranch> graph, boolean merged) {
         this.network = Objects.requireNonNull(network);
         this.loadFlowModel = Objects.requireNonNull(loadFlowModel);
         this.graph = Objects.requireNonNull(graph);
+        this.merged = merged;
+        // the slack bus (whose active power balance equation is inactive) or the reference bus is preferred as
+        // representative, so that these special equations are the ones of the representative bus
+        this.representative = graph.vertexSet().stream()
+                .min(Comparator.<LfBus>comparingInt(bus -> merged && bus.isSlack() ? 0 : merged && bus.isReference() ? 1 : 2)
+                        .thenComparingInt(LfElement::getNum))
+                .orElse(null);
         for (LfBus bus : graph.vertexSet()) {
             bus.setZeroImpedanceNetwork(loadFlowModel, this);
         }
@@ -59,16 +79,81 @@ public class LfZeroImpedanceNetwork {
     public static Set<LfZeroImpedanceNetwork> create(LfNetwork network, LoadFlowModel loadFlowModel) {
         Objects.requireNonNull(network);
         Set<LfZeroImpedanceNetwork> zeroImpedanceNetworks = new LinkedHashSet<>();
-        var graph = createZeroImpedanceSubGraph(network, loadFlowModel);
+        var graph = createZeroImpedanceSubGraph(network, loadFlowModel, false);
+        Set<LfBus> mergeableBuses = loadFlowModel == LoadFlowModel.AC && network.isZeroImpedanceBusMerging()
+                ? findMergeableBuses(network, loadFlowModel)
+                : Collections.emptySet();
         List<Set<LfBus>> connectedSets = new ConnectivityInspector<>(graph).connectedSets();
         for (Set<LfBus> connectedSet : connectedSets) {
             var subGraph = createSubgraph(graph, connectedSet);
-            zeroImpedanceNetworks.add(new LfZeroImpedanceNetwork(network, loadFlowModel, subGraph));
+            boolean merged = !mergeableBuses.isEmpty() && mergeableBuses.containsAll(connectedSet);
+            zeroImpedanceNetworks.add(new LfZeroImpedanceNetwork(network, loadFlowModel, subGraph, merged));
         }
         return zeroImpedanceNetworks;
     }
 
-    private static Graph<LfBus, LfBranch> createZeroImpedanceSubGraph(LfNetwork network, LoadFlowModel loadFlowModel) {
+    private static boolean isGeneratorVoltageController(LfBus bus) {
+        return bus.getGeneratorVoltageControl()
+                .map(vc -> vc.getControllerElements().contains(bus))
+                .orElse(false);
+    }
+
+    /**
+     * A bus can be merged with the buses it is connected to by zero impedance branches if it is not a controller
+     * of any control (the reactive power injection of a controller bus is needed by the control equations, and it
+     * is only defined bus by bus with the dummy flows of the zero impedance branches). A bus that is only controlled
+     * (its voltage is a target of controllers located elsewhere) can be merged: the target equation simply applies
+     * to the shared voltage variable. A slack bus can be merged too, as long as it is the only slack bus of its
+     * synchronous network: it is then the representative bus, with an inactive active power balance equation.
+     */
+    private static boolean isMergeableBus(LfNetwork network, LfBus bus) {
+        if (bus.isSlack() && network.getSynchronousNetwork(bus.getNumSC()).getSlackBuses().size() > 1) {
+            return false; // active power distribution equations between slack buses are not supported
+        }
+        return !isGeneratorVoltageController(bus)
+                && bus.getGeneratorReactivePowerControl().isEmpty()
+                && !bus.hasGeneratorsWithSlope()
+                && bus.getControllerShunt().isEmpty()
+                && bus.getSvcShunt().isEmpty();
+    }
+
+    public boolean hasSlackBus() {
+        return graph.vertexSet().stream().anyMatch(LfBus::isSlack);
+    }
+
+    /**
+     * A zero impedance branch involved in a control (its flow is a dummy variable used by the control equations)
+     * prevents merging, as well as a zero impedance branch with a ratio or a phase shift (its buses do not share the
+     * same voltage: v1 = rho * v2).
+     */
+    private static boolean isControlBranch(LfBranch branch) {
+        PiModel piModel = branch.getPiModel();
+        return piModel.getR1() != PiModel.R2
+                || piModel.getA1() != 0
+                || branch.isVoltageController()
+                || branch.isPhaseController() || branch.isPhaseControlled()
+                || branch.isTransformerReactivePowerController() || branch.isTransformerReactivePowerControlled()
+                || branch.getGeneratorReactivePowerControl().isPresent();
+    }
+
+    /**
+     * Mergeability is decided on the connected components of the graph including the disabled zero impedance branches
+     * (the ones that could be closed later), so that it is stable whatever the switches opened or closed afterward.
+     */
+    private static Set<LfBus> findMergeableBuses(LfNetwork network, LoadFlowModel loadFlowModel) {
+        var potentialGraph = createZeroImpedanceSubGraph(network, loadFlowModel, true);
+        Set<LfBus> mergeableBuses = new HashSet<>();
+        for (Set<LfBus> connectedSet : new ConnectivityInspector<>(potentialGraph).connectedSets()) {
+            boolean mergeable = connectedSet.stream().allMatch(bus -> isMergeableBus(network, bus))
+                    && connectedSet.stream().flatMap(bus -> potentialGraph.edgesOf(bus).stream()).noneMatch(LfZeroImpedanceNetwork::isControlBranch);
+            if (mergeable) {
+                mergeableBuses.addAll(connectedSet);
+            }
+        }
+        return mergeableBuses;
+    }
+
+    private static Graph<LfBus, LfBranch> createZeroImpedanceSubGraph(LfNetwork network, LoadFlowModel loadFlowModel, boolean includeDisabledBranches) {
         Graph<LfBus, LfBranch> subGraph = new Pseudograph<>(LfBranch.class);
         for (LfBranch branch : network.getBranches()) {
             LfBus bus1 = branch.getBus1();
@@ -81,12 +166,63 @@ public class LfZeroImpedanceNetwork {
                 if (!subGraph.containsVertex(bus2)) {
                     subGraph.addVertex(bus2);
                 }
-                if (!branch.isDisabled()) {
+                if (includeDisabledBranches || !branch.isDisabled()) {
                     subGraph.addEdge(bus1, bus2, branch);
                 }
             }
         }
         return subGraph;
+    }
+
+    public boolean isMerged() {
+        return merged && network.isZeroImpedanceBusMerging();
+    }
+
+    /**
+     * @return the bus holding the voltage variables and the power balance equations of all the buses of this zero
+     * impedance network, when merged
+     */
+    public LfBus getRepresentative() {
+        return representative;
+    }
+
+    public static boolean isMerged(LfBus bus) {
+        LfZeroImpedanceNetwork zn = bus.getZeroImpedanceNetwork(LoadFlowModel.AC);
+        return zn != null && zn.isMerged();
+    }
+
+    public static boolean isMerged(LfBranch branch) {
+        return branch.isZeroImpedance(LoadFlowModel.AC)
+                && branch.getBus1() != null && branch.getBus2() != null
+                && isMerged(branch.getBus1()) && isMerged(branch.getBus2());
+    }
+
+    /**
+     * @return true if the bus is merged with other buses and is not the representative one
+     */
+    public static boolean isMergedDependent(LfBus bus) {
+        LfZeroImpedanceNetwork zn = bus.getZeroImpedanceNetwork(LoadFlowModel.AC);
+        return zn != null && zn.isMerged() && zn.representative != bus;
+    }
+
+    public double getMergedTargetP() {
+        double targetP = 0;
+        for (LfBus bus : graph.vertexSet()) {
+            if (!bus.isDisabled()) {
+                targetP += bus.getTargetP();
+            }
+        }
+        return targetP;
+    }
+
+    public double getMergedTargetQ() {
+        double targetQ = 0;
+        for (LfBus bus : graph.vertexSet()) {
+            if (!bus.isDisabled()) {
+                targetQ += bus.getTargetQ();
+            }
+        }
+        return targetQ;
     }
 
     public LfNetwork getNetwork() {
@@ -184,7 +320,7 @@ public class LfZeroImpedanceNetwork {
             List<LfZeroImpedanceNetwork> splitZns = new ArrayList<>(2);
             for (Set<LfBus> connectedSet : connectedSets) {
                 var subGraph = createSubgraph(graph, connectedSet);
-                splitZns.add(new LfZeroImpedanceNetwork(network, loadFlowModel, subGraph));
+                splitZns.add(new LfZeroImpedanceNetwork(network, loadFlowModel, subGraph, merged));
             }
             zeroImpedanceNetworks.addAll(splitZns);
 
@@ -214,7 +350,7 @@ public class LfZeroImpedanceNetwork {
         mergedGraph.addEdge(enabledBranch.getBus1(), enabledBranch.getBus2(), enabledBranch);
         zeroImpedanceNetworks.remove(zn1);
         zeroImpedanceNetworks.remove(zn2);
-        LfZeroImpedanceNetwork mergedZn = new LfZeroImpedanceNetwork(network, loadFlowModel, mergedGraph);
+        LfZeroImpedanceNetwork mergedZn = new LfZeroImpedanceNetwork(network, loadFlowModel, mergedGraph, zn1.merged && zn2.merged);
         zeroImpedanceNetworks.add(mergedZn);
 
         for (LfNetworkListener listener : network.getListeners()) {
@@ -229,6 +365,7 @@ public class LfZeroImpedanceNetwork {
     @Override
     public String toString() {
         return "LfZeroImpedanceNetwork(loadFlowModel=" + loadFlowModel
+                + ", merged=" + merged
                 + ", buses=" + graph.vertexSet()
                 + ", branches=" + graph.edgeSet()
                 + ")";

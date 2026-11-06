@@ -71,10 +71,20 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
         targets[equation.getColumn()] -= equation.rhs();
     }
 
+    private static double getBusTargetP(LfBus bus) {
+        LfZeroImpedanceNetwork zn = bus.getZeroImpedanceNetwork(LoadFlowModel.AC);
+        return zn != null && zn.isMerged() ? zn.getMergedTargetP() : bus.getTargetP();
+    }
+
+    private static double getBusTargetQ(LfBus bus) {
+        LfZeroImpedanceNetwork zn = bus.getZeroImpedanceNetwork(LoadFlowModel.AC);
+        return zn != null && zn.isMerged() ? zn.getMergedTargetQ() : bus.getTargetQ();
+    }
+
     public static void init(AcEquationType equationType, int column, int elementNum, LfNetwork network, double[] targets) {
         switch (equationType) {
             case BUS_TARGET_P:
-                targets[column] = network.getBus(elementNum).getTargetP();
+                targets[column] = getBusTargetP(network.getBus(elementNum));
                 break;
 
             case BUS_DISTR_SLACK_P:
@@ -84,7 +94,7 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
                 break;
 
             case BUS_TARGET_Q:
-                targets[column] = network.getBus(elementNum).getTargetQ();
+                targets[column] = getBusTargetQ(network.getBus(elementNum));
                 break;
 
             case BUS_TARGET_V:

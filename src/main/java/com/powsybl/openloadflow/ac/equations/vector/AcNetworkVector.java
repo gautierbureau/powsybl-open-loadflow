@@ -111,6 +111,21 @@ public class AcNetworkVector extends AbstractLfNetworkListener
             }
         }
 
+        // buses merged with another one (variable alias) are not in the index: they share the row of the variable
+        // they are merged with
+        for (Variable<AcVariableType> v : equationSystem.getVariableSet().getVariables()) {
+            if (v.getAlias() != null) {
+                int num = v.getElementNum();
+                switch (v.getType()) {
+                    case BUS_V -> busVector.vRow[num] = v.getRow();
+                    case BUS_PHI -> busVector.phRow[num] = v.getRow();
+                    default -> {
+                        // nothing to do
+                    }
+                }
+            }
+        }
+
         copyVariablesToBranches();
 
         stopwatch.stop();
@@ -313,7 +328,8 @@ public class AcNetworkVector extends AbstractLfNetworkListener
 
     @Override
     public void onEquationIndexOrderChanged() {
-        // nothing to do
+        // rows may have been reassigned (variable aliases change)
+        variablesInvalid = true;
     }
 
     @Override

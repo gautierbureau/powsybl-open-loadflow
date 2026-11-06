@@ -51,7 +51,7 @@ public abstract class AbstractEquationTerm<V extends Enum<V> & Quantity, E exten
 
     @Override
     public void setEquation(Equation<V, E> equation) {
-        this.equation = Objects.requireNonNull(equation);
+        this.equation = equation; // null when the term is detached from its equation, before being moved to another one
     }
 
     @Override

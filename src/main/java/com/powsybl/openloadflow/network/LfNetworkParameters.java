@@ -82,6 +82,8 @@ public class LfNetworkParameters {
 
     private boolean minImpedance = false;
 
+    private boolean zeroImpedanceBusMerging = true;
+
     private boolean twtSplitShuntAdmittance = false;
 
     private boolean breakers = false;
@@ -181,6 +183,7 @@ public class LfNetworkParameters {
         this.connectivityFactory = other.connectivityFactory;
         this.generatorVoltageRemoteControl = other.generatorVoltageRemoteControl;
         this.minImpedance = other.minImpedance;
+        this.zeroImpedanceBusMerging = other.zeroImpedanceBusMerging;
         this.twtSplitShuntAdmittance = other.twtSplitShuntAdmittance;
         this.breakers = other.breakers;
         this.plausibleActivePowerLimit = other.plausibleActivePowerLimit;
@@ -258,6 +261,20 @@ public class LfNetworkParameters {
 
     public boolean isMinImpedance() {
         return minImpedance;
+    }
+
+    public boolean isZeroImpedanceBusMerging() {
+        return zeroImpedanceBusMerging;
+    }
+
+    /**
+     * When enabled, buses connected by zero impedance branches (and not involved in any voltage control) share the
+     * same voltage variables and power balance equations in the AC equation system, instead of being coupled by
+     * additional equations and dummy flow variables.
+     */
+    public LfNetworkParameters setZeroImpedanceBusMerging(boolean zeroImpedanceBusMerging) {
+        this.zeroImpedanceBusMerging = zeroImpedanceBusMerging;
+        return this;
     }
 
     public LfNetworkParameters setMinImpedance(boolean minImpedance) {
@@ -700,6 +717,7 @@ public class LfNetworkParameters {
                 ", connectivityFactory=" + connectivityFactory.getClass().getSimpleName() +
                 ", generatorVoltageRemoteControl=" + generatorVoltageRemoteControl +
                 ", minImpedance=" + minImpedance +
+                ", zeroImpedanceBusMerging=" + zeroImpedanceBusMerging +
                 ", twtSplitShuntAdmittance=" + twtSplitShuntAdmittance +
                 ", breakers=" + breakers +
                 ", plausibleActivePowerLimit=" + plausibleActivePowerLimit +
