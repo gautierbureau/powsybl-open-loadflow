@@ -56,6 +56,7 @@ class SecondaryVoltageControlTest {
     private static final String COMPONENT_VS_SCALING_ITERATION_COUNT = "29/15";
     private static final String STALL_VS_BLOCKED_ITERATION_COUNT = "8/6";
     private static final double PINNED_TEST_BOUND = 1.06;
+    private static final String PARTICIPATION_FACTOR_TEST_EXPECTED = "12.576/43.177/0.419";
     private static final String PINNED_TEST_EXPECTED = "5/12451/12720/21200 4/12452/12720/21200";
 
     private final CommonTestConfig commonTestConfig;
@@ -1116,5 +1117,30 @@ class SecondaryVoltageControlTest {
         String pinnedState = result.getComponentResults().get(0).getIterationCount() + "/" + Math.round(b10.getV() * 1000) + "/" + Math.round(b6.getV() * 1000) + "/" + Math.round(b8.getV() * 1000);
         assertEquals(PINNED_TEST_EXPECTED, defaultState + " " + pinnedState);
         assertVoltageEquals(PINNED_TEST_BOUND * b8.getVoltageLevel().getNominalV(), b8); // pinned at the bound
+    }
+
+    @Test
+    void testParticipationFactorFromNetwork() {
+        // participation factors stored in the IIDM extension (Mvar) are used as qr in Q/Qr mode instead of the default
+        // half reactive range: with qr = 30 on B6-G (default 15) and 103 on B8-G (its default) the level is shared
+        // differently from testQQrAlignmentMode, and B6-G is bounded to [-30, 30] Mvar instead of [-15, 15]
+        network.newExtension(SecondaryVoltageControlAdder.class)
+                .newControlZone()
+                .withName("z1")
+                .newPilotPoint().withTargetV(13).withBusbarSectionsOrBusesIds(List.of("B10")).add()
+                .newControlUnit().withId("B6-G").withParticipationFactor(30).add()
+                .newControlUnit().withId("B8-G").withParticipationFactor(103).add()
+                .add()
+                .add();
+        parametersExt.setSecondaryVoltageControl(true)
+                .setSecondaryVoltageControlAlignmentMode(LfSecondaryVoltageControl.AlignmentMode.Q_QR);
+
+        LoadFlowResult result = loadFlowRunner.run(network, parameters);
+        assertEquals(LoadFlowResult.ComponentResult.Status.CONVERGED, result.getComponentResults().get(0).getStatus());
+        assertVoltageEquals(13, b10);
+        double level6 = -g6.getTerminal().getQ() / 30;
+        double level8 = -g8.getTerminal().getQ() / 103;
+        assertEquals(level6, level8, 1e-3); // aligned on q / qr with the network participation factors
+        assertEquals(PARTICIPATION_FACTOR_TEST_EXPECTED, String.format(java.util.Locale.ROOT, "%.3f/%.3f/%.3f", -g6.getTerminal().getQ(), -g8.getTerminal().getQ(), level6));
     }
 }

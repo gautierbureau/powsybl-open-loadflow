@@ -1616,12 +1616,24 @@ public class LfNetworkLoaderImpl implements LfNetworkLoader<Network> {
                 controlUnitsWithoutControllerBus.add(controlUnit.controlUnit().getId());
                 continue;
             }
-            lfControlUnits.add(new LfSecondaryVoltageControl.ControlUnit(controlUnit.controlUnit().getId(),
-                    controlUnit.participate(), splitGeneratorVoltageControl));
+            var lfControlUnit = new LfSecondaryVoltageControl.ControlUnit(controlUnit.controlUnit().getId(),
+                    controlUnit.participate(), splitGeneratorVoltageControl);
+            // participation factor (Qr, in MVar) of the IIDM extension when defined, otherwise the default (half of
+            // the reactive range) applies
+            double participationFactor = controlUnit.controlUnit().getParticipationFactor();
+            if (!Double.isNaN(participationFactor)) {
+                lfControlUnit.setParticipationFactor(participationFactor / PerUnit.SB);
+            }
+            lfControlUnits.add(lfControlUnit);
         }
         if (!controlUnitsWithoutControllerBus.isEmpty()) {
             LOGGER.debug("Control units {} of control zone '{}' have been discarded because they are not controller buses of a generator voltage control",
                     controlUnitsWithoutControllerBus, controlZone.getName());
+        }
+        if (LOGGER.isDebugEnabled()) {
+            long withFactor = lfControlUnits.stream().filter(u -> !Double.isNaN(u.getParticipationFactor())).count();
+            LOGGER.debug("{}/{} control units of control zone '{}' have a participation factor defined in the network, the others use half of their reactive range",
+                    withFactor, lfControlUnits.size(), controlZone.getName());
         }
         return lfControlUnits;
     }
