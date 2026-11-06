@@ -48,7 +48,12 @@ public class LfZeroImpedanceNetwork {
         this.loadFlowModel = Objects.requireNonNull(loadFlowModel);
         this.graph = Objects.requireNonNull(graph);
         this.merged = merged;
-        this.representative = graph.vertexSet().stream().min(Comparator.comparingInt(LfElement::getNum)).orElse(null);
+        // the slack bus (whose active power balance equation is inactive) or the reference bus is preferred as
+        // representative, so that these special equations are the ones of the representative bus
+        this.representative = graph.vertexSet().stream()
+                .min(Comparator.<LfBus>comparingInt(bus -> merged && bus.isSlack() ? 0 : merged && bus.isReference() ? 1 : 2)
+                        .thenComparingInt(LfElement::getNum))
+                .orElse(null);
         for (LfBus bus : graph.vertexSet()) {
             bus.setZeroImpedanceNetwork(loadFlowModel, this);
         }
@@ -87,27 +92,45 @@ public class LfZeroImpedanceNetwork {
         return zeroImpedanceNetworks;
     }
 
+    private static boolean isGeneratorVoltageController(LfBus bus) {
+        return bus.getGeneratorVoltageControl()
+                .map(vc -> vc.getControllerElements().contains(bus))
+                .orElse(false);
+    }
+
     /**
-     * A bus can be merged with the buses it is connected to by zero impedance branches if it is not involved in any
-     * control (so that its own power balance is never needed), nor is a slack or reference bus.
+     * A bus can be merged with the buses it is connected to by zero impedance branches if it is not a controller
+     * of any control (the reactive power injection of a controller bus is needed by the control equations, and it
+     * is only defined bus by bus with the dummy flows of the zero impedance branches). A bus that is only controlled
+     * (its voltage is a target of controllers located elsewhere) can be merged: the target equation simply applies
+     * to the shared voltage variable. A slack bus can be merged too, as long as it is the only slack bus of its
+     * synchronous network: it is then the representative bus, with an inactive active power balance equation.
      */
-    private static boolean isMergeableBus(LfBus bus) {
-        return !bus.isSlack()
-                && !bus.isReference()
-                && bus.getVoltageControls().isEmpty()
-                && bus.getGeneratorVoltageControl().isEmpty()
+    private static boolean isMergeableBus(LfNetwork network, LfBus bus) {
+        if (bus.isSlack() && network.getSynchronousNetwork(bus.getNumSC()).getSlackBuses().size() > 1) {
+            return false; // active power distribution equations between slack buses are not supported
+        }
+        return !isGeneratorVoltageController(bus)
                 && bus.getGeneratorReactivePowerControl().isEmpty()
                 && !bus.hasGeneratorsWithSlope()
                 && bus.getControllerShunt().isEmpty()
                 && bus.getSvcShunt().isEmpty();
     }
 
+    public boolean hasSlackBus() {
+        return graph.vertexSet().stream().anyMatch(LfBus::isSlack);
+    }
+
     /**
      * A zero impedance branch involved in a control (its flow is a dummy variable used by the control equations)
-     * prevents merging.
+     * prevents merging, as well as a zero impedance branch with a ratio or a phase shift (its buses do not share the
+     * same voltage: v1 = rho * v2).
      */
     private static boolean isControlBranch(LfBranch branch) {
-        return branch.isVoltageController()
+        PiModel piModel = branch.getPiModel();
+        return piModel.getR1() != PiModel.R2
+                || piModel.getA1() != 0
+                || branch.isVoltageController()
                 || branch.isPhaseController() || branch.isPhaseControlled()
                 || branch.isTransformerReactivePowerController() || branch.isTransformerReactivePowerControlled()
                 || branch.getGeneratorReactivePowerControl().isPresent();
@@ -121,7 +144,7 @@ public class LfZeroImpedanceNetwork {
         var potentialGraph = createZeroImpedanceSubGraph(network, loadFlowModel, true);
         Set<LfBus> mergeableBuses = new HashSet<>();
         for (Set<LfBus> connectedSet : new ConnectivityInspector<>(potentialGraph).connectedSets()) {
-            boolean mergeable = connectedSet.stream().allMatch(LfZeroImpedanceNetwork::isMergeableBus)
+            boolean mergeable = connectedSet.stream().allMatch(bus -> isMergeableBus(network, bus))
                     && connectedSet.stream().flatMap(bus -> potentialGraph.edgesOf(bus).stream()).noneMatch(LfZeroImpedanceNetwork::isControlBranch);
             if (mergeable) {
                 mergeableBuses.addAll(connectedSet);

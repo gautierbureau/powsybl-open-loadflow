@@ -43,6 +43,14 @@ public class AcEquationSystemUpdater extends AbstractEquationSystemUpdater<AcVar
         return LfZeroImpedanceNetwork.isMerged(branch);
     }
 
+    @Override
+    public void onSlackBusChange(LfBus bus, boolean slack) {
+        super.onSlackBusChange(bus, slack);
+        if (merger != null) {
+            merger.onSlackBusChange(bus);
+        }
+    }
+
     private void updateVoltageControls(LfBus bus) {
         LfZeroImpedanceNetwork zn = bus.getZeroImpedanceNetwork(loadFlowModel);
         if (zn == null) {

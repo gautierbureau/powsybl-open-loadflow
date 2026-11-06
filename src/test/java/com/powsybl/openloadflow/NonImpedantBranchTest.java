@@ -82,7 +82,9 @@ class NonImpedantBranchTest extends AbstractLoadFlowNetworkFactory {
         assertVoltageEquals(1, b1);
         assertVoltageEquals(0.858, b2);
         assertVoltageEquals(0.858, b3);
-        assertAngleEquals(13.36967, b1);
+        // b2 and b3 are merged in the equation system: the Newton-Raphson stopping threshold (scaling with the number
+        // of equations) is tighter, one more iteration (13.520904 instead of 13.36967, both 13.52185 with a 1e-9 tolerance)
+        assertAngleEquals(13.520904, b1);
         assertAngleEquals(0, b2);
         assertAngleEquals(0, b3);
 

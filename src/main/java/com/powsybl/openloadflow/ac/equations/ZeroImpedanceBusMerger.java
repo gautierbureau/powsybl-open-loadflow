@@ -137,8 +137,23 @@ public class ZeroImpedanceBusMerger {
             }
         }
         boolean active = !representative.isDisabled();
-        pEq.setActive(active);
+        pEq.setActive(active && !zn.hasSlackBus());
         qEq.setActive(active);
+    }
+
+    /**
+     * To call after a slack bus change: the active power balance equation of a merged group is the one of the
+     * representative bus, and it has to be inactive as soon as the group contains a slack bus.
+     */
+    public void onSlackBusChange(LfBus bus) {
+        LfZeroImpedanceNetwork zn = bus.getZeroImpedanceNetwork(LoadFlowModel.AC);
+        if (zn != null && zn.isMerged()) {
+            LfBus representative = zn.getRepresentative();
+            getEquation(representative, AcEquationType.BUS_TARGET_P).setActive(!representative.isDisabled() && !zn.hasSlackBus());
+            if (bus != representative) {
+                getEquation(bus, AcEquationType.BUS_TARGET_P).setActive(false);
+            }
+        }
     }
 
     /**
@@ -149,6 +164,11 @@ public class ZeroImpedanceBusMerger {
         if (LfZeroImpedanceNetwork.isMergedDependent(bus)) {
             getEquation(bus, AcEquationType.BUS_TARGET_P).setActive(false);
             getEquation(bus, AcEquationType.BUS_TARGET_Q).setActive(false);
+        } else {
+            LfZeroImpedanceNetwork zn = bus.getZeroImpedanceNetwork(LoadFlowModel.AC);
+            if (zn != null && zn.isMerged() && zn.hasSlackBus()) {
+                getEquation(bus, AcEquationType.BUS_TARGET_P).setActive(false);
+            }
         }
     }
 }

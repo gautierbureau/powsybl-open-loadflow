@@ -968,6 +968,11 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     @Override
     public double getMismatchP() {
+        LfZeroImpedanceNetwork zn = zeroImpedanceNetwork.get(LoadFlowModel.AC);
+        if (zn != null && zn.isMerged()) {
+            // the balance of a merged group is the one of its representative bus
+            return zn.getRepresentative().getP().eval() - zn.getMergedTargetP();
+        }
         return p.eval() - getTargetP(); // slack bus can also have real injection connected
     }
 
