@@ -62,6 +62,14 @@ public class AcVectorizedEquationSystemCreator extends AcEquationSystemCreator {
         closedP2Array.compress();
         closedQ1Array.compress();
         closedQ2Array.compress();
+
+        // bus merging needs the term arrays to be compressed (to list the terms of each equation)
+        merger.mergeAll();
+    }
+
+    @Override
+    protected void mergeZeroImpedanceBuses() {
+        // done later, once term arrays are compressed
     }
 
     @Override

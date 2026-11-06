@@ -53,10 +53,6 @@ public class AcLoadFlowContext extends AbstractLoadFlowContext<AcVariableType, A
     }
 
     private AcEquationSystemCreator createAcEquationSystemCreator() {
-        if (parameters.isVectorized()) {
-            // merging of buses connected by zero impedance branches is not supported with equation arrays
-            network.setZeroImpedanceBusMerging(false);
-        }
         return parameters.isVectorized() ? new AcVectorizedEquationSystemCreator(network, parameters.getEquationSystemCreationParameters())
                                          : new AcEquationSystemCreator(network, parameters.getEquationSystemCreationParameters());
     }

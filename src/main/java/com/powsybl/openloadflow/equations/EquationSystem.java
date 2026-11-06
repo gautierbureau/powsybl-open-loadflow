@@ -116,6 +116,9 @@ public class EquationSystem<V extends Enum<V> & Quantity, E extends Enum<E> & Qu
         for (SingleEquation<V, E> equation : equations.values()) {
             equation.invalidateDerivativeCache();
         }
+        for (EquationArray<V, E> equationArray : equationArrays.values()) {
+            equationArray.invalidateEquationDerivativeVectors();
+        }
         index.onVariableAliasChange();
     }
 

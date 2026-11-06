@@ -35,6 +35,8 @@ public class AcEquationSystemCreator {
 
     protected final AcEquationSystemCreationParameters creationParameters;
 
+    protected ZeroImpedanceBusMerger merger;
+
     public AcEquationSystemCreator(LfNetwork network) {
         this(network, new AcEquationSystemCreationParameters());
     }
@@ -1306,10 +1308,14 @@ public class AcEquationSystemCreator {
         EquationSystemPostProcessor.findAll().forEach(pp -> pp.onCreate(equationSystem));
 
         // merge buses connected by zero impedance branches, where possible
-        ZeroImpedanceBusMerger merger = new ZeroImpedanceBusMerger(network, equationSystem);
-        merger.mergeAll();
+        merger = new ZeroImpedanceBusMerger(network, equationSystem);
+        mergeZeroImpedanceBuses();
 
         network.addListener(LfNetworkListenerTracer.trace(new AcEquationSystemUpdater(equationSystem, creationParameters, merger)));
+    }
+
+    protected void mergeZeroImpedanceBuses() {
+        merger.mergeAll();
     }
 
     public EquationSystem<AcVariableType, AcEquationType> create() {

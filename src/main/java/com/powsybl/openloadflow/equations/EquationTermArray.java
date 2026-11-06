@@ -75,6 +75,9 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
     // for each term number, list of derivative variables
     private final List<List<Derivative<V>>> termDerivatives = new ArrayList<>();
 
+    // true when terms have been moved to another equation element since last compression
+    private boolean dirty = false;
+
     public EquationTermArray(ElementType elementType, Evaluator<V> evaluator) {
         this.elementType = Objects.requireNonNull(elementType);
         this.evaluator = Objects.requireNonNull(evaluator);
@@ -104,12 +107,56 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
         return termNumsByEquationElementNum[equationElementNum];
     }
 
+    private void ensureCompressed() {
+        if (dirty && termNumsConcatenated != null) {
+            compress();
+        }
+    }
+
     public int[] getTermNumsConcatenatedStartIndices() {
+        ensureCompressed();
         return termNumsConcatenatedStartIndices;
     }
 
     public TIntArrayList getTermNumsConcatenated() {
+        ensureCompressed();
         return termNumsConcatenated;
+    }
+
+    public int getEquationElementNumOfTermElement(int termElementNum) {
+        int termNum = termNumByTermElementNum.get(termElementNum);
+        if (termNum == -1) {
+            throw new PowsyblException("Array term element num not found");
+        }
+        return equationElementNums.getQuick(termNum);
+    }
+
+    /**
+     * Move a term to another equation of the array (used when buses connected by zero impedance branches are merged:
+     * the terms of a bus are moved to the equation of the representative bus).
+     */
+    public void moveTermElement(int termElementNum, int newEquationElementNum) {
+        int termNum = termNumByTermElementNum.get(termElementNum);
+        if (termNum == -1) {
+            throw new PowsyblException("Array term element num not found");
+        }
+        int oldEquationElementNum = equationElementNums.getQuick(termNum);
+        if (oldEquationElementNum == newEquationElementNum) {
+            return;
+        }
+        boolean active = isTermActive(termNum);
+        if (active && equationArray.isElementActive(oldEquationElementNum)) {
+            // variables of the term are not referenced anymore from the old equation
+            equationArray.getEquationSystem().notifyEquationTermArrayChange(this, termNum, EquationTermEventType.EQUATION_TERM_DEACTIVATED);
+        }
+        termNumsByEquationElementNum[oldEquationElementNum].remove(termNum);
+        termNumsByEquationElementNum[newEquationElementNum].add(termNum);
+        equationElementNums.setQuick(termNum, newEquationElementNum);
+        dirty = true;
+        equationArray.invalidateEquationDerivativeVectors();
+        if (active && equationArray.isElementActive(newEquationElementNum)) {
+            equationArray.getEquationSystem().notifyEquationTermArrayChange(this, termNum, EquationTermEventType.EQUATION_TERM_ACTIVATED);
+        }
     }
 
     public boolean isTermActive(int termNum) {
@@ -157,6 +204,7 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
         termNumsConcatenatedStartIndices[termNumsByEquationElementNum.length] = termNumsConcatenated.size();
 
         this.termNumByTermElementNum = new TIntIntHashMap(this.termNumByTermElementNum);
+        dirty = false;
     }
 
     public double[] eval() {
@@ -210,6 +258,14 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
 
         public Evaluator<V> getEvaluator() {
             return equationTermArray.evaluator;
+        }
+
+        public EquationTermArray<V, E> getEquationTermArray() {
+            return equationTermArray;
+        }
+
+        public int getTermElementNum() {
+            return termElementNum;
         }
 
         @Override
@@ -294,6 +350,7 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
     }
 
     public boolean write(Writer writer, boolean writeInactiveTerms, int elementNum, boolean first) throws IOException {
+        ensureCompressed();
         int iStart = termNumsConcatenatedStartIndices[elementNum];
         int iEnd = termNumsConcatenatedStartIndices[elementNum + 1];
         boolean isFirst = first;

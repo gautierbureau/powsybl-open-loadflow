@@ -7,10 +7,8 @@
  */
 package com.powsybl.openloadflow.ac.equations;
 
-import com.powsybl.openloadflow.equations.EquationSystem;
-import com.powsybl.openloadflow.equations.EquationTerm;
-import com.powsybl.openloadflow.equations.SingleEquation;
-import com.powsybl.openloadflow.equations.Variable;
+import com.powsybl.commons.PowsyblException;
+import com.powsybl.openloadflow.equations.*;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfZeroImpedanceNetwork;
@@ -29,6 +27,7 @@ import java.util.Objects;
  * representative bus equations. The zero impedance branches of such a network have no equation at all.
  * When a zero impedance network is split or merged (switch opening or closing), terms and aliases are reassigned
  * to the new representative buses.
+ * Works with both single equations and equation arrays (vectorized equation system).
  */
 public class ZeroImpedanceBusMerger {
 
@@ -48,8 +47,8 @@ public class ZeroImpedanceBusMerger {
         this.equationSystem = Objects.requireNonNull(equationSystem);
     }
 
-    private SingleEquation<AcVariableType, AcEquationType> getEquation(LfBus bus, AcEquationType type) {
-        return (SingleEquation<AcVariableType, AcEquationType>) equationSystem.getEquation(bus.getNum(), type).orElseThrow();
+    private Equation<AcVariableType, AcEquationType> getEquation(LfBus bus, AcEquationType type) {
+        return equationSystem.getEquation(bus.getNum(), type).orElseThrow();
     }
 
     /**
@@ -88,17 +87,33 @@ public class ZeroImpedanceBusMerger {
         }
     }
 
-    private void moveTerms(List<EquationTerm<AcVariableType, AcEquationType>> terms, SingleEquation<AcVariableType, AcEquationType> target) {
-        if (terms == null) {
-            return;
+    private void moveTerm(EquationTerm<AcVariableType, AcEquationType> term, Equation<AcVariableType, AcEquationType> target) {
+        if (term instanceof EquationTermArray.EquationTermArrayElementImpl<AcVariableType, AcEquationType> arrayElement) {
+            // vectorized term: just re-point it to the target equation of the array
+            arrayElement.getEquationTermArray().moveTermElement(arrayElement.getTermElementNum(), target.getElementNum());
+        } else if (term instanceof SingleEquationTerm<AcVariableType, AcEquationType> singleTerm) {
+            Equation<AcVariableType, AcEquationType> current = singleTerm.getEquation();
+            if (current != null && current.getType() == target.getType() && current.getElementNum() == target.getElementNum()) {
+                return;
+            }
+            if (current instanceof SingleEquation<AcVariableType, AcEquationType> singleEquation) {
+                singleEquation.removeTerm(singleTerm);
+            } else if (current != null) {
+                // additional single term of an equation array
+                equationSystem.getEquationArray(current.getType())
+                        .orElseThrow()
+                        .removeSingleTerm(current.getElementNum(), singleTerm);
+            }
+            target.addTerm(singleTerm);
+        } else {
+            throw new PowsyblException("Unsupported equation term: " + term);
         }
-        for (EquationTerm<AcVariableType, AcEquationType> term : terms) {
-            SingleEquation<AcVariableType, AcEquationType> current = (SingleEquation<AcVariableType, AcEquationType>) term.getEquation();
-            if (current != target) {
-                if (current != null) {
-                    current.removeTerm(term);
-                }
-                target.addTerm(term);
+    }
+
+    private void moveTerms(List<EquationTerm<AcVariableType, AcEquationType>> terms, Equation<AcVariableType, AcEquationType> target) {
+        if (terms != null) {
+            for (EquationTerm<AcVariableType, AcEquationType> term : terms) {
+                moveTerm(term, target);
             }
         }
     }
@@ -121,13 +136,9 @@ public class ZeroImpedanceBusMerger {
                 getEquation(bus, AcEquationType.BUS_TARGET_Q).setActive(false);
             }
         }
-        updateRepresentativeEquations(representative);
-    }
-
-    private void updateRepresentativeEquations(LfBus representative) {
         boolean active = !representative.isDisabled();
-        getEquation(representative, AcEquationType.BUS_TARGET_P).setActive(active);
-        getEquation(representative, AcEquationType.BUS_TARGET_Q).setActive(active);
+        pEq.setActive(active);
+        qEq.setActive(active);
     }
 
     /**
@@ -139,9 +150,5 @@ public class ZeroImpedanceBusMerger {
             getEquation(bus, AcEquationType.BUS_TARGET_P).setActive(false);
             getEquation(bus, AcEquationType.BUS_TARGET_Q).setActive(false);
         }
-    }
-
-    public static Variable<AcVariableType> resolve(Variable<AcVariableType> variable) {
-        return variable.resolve();
     }
 }

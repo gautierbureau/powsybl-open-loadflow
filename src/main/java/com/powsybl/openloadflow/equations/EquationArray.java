@@ -113,6 +113,44 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         return elementCount;
     }
 
+    /**
+     * Remove an additional single term from an equation of the array (used when buses connected by zero impedance
+     * branches are merged: the terms of a bus are moved to the equation of the representative bus).
+     */
+    public void removeSingleTerm(int elementNum, SingleEquationTerm<V, E> term) {
+        Objects.requireNonNull(term);
+        AdditionalSingleTermsByEquation additionalTerms = singleTermsByEquationElementNum.get(elementNum);
+        if (additionalTerms == null || !additionalTerms.terms.contains(term)) {
+            throw new PowsyblException("Equation term does not belong to this equation");
+        }
+        // notify while the term is still attached, so that the index can update the variables reference counts
+        equationSystem.notifyEquationTermChange(term, EquationTermEventType.EQUATION_TERM_REMOVED);
+        additionalTerms.terms.remove(term);
+        for (Variable<V> v : term.getVariables()) {
+            List<SingleEquationTerm<V, E>> termsOfVariable = additionalTerms.termsByVariable.get(v);
+            if (termsOfVariable != null) {
+                termsOfVariable.remove(term);
+                if (termsOfVariable.isEmpty()) {
+                    additionalTerms.termsByVariable.remove(v);
+                }
+            }
+        }
+        List<SingleEquationTerm<V, E>> termsOfElement = singleTermsByTermElementNum.get(term.getElementNum());
+        if (termsOfElement != null) {
+            termsOfElement.remove(term);
+            if (termsOfElement.isEmpty()) {
+                singleTermsByTermElementNum.remove(term.getElementNum());
+            }
+        }
+        if (additionalTerms.terms.isEmpty()) {
+            singleTermsByEquationElementNum.remove(elementNum);
+            hasSingleEquationTerms[elementNum] = false;
+        }
+        matrixElementIndexes.reset();
+        equationSystem.removeEquationTerm(term);
+        term.setEquation(null);
+    }
+
     public List<SingleEquationTerm<V, E>> getSingleEquationTerms(int elementNum) {
         if (hasSingleEquationTerms[elementNum]) {
             return singleTermsByEquationElementNum.get(elementNum).terms;
@@ -425,8 +463,9 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
                 }
             }
         }
-        // Terms are sorted with variable comparator
-        terms.sort(Comparator.comparing(o -> o.derivative.getVariable()));
+        // Terms are sorted with variable comparator (on the variable actually solved, so that merged variables sharing
+        // a row are contiguous and their derivatives summed in a single matrix element)
+        terms.sort(Comparator.comparing(o -> o.derivative.getVariable().resolve()));
 
         allTerms.addAll(terms);
     }
@@ -514,15 +553,22 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
             }
 
             if (additionalTerms != null) {
+                // remaining variables of additional terms, grouped by row (several variables may share a row when merged)
                 for (Variable<V> v : additionalTerms.termsByVariable.keySet()) {
-                    if (v.getRow() != -1 && !computedRows.contains(v.getRow())) {
+                    int vRow = v.getRow();
+                    if (vRow != -1 && !computedRows.contains(vRow)) {
+                        computedRows.add(vRow);
                         value = 0;
-                        for (var term : additionalTerms.termsByVariable.get(v)) {
-                            if (term.isActive()) {
-                                value += term.der(v);
+                        for (Variable<V> v2 : additionalTerms.termsByVariable.keySet()) {
+                            if (v2.getRow() == vRow) {
+                                for (var term : additionalTerms.termsByVariable.get(v2)) {
+                                    if (term.isActive()) {
+                                        value += term.der(v2);
+                                    }
+                                }
                             }
                         }
-                        onDer(handler, column, v.getRow(), value, valueIndex);
+                        onDer(handler, column, vRow, value, valueIndex);
                         valueIndex++;
                     }
                 }
