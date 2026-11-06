@@ -210,8 +210,9 @@ public class JacobianMatrix<V extends Enum<V> & Quantity, E extends Enum<E> & Qu
             updateLu(allowIncrementalUpdate);
         } catch (MatrixException ex) {
             if (allowIncrementalUpdate) {
-                // Try another time without incremental
-                LOGGER.warn("Exception when updating LU matrix in incremental mode. Retrying without incremental mode");
+                // The pivot sequence of the previous factorization is no longer valid for the new values (typically
+                // a pivot that became an exact zero after an equation term has been disabled): factorize again
+                LOGGER.debug("Exception when updating LU matrix in incremental mode ({}). Retrying without incremental mode", ex.getMessage());
                 updateLu(false);
             } else {
                 // Rethrow the exception
@@ -231,12 +232,12 @@ public class JacobianMatrix<V extends Enum<V> & Quantity, E extends Enum<E> & Qu
                     initMatrix();
                     break;
 
-                case VALUES_INVALID:
+                case VALUES_INVALID, VALUES_AND_ZEROS_INVALID:
+                    // Even when some non zero values may have become zero, first try an incremental update
+                    // (refactorization reusing the previous pivot sequence): if a pivot is now zero, the refactorization
+                    // fails and the matrix is factorized again, and if a pivot is too small, the pivot growth check
+                    // triggers a new factorization
                     updateValues(true);
-                    break;
-
-                case VALUES_AND_ZEROS_INVALID:
-                    updateValues(false);
                     break;
 
                 default:

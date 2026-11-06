@@ -23,4 +23,5 @@ lfnetwork_loader_postprocessor.md
 external_ac_solver.md
 outerloop_configuration.md
 contingency_active_power_loss.md
+klu_lu_profiling.md
 ```
