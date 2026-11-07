@@ -945,7 +945,15 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         Stopwatch stopwatch = Stopwatch.createStarted();
 
         // restart LF on post contingency and post actions equation system
+        if (com.powsybl.openloadflow.ac.AcloadFlowEngine.OL_STATS) {
+            com.powsybl.openloadflow.ac.AcloadFlowEngine.lastRunStats();   // clear a stale record
+        }
         R result = createLoadFlowEngine(context).run();
+        if (com.powsybl.openloadflow.ac.AcloadFlowEngine.OL_STATS) {
+            // the same record for an operator strategy's load flow (CPU_OL_STATS covers the contingencies)
+            String st = com.powsybl.openloadflow.ac.AcloadFlowEngine.lastRunStats();
+            System.err.println("CPU_OL_STATS_OS os=" + operatorStrategy.getId() + " " + (st != null ? st : "nosolve"));
+        }
         PostContingencyComputationStatus status = postContingencyStatusFromLoadFlowResult(result);
         var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitScalings, securityAnalysisParameters.getIncreasedViolationsParameters());
         LoadFlowModel loadFlowModel = securityAnalysisParameters.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC;
