@@ -1580,6 +1580,61 @@ class OpenSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest {
     }
 
     @Test
+    void testContinuousPhaseControlAfterBaseTapRounding() {
+        // the base load flow rounds PS1 to the same tap from initial tap 6 as from 7, so the post-contingency results
+        // must be the same; the target P of the phase control is a flow term of its own, which kept the admittance of
+        // the initial tap after the rounding: from tap 6, the post-contingency phase shift then rounded one tap lower
+        SecurityAnalysisResult fromTap6 = runContinuousPhaseControlSecurityAnalysis(6);
+        SecurityAnalysisResult fromTap7 = runContinuousPhaseControlSecurityAnalysis(7);
+        assertEquals(fromTap7.getPreContingencyResult().getNetworkResult().getBranchResult("PS1").getP1(),
+                fromTap6.getPreContingencyResult().getNetworkResult().getBranchResult("PS1").getP1(), LoadFlowAssert.DELTA_POWER);
+        PostContingencyResult l1BisFromTap6 = getPostContingencyResult(fromTap6, "L1_BIS");
+        PostContingencyResult l1BisFromTap7 = getPostContingencyResult(fromTap7, "L1_BIS");
+        assertSame(PostContingencyComputationStatus.CONVERGED, l1BisFromTap6.getStatus());
+        assertSame(PostContingencyComputationStatus.CONVERGED, l1BisFromTap7.getStatus());
+        assertEquals(l1BisFromTap7.getNetworkResult().getBranchResult("PS1").getP1(),
+                l1BisFromTap6.getNetworkResult().getBranchResult("PS1").getP1(), LoadFlowAssert.DELTA_POWER);
+    }
+
+    private SecurityAnalysisResult runContinuousPhaseControlSecurityAnalysis(int initialTap) {
+        Network network = PhaseControlFactory.createNetworkWithT2wt();
+        // PS1 gets 21 taps of one degree, each with its own impedance
+        TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
+        PhaseTapChangerAdder adder = ps1.newPhaseTapChanger()
+                .setLowTapPosition(-10)
+                .setTapPosition(initialTap)
+                .setRegulationMode(PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL)
+                .setTargetDeadband(1)
+                .setRegulating(true)
+                .setRegulationTerminal(ps1.getTerminal1())
+                .setRegulationValue(83);
+        for (int tap = -10; tap <= 10; tap++) {
+            adder.beginStep().setAlpha(tap).setRho(1).setR(0.3 * (tap + 11)).setX(3 * (tap + 11)).setG(0).setB(0).endStep();
+        }
+        adder.add();
+        // a weaker parallel to L1: its outage moves the phase shift
+        Line l1 = network.getLine("L1");
+        network.newLine()
+                .setId("L1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId())
+                .setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId())
+                .setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR() * 2)
+                .setX(l1.getX() * 2)
+                .setG1(l1.getG1())
+                .setB1(l1.getB1())
+                .setG2(l1.getG2())
+                .setB2(l1.getB2())
+                .add();
+        LoadFlowParameters parameters = new LoadFlowParameters()
+                .setPhaseShifterRegulationOn(true);
+        OpenLoadFlowParameters.create(parameters)
+                .setPhaseShifterControlMode(OpenLoadFlowParameters.PhaseShifterControlMode.CONTINUOUS_WITH_DISCRETISATION);
+        return runSecurityAnalysis(network, List.of(Contingency.line("L1_BIS")), createAllBranchesMonitors(network), parameters);
+    }
+
+    @Test
     void testWithNonImpedantLineConnectedToSlackBus() {
         Network network = IeeeCdfNetworkFactory.create14();
         network.getLine("L1-2-1").setR(0).setX(0);

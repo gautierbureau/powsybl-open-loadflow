@@ -221,17 +221,23 @@ public class AcEquationSystemUpdater extends AbstractEquationSystemUpdater<AcVar
 
     @Override
     public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition) {
-        // TODO :
-        //  This code is not necessary with AcVectorizedEquationSystemCreator since values of closed branch terms are updated in AcBranchVector
-        //  It should be removed if vectorized parameter in AcLoadFlowParameters is removed
         if (branch.isConnectedSide1() && branch.isConnectedSide2()) { // Transformers that can change tap position should only be closed branches
             PiModel piModel = branch.getPiModel();
+            // TODO :
+            //  These six are not necessary with AcVectorizedEquationSystemCreator since values of closed branch terms are updated in AcBranchVector
+            //  They should be removed if vectorized parameter in AcLoadFlowParameters is removed
             updateAcClosedBranchEquationTerm(branch.getClosedP1(), piModel);
             updateAcClosedBranchEquationTerm(branch.getClosedQ1(), piModel);
             updateAcClosedBranchEquationTerm(branch.getClosedI1(), piModel);
             updateAcClosedBranchEquationTerm(branch.getClosedP2(), piModel);
             updateAcClosedBranchEquationTerm(branch.getClosedQ2(), piModel);
             updateAcClosedBranchEquationTerm(branch.getClosedI2(), piModel);
+            // the branch's other flow terms (the target P of its phase control, the target Q of a reactive power control,
+            // the reactive keys of a remote voltage control...) are their own instances, vectorized or not: without this
+            // they keep the admittance of the tap the equation system was created at
+            for (var term : equationSystem.getEquationTerms(ElementType.BRANCH, branch.getNum())) {
+                updateAcClosedBranchEquationTerm(term, piModel);
+            }
         }
     }
 
