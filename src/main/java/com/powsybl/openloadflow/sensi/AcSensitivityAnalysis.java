@@ -209,7 +209,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             activePowerDistribution.run(lfNetwork.getSynchronousNetworks().getFirst(), lfContingency.getActivePowerLoss());
         }
 
-        if (!runLoadFlow(context, false)) {
+        if (!runPostContingencyLoadFlow(context, lfContingency)) {
             // write contingency status
             resultWriter.writeStateStatus(contingencyIndex, -1, SensitivityAnalysisResult.Status.FAILURE);
             return;
@@ -238,7 +238,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         // solve system
         DenseMatrix factorsStates = initFactorsRhs(context.getEquationSystem(), factorGroups, participationByBus); // this is the rhs for the moment
         fillSvcPilotFactorsRhs(factorGroups, factorsStates, context);
-        context.getJacobianMatrix().solveTransposed(factorsStates);
+        solveFactorsStates(context, factorsStates, lfContingency);
         setFunctionReferences(lfFactors);
 
         // calculate sensitivity values
@@ -606,7 +606,37 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         }
     }
 
-    private static boolean runLoadFlow(AcLoadFlowContext context, boolean isRunningBaseSituation) {
+    /**
+     * Called once the base case is solved and its sensitivities written, with the contingency load flow parameters
+     * applied, before the first contingency is simulated: where a subclass prepares the contingencies' states (a batch
+     * solved together, for instance). Does nothing here.
+     */
+    protected void beforeContingencySimulations(LfNetwork lfNetwork, AcLoadFlowContext context, List<PropagatedContingency> contingencies,
+                                                LoadFlowParameters lfParameters, OpenLoadFlowParameters contingencyLfParametersExt) {
+        // nothing to prepare
+    }
+
+    /**
+     * Brings a contingency's state to its converged load flow, the contingency applied to the network (and its active
+     * power loss distributed when the slack is): runs the load flow here. False when it failed.
+     */
+    protected boolean runPostContingencyLoadFlow(AcLoadFlowContext context, LfContingency lfContingency) {
+        return runLoadFlow(context, false);
+    }
+
+    /**
+     * Solves the factor groups' right-hand sides in place, on the Jacobian of the state the load flow left: the base
+     * case ({@code lfContingency} null) or a contingency's.
+     */
+    protected void solveFactorsStates(AcLoadFlowContext context, DenseMatrix factorsStates, LfContingency lfContingency) {
+        context.getJacobianMatrix().solveTransposed(factorsStates);
+    }
+
+    /**
+     * Runs the load flow of a state: the base case, whose failure fails the analysis, or a post-contingency one, whose
+     * failure is reported as the state's status.
+     */
+    protected boolean runLoadFlow(AcLoadFlowContext context, boolean isRunningBaseSituation) {
         AcLoadFlowResult result = context.getParameters().getSolverFactory().createLoadFlowEngine(context)
                 .run();
         if (result.isSuccess() || result.getSolverStatus() == AcSolverStatus.NO_CALCULATION) {
@@ -845,7 +875,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             fillSvcPilotFactorsRhs(factorGroups, factorsStates, context);
 
             // solve system
-            context.getJacobianMatrix().solveTransposed(factorsStates);
+            solveFactorsStates(context, factorsStates, null);
 
             // calculate sensitivity values
             setFunctionReferences(validLfFactors);
@@ -858,6 +888,8 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
 
             OpenLoadFlowParameters contingencylfParametersExt = applyGenericContingencyParameters(context, lfParameters, lfParametersExt,
                     sensitivityAnalysisParametersExt.isStartWithFrozenACEmulation());
+
+            beforeContingencySimulations(lfNetwork, context, contingencies, lfParameters, contingencylfParametersExt);
 
             contingencies.forEach(contingency -> {
                 if (Thread.currentThread().isInterrupted()) {
