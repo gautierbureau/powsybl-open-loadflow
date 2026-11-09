@@ -89,7 +89,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                     if (!factor.getFunctionEquationTerm().isActive()) {
                         throw new PowsyblException("Found an inactive equation for a factor that has no predefined result");
                     }
-                    sensi = factor.getFunctionEquationTerm().calculateSensi(factorsState, factorGroup.getIndex());
+                    sensi = calculateSensi(factor, factorsState, factorGroup.getIndex(), contingencyIndex);
                     // Add the direct term (explicit dependence of the function on the variable), if any
                     sensi += computeParameterDirectPartial(factor);
                 }
@@ -104,6 +104,16 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                 }
             }
         }
+    }
+
+    /**
+     * The sensitivity of a factor in a state ({@code contingencyIndex}, -1 for the base case) from the solved states of its
+     * group's right-hand side ({@code column} of {@code factorsStates}): its function's directional derivative there, the
+     * direct term of a branch parameter added by the caller. A subclass may give one it computed otherwise.
+     */
+    protected double calculateSensi(LfSensitivityFactor<AcVariableType, AcEquationType> factor, DenseMatrix factorsStates,
+                                    int column, int contingencyIndex) {
+        return factor.getFunctionEquationTerm().calculateSensi(factorsStates, column);
     }
 
     /**
