@@ -98,7 +98,7 @@ class AlternativeEquationsBenchmark extends AbstractOpenSecurityAnalysisTest {
         }
     }
 
-    private static Network loadPegaseNetwork(String caseName) {
+    static Network loadPegaseNetwork(String caseName) {
         Path caseFile = CACHE_DIR.resolve(caseName + ".m");
         try {
             if (!Files.exists(caseFile)) {
