@@ -26,6 +26,10 @@ public class BusState extends BusDcState {
     private final double controllerShuntB;
     private final double controllerShuntG;
     private final double svcShuntB;
+    // the section of each compensator of the controller shunt and of the shunt, when they have sections (voltage control,
+    // operated by an action): the susceptance and conductance are their sum, and a section change sums them again
+    private final int[] controllerShuntPositions;
+    private final int[] shuntPositions;
     // Parallel arrays rather than a Map<generatorId, controlType>: restore() looks the type up by
     // generator id, and a bus carries a handful of generators, so a scan over a 1-3 element array is
     // both faster and allocation-free where the map cost a stream, a HashMap and String hashing PER BUS
@@ -67,9 +71,11 @@ public class BusState extends BusDcState {
         shuntVoltageControlEnabled = controllerShunt != null ? controllerShunt.isVoltageControlEnabled() : null;
         controllerShuntB = controllerShunt != null ? controllerShunt.getB() : Double.NaN;
         controllerShuntG = controllerShunt != null ? controllerShunt.getG() : Double.NaN;
+        controllerShuntPositions = controllerShunt != null ? savePositions(controllerShunt) : null;
         LfShunt shunt = bus.getShunt().orElse(null);
         shuntB = shunt != null ? shunt.getB() : Double.NaN;
         shuntG = shunt != null ? shunt.getG() : Double.NaN;
+        shuntPositions = shunt != null ? savePositions(shunt) : null;
         LfShunt svcShunt = bus.getSvcShunt().orElse(null);
         svcShuntB = svcShunt != null ? svcShunt.getB() : Double.NaN;
         List<LfGenerator> generators = bus.getGenerators();
@@ -143,11 +149,17 @@ public class BusState extends BusDcState {
         if (shuntVoltageControlEnabled != null) {
             element.getControllerShunt().orElseThrow().setVoltageControlEnabled(shuntVoltageControlEnabled);
         }
+        if (controllerShuntPositions != null) {
+            restorePositions(element.getControllerShunt().orElseThrow(), controllerShuntPositions);
+        }
         if (!Double.isNaN(controllerShuntB)) {
             element.getControllerShunt().orElseThrow().setB(controllerShuntB);
         }
         if (!Double.isNaN(controllerShuntG)) {
             element.getControllerShunt().orElseThrow().setG(controllerShuntG);
+        }
+        if (shuntPositions != null) {
+            restorePositions(element.getShunt().orElseThrow(), shuntPositions);
         }
         if (!Double.isNaN(shuntB)) {
             element.getShunt().orElseThrow().setB(shuntB);
@@ -182,11 +194,17 @@ public class BusState extends BusDcState {
         if (shuntVoltageControlEnabled != null) {
             element.getControllerShunt().orElseThrow().setVoltageControlEnabled(shuntVoltageControlEnabled);
         }
+        if (controllerShuntPositions != null) {
+            restorePositions(element.getControllerShunt().orElseThrow(), controllerShuntPositions);
+        }
         if (!Double.isNaN(controllerShuntB)) {
             element.getControllerShunt().orElseThrow().setB(controllerShuntB);
         }
         if (!Double.isNaN(controllerShuntG)) {
             element.getControllerShunt().orElseThrow().setG(controllerShuntG);
+        }
+        if (shuntPositions != null) {
+            restorePositions(element.getShunt().orElseThrow(), shuntPositions);
         }
         if (!Double.isNaN(shuntB)) {
             element.getShunt().orElseThrow().setB(shuntB);
@@ -219,6 +237,25 @@ public class BusState extends BusDcState {
             }
         }
         return null;
+    }
+
+    private static int[] savePositions(LfShunt shunt) {
+        List<LfShunt.Controller> controllers = shunt.getControllers();
+        if (controllers.isEmpty()) {
+            return null;
+        }
+        int[] positions = new int[controllers.size()];
+        for (int i = 0; i < positions.length; i++) {
+            positions[i] = controllers.get(i).getPosition();
+        }
+        return positions;
+    }
+
+    private static void restorePositions(LfShunt shunt, int[] positions) {
+        List<LfShunt.Controller> controllers = shunt.getControllers();
+        for (int i = 0; i < positions.length; i++) {
+            controllers.get(i).setPosition(positions[i]);
+        }
     }
 
     public static BusState save(LfBus bus) {
