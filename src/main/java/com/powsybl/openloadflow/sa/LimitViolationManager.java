@@ -35,6 +35,16 @@ import java.util.function.ToDoubleFunction;
  */
 public class LimitViolationManager {
 
+    /**
+     * Relative margin within which a post-contingency value counts as equal to its pre-contingency value rather than as
+     * an increase. The increased-violation thresholds default to 0 for voltage, which makes the comparisons of
+     * {@link #violationWeakenedOrEquivalent} exact floating-point tests: a value one ULP on the worse side of an equal
+     * value would be an increased violation, and which side its last bit falls on is decided by the order of the load
+     * flow's floating-point operations, not by the network. 1e-12 is far below any meaningful difference: a 1e-9
+     * relative increase is still reported.
+     */
+    private static final double EQUALITY_EPSILON = 1e-12;
+
     private final LimitViolationManager reference;
 
     private final LimitScalingManager limitScalingManager;
@@ -281,19 +291,24 @@ public class LimitViolationManager {
             if (violation2.getLimit() == violation1.getLimit()) {
                 // the limit violated is the same: we consider the violations equivalent if the new value is close to previous one.
                 if (isFlowViolation(violation2)) {
-                    return Math.abs(violation2.getValue()) <= Math.abs(violation1.getValue()) * (1 + violationsParameters.getFlowProportionalThreshold());
+                    return Math.abs(violation2.getValue()) <= Math.abs(violation1.getValue())
+                            * (1 + violationsParameters.getFlowProportionalThreshold() + EQUALITY_EPSILON);
                 } else if (violation2.getLimitType() == LimitViolationType.HIGH_VOLTAGE) {
                     double value = Math.min(violationsParameters.getHighVoltageAbsoluteThreshold(), violation1.getValue() * violationsParameters.getHighVoltageProportionalThreshold());
-                    return violation2.getValue() <= violation1.getValue() + value;
+                    return violation2.getValue() <= violation1.getValue() + value + equalityMargin(violation1.getValue());
                 } else if (violation2.getLimitType() == LimitViolationType.LOW_VOLTAGE) {
                     return violation2.getValue() >= violation1.getValue() - Math.min(violationsParameters.getLowVoltageAbsoluteThreshold(),
-                        violation1.getValue() * violationsParameters.getLowVoltageProportionalThreshold());
+                        violation1.getValue() * violationsParameters.getLowVoltageProportionalThreshold()) - equalityMargin(violation1.getValue());
                 } else {
                     return false;
                 }
             }
         }
         return false;
+    }
+
+    private static double equalityMargin(double referenceValue) {
+        return Math.abs(referenceValue) * EQUALITY_EPSILON;
     }
 
     private static boolean isFlowViolation(LimitViolation limit) {
