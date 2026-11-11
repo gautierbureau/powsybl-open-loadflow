@@ -67,7 +67,7 @@ public class OpenBranchSide2CurrentMagnitudeEquationTerm extends AbstractOpenSid
         return r1 * r1 * v1 * (gres(y, sinKsi, g1, g2, b2, shunt) * FastMath.sin(ph1) + bres(y, cosKsi, b1, g2, b2, shunt) * FastMath.cos(ph1));
     }
 
-    private static double i1(double y, double cosKsi, double sinKsi, double g1, double b1, double g2, double b2, double v1, double ph1, double r1) {
+    public static double i1(double y, double cosKsi, double sinKsi, double g1, double b1, double g2, double b2, double v1, double ph1, double r1) {
         return FastMath.hypot(reI1(y, cosKsi, sinKsi, g1, b1, g2, b2, v1, ph1, r1), imI1(y, cosKsi, sinKsi, g1, b1, g2, b2, v1, ph1, r1));
     }
 
