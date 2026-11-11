@@ -1355,6 +1355,78 @@ class AcSensitivityAnalysisAdjointTest {
         line.setR(line.getR() * scale).setX(line.getX() * scale);
     }
 
+    /** Opens line {@code lineId} at both sides. */
+    private static Network ieee14WithOpenLine(String lineId) {
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getLine(lineId).getTerminal1().disconnect();
+        network.getLine(lineId).getTerminal2().disconnect();
+        return network;
+    }
+
+    /**
+     * {@link #flowObjective} with line {@code lineId} reconnected at series admittance modulus {@code y} (siemens), at
+     * the line's ksi and without its shunt admittances: the line the open-line lever differentiates, at {@code y}.
+     */
+    private static double flowObjectiveWithReconnectedLine(String lineId, double y) {
+        Network network = IeeeCdfNetworkFactory.create14();
+        Line line = network.getLine(lineId);
+        double scale = 1.0 / (y * Math.hypot(line.getR(), line.getX()));
+        line.setR(line.getR() * scale).setX(line.getX() * scale).setG1(0).setB1(0).setG2(0).setB2(0);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, singleSlackReRunParameters()).isFullyConverged());
+        return flowObjective(network);
+    }
+
+    @Test
+    void runAdjointGivesAnOpenLineItsReconnectionGradient() {
+        // A line open at both sides is not in the solved network. Its BRANCH_ADMITTANCE lever differentiates the line
+        // it would be once reconnected, at y = 0: the first-order gain of reconnecting it, which a one-sided
+        // re-solve finite difference on y from 0 checks (second order: (-3 f(0) + 4 f(h) - f(2h)) / 2h).
+        String openLine = "L2-4-1";
+        Network network = ieee14WithOpenLine(openLine);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, cacheEnabledParameters()).isFullyConverged());
+        AcSensitivityAnalysis.VariableRef key = varKey(SensitivityVariableType.BRANCH_ADMITTANCE, openLine);
+        double theta = newAnalysis(cacheEnabledParameters()).runAdjoint(network,
+                network.getVariantManager().getWorkingVariantId(), List.of(), FLOW_COTANGENTS,
+                levers(SensitivityVariableType.BRANCH_ADMITTANCE, List.of(openLine))).get(key);
+
+        Line line = IeeeCdfNetworkFactory.create14().getLine(openLine);
+        double h = 1e-4 / Math.hypot(line.getR(), line.getX());
+        Network open = ieee14WithOpenLine(openLine);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(open, singleSlackReRunParameters()).isFullyConverged());
+        double f0 = flowObjective(open);
+        double fd = (-3 * f0 + 4 * flowObjectiveWithReconnectedLine(openLine, h)
+                - flowObjectiveWithReconnectedLine(openLine, 2 * h)) / (2 * h);
+
+        assertTrue(Math.abs(theta) > 1e-2, "an open line's reconnection gradient must not be 0, got " + theta);
+        assertEquals(fd, theta, 1e-5 * Math.abs(fd), "open line: runAdjoint vs re-solve finite difference from y = 0");
+    }
+
+    @Test
+    void runAdjointKeepsAnOpenLineOutOfTheForwardAnalysisAndOfAOneSideOpenLine() {
+        // Only runAdjoint resolves an open line: the forward analysis still writes 0 for it. And a line open at one
+        // side only is in the network (with a missing bus): it keeps its 0 in the adjoint.
+        String openLine = "L2-4-1";
+        Network network = ieee14WithOpenLine(openLine);
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, List.of(
+                new SensitivityFactor(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, "L1-2-1",
+                        SensitivityVariableType.BRANCH_ADMITTANCE, openLine, false, ContingencyContext.all())),
+                new SensitivityAnalysisRunParameters().setParameters(sensiParams));
+        assertEquals(0.0, fwd.getBranchFlow1SensitivityValue(openLine, "L1-2-1", SensitivityVariableType.BRANCH_ADMITTANCE));
+
+        Network oneSide = IeeeCdfNetworkFactory.create14();
+        oneSide.getLine(openLine).getTerminal2().disconnect();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(oneSide, cacheEnabledParameters()).isFullyConverged());
+        double theta = newAnalysis(cacheEnabledParameters()).runAdjoint(oneSide,
+                oneSide.getVariantManager().getWorkingVariantId(), List.of(), FLOW_COTANGENTS,
+                levers(SensitivityVariableType.BRANCH_ADMITTANCE, List.of(openLine)))
+                .get(varKey(SensitivityVariableType.BRANCH_ADMITTANCE, openLine));
+        assertEquals(0.0, theta);
+    }
+
     @Test
     void runAdjointWithSlackDistributionMatchesALoadFlowReRun() {
         // With a distributed slack the load flow spreads the imbalance a lever creates, losses included, over the
@@ -1496,6 +1568,15 @@ class AcSensitivityAnalysisAdjointTest {
         cotangents.put(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "B10"), 2.0);
         cotangents.put(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "B14"), -1.0);
         return cotangents;
+    }
+
+    @Test
+    void runAdjointOnANetworkCopyGivesAnOpenLineTheSameReconnectionGradient() {
+        // the smoothed settings run the adjoint on a copy of the solved network: an open line's branch is built on the
+        // copy's buses, and must read the same gradient as on the cached system
+        assertCopyRouteMatchesCachedRoute(ieee14WithOpenLine("L2-4-1"), cacheEnabledParameters(),
+                new OpenSensitivityAnalysisParameters(), FLOW_COTANGENTS,
+                levers(SensitivityVariableType.BRANCH_ADMITTANCE, List.of("L2-4-1", "L2-3-1")));
     }
 
     @Test
