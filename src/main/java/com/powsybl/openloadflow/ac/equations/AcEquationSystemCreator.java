@@ -124,6 +124,12 @@ public class AcEquationSystemCreator {
                 .filter(voltageControl -> voltageControl.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                 .ifPresent(voltageControl -> {
                     if (bus.isGeneratorVoltageControlled()) {
+                        if (voltageControl.isLocalControl() && creationParameters.getReactiveLimitsSmoothing() != null
+                                && !bus.hasGeneratorsWithSlope()) {
+                            // no PV/PQ switch to follow: the equations are the same whatever the bus state
+                            createGeneratorSmoothedReactiveLimitsEquations(bus, equationSystem, creationParameters.getReactiveLimitsSmoothing());
+                            return;
+                        }
                         if (voltageControl.isLocalControl()) {
                             createGeneratorLocalVoltageControlEquation(bus, equationSystem);
                         } else {
@@ -133,6 +139,32 @@ public class AcEquationSystemCreator {
                         updateGeneratorVoltageControl(voltageControl, equationSystem);
                     }
                 });
+    }
+
+    /**
+     * Smoothed reactive limits of a bus controlling its own voltage: its reactive generation {@code Q} and the
+     * voltage slacks {@code vPlus}, {@code vMinus} become unknowns, the reactive balance stays active with a
+     * {@code -Q} term, the voltage target equation becomes {@code V + vPlus - vMinus = Vset}, and two smoothed
+     * complementarity equations tie {@code Q} to its limits (see {@link LimitComplementarityEquationTerm}).
+     * {@code Q} is the bus total reactive generation, as its limits are.
+     */
+    private static void createGeneratorSmoothedReactiveLimitsEquations(LfBus bus, EquationSystem<AcVariableType, AcEquationType> equationSystem,
+                                                                       LimitsSmoothing smoothing) {
+        VariableSet<AcVariableType> variableSet = equationSystem.getVariableSet();
+        Variable<AcVariableType> q = variableSet.getVariable(bus.getNum(), AcVariableType.GENERATOR_Q);
+        Variable<AcVariableType> vPlus = variableSet.getVariable(bus.getNum(), AcVariableType.BUS_V_PLUS);
+        Variable<AcVariableType> vMinus = variableSet.getVariable(bus.getNum(), AcVariableType.BUS_V_MINUS);
+        equationSystem.getEquation(bus.getNum(), AcEquationType.BUS_TARGET_Q).orElseThrow()
+                .addTerm(q.<AcEquationType>createTerm().minus())
+                .setActive(true);
+        equationSystem.getEquation(bus.getNum(), AcEquationType.BUS_TARGET_V).orElseThrow()
+                .addTerm(vPlus.createTerm())
+                .addTerm(vMinus.<AcEquationType>createTerm().minus())
+                .setActive(true);
+        equationSystem.createEquation(bus, AcEquationType.BUS_Q_LIMIT_UP)
+                .addTerm(LimitComplementarityEquationTerm.reactive(bus, q, vPlus, true, smoothing));
+        equationSystem.createEquation(bus, AcEquationType.BUS_Q_LIMIT_LO)
+                .addTerm(LimitComplementarityEquationTerm.reactive(bus, q, vMinus, false, smoothing));
     }
 
     private void createGeneratorLocalVoltageControlEquation(LfBus bus,
@@ -584,7 +616,7 @@ public class AcEquationSystemCreator {
         }
     }
 
-    private static void createTransformerVoltageControlEquations(LfBus bus, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+    private void createTransformerVoltageControlEquations(LfBus bus, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
         bus.getTransformerVoltageControl()
                 .filter(voltageControl -> voltageControl.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                 .ifPresent(voltageControl -> {
@@ -598,7 +630,62 @@ public class AcEquationSystemCreator {
                     }
 
                     updateTransformerVoltageControlEquations(voltageControl, equationSystem);
+
+                    LimitsSmoothing smoothing = creationParameters.getRatioLimitsSmoothing();
+                    if (smoothing != null && canSmoothRatioLimits(voltageControl)
+                            && voltageControl.getMergedControllerElements().getFirst().isVoltageControlEnabled()) {
+                        createTransformerSmoothedRatioLimitsEquations(voltageControl, equationSystem, smoothing);
+                    }
                 });
+    }
+
+    /**
+     * Whether a tap changer voltage control can get smoothed ratio limits: a single transformer, visible, controlling
+     * the bus at one of its own ends (which tells how its ratio moves that voltage), and that no generator holds.
+     */
+    public static boolean canSmoothRatioLimits(TransformerVoltageControl voltageControl) {
+        if (voltageControl.getMergeStatus() != VoltageControl.MergeStatus.MAIN || voltageControl.isHidden()) {
+            return false;
+        }
+        List<LfBranch> controllers = voltageControl.getMergedControllerElements().stream()
+                .filter(b -> !b.isDisabled())
+                .toList();
+        if (controllers.size() != 1 || !voltageControl.getMergedDependentVoltageControls().isEmpty()) {
+            return false;
+        }
+        LfBranch controller = controllers.getFirst();
+        LfBus controlledBus = voltageControl.getControlledBus();
+        return (controlledBus == controller.getBus1() || controlledBus == controller.getBus2())
+                && !(controlledBus.isGeneratorVoltageControlled() && controlledBus.isGeneratorVoltageControlEnabled());
+    }
+
+    /**
+     * Smoothed ratio limits of a tap changer holding the voltage of one of its ends: on top of the voltage control
+     * equations (the controlled voltage held, the ratio {@code r1} an unknown), the voltage target equation becomes
+     * {@code V + vPlus - vMinus = Vset} and two smoothed complementarity equations tie {@code r1} to its limits (see
+     * {@link LimitComplementarityEquationTerm}). A higher {@code r1}, on side 1, raises the voltage of side 2 and
+     * lowers the voltage of side 1.
+     */
+    private static void createTransformerSmoothedRatioLimitsEquations(TransformerVoltageControl voltageControl,
+                                                                      EquationSystem<AcVariableType, AcEquationType> equationSystem,
+                                                                      LimitsSmoothing smoothing) {
+        LfBranch branch = voltageControl.getMergedControllerElements().getFirst();
+        LfBus controlledBus = voltageControl.getControlledBus();
+        boolean raisesVoltage = controlledBus == branch.getBus2();
+        VariableSet<AcVariableType> variableSet = equationSystem.getVariableSet();
+        Variable<AcVariableType> r1 = variableSet.getVariable(branch.getNum(), AcVariableType.BRANCH_RHO1);
+        Variable<AcVariableType> vPlus = variableSet.getVariable(controlledBus.getNum(), AcVariableType.BUS_V_PLUS);
+        Variable<AcVariableType> vMinus = variableSet.getVariable(controlledBus.getNum(), AcVariableType.BUS_V_MINUS);
+        equationSystem.getEquation(controlledBus.getNum(), AcEquationType.BUS_TARGET_V).orElseThrow()
+                .addTerm(vPlus.createTerm())
+                .addTerm(vMinus.<AcEquationType>createTerm().minus());
+        PiModel piModel = branch.getPiModel();
+        equationSystem.createEquation(branch, AcEquationType.BRANCH_RHO1_LIMIT_UP)
+                .addTerm(LimitComplementarityEquationTerm.ratio(branch, r1, vPlus, true, raisesVoltage,
+                        piModel.getMinR1(), piModel.getMaxR1(), smoothing));
+        equationSystem.createEquation(branch, AcEquationType.BRANCH_RHO1_LIMIT_LO)
+                .addTerm(LimitComplementarityEquationTerm.ratio(branch, r1, vMinus, false, raisesVoltage,
+                        piModel.getMinR1(), piModel.getMaxR1(), smoothing));
     }
 
     public static void createR1DistributionEquations(TransformerVoltageControl voltageControl,

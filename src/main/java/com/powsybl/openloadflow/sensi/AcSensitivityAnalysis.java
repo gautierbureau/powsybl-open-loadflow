@@ -26,11 +26,17 @@ import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.ac.equations.*;
 import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
+import com.powsybl.openloadflow.equations.Equation;
+import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.equations.EquationTerm;
+import com.powsybl.openloadflow.equations.StateVector;
 import com.powsybl.openloadflow.equations.Variable;
+import com.powsybl.openloadflow.equations.Vectors;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
 import com.powsybl.openloadflow.network.*;
 import com.powsybl.openloadflow.network.action.*;
+import com.powsybl.openloadflow.network.impl.LfNetworkCopier;
 import com.powsybl.openloadflow.network.impl.LfNetworkList;
 import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
@@ -46,6 +52,7 @@ import com.powsybl.openloadflow.util.Lists2;
 import com.powsybl.openloadflow.util.Reports;
 import com.powsybl.openloadflow.util.mt.ContingencyMultiThreadHelper;
 import com.powsybl.sensitivity.*;
+import org.apache.commons.lang3.Range;
 import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.*;
@@ -61,8 +68,20 @@ import java.util.stream.Collectors;
  */
 public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariableType, AcEquationType> {
 
+    private boolean adjointOnNetworkCopy = false;
+
     public AcSensitivityAnalysis(MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory, SensitivityAnalysisParameters parameters) {
         super(matrixFactory, connectivityFactory, parameters);
+    }
+
+    /**
+     * Makes {@link #runAdjoint} build its own equation system on a copy of the solved network instead of reusing
+     * the cached load flow's, at the cost of one more factorization. With the same equations the gradient is the
+     * same: this is the route a smoothed adjoint system will take. Package-private until that system exists.
+     */
+    AcSensitivityAnalysis setAdjointOnNetworkCopy(boolean adjointOnNetworkCopy) {
+        this.adjointOnNetworkCopy = adjointOnNetworkCopy;
+        return this;
     }
 
     private void calculateSensitivityValues(List<LfSensitivityFactor<AcVariableType, AcEquationType>> lfFactors,
@@ -251,6 +270,18 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
     private static Map<Integer, RhsColumn> describeSvcPilotFactorsRhs(
             SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups,
             AcLoadFlowContext context) {
+        return describeSvcPilotFactorsRhs(factorGroups, context, context);
+    }
+
+    /**
+     * As {@link #describeSvcPilotFactorsRhs(SensitivityFactorGroupList, AcLoadFlowContext)}, the coordination
+     * weights being those of {@code coordinationContext}, the load flow's, and the columns those of
+     * {@code context}'s equation system, buses being matched by id: an adjoint on its own system keeps the
+     * coordination the load flow ran with.
+     */
+    private static Map<Integer, RhsColumn> describeSvcPilotFactorsRhs(
+            SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups,
+            AcLoadFlowContext coordinationContext, AcLoadFlowContext context) {
         boolean hasSvcPilot = factorGroups.getList().stream()
                 .anyMatch(group -> group.getVariableType() == SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE);
         if (!hasSvcPilot) {
@@ -258,7 +289,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         }
         // the coordination matrix is pilot-independent: factorize it once for every queried pilot
         try (SvcPilotPointClosedLoopSensitivity.Coordination coordination =
-                     SvcPilotPointClosedLoopSensitivity.buildCoordination(context)) {
+                     SvcPilotPointClosedLoopSensitivity.buildCoordination(coordinationContext)) {
             if (coordination == null) {
                 return Map.of(); // no active SVC zone
             }
@@ -270,10 +301,11 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                 }
                 LfBus pilotBus = (LfBus) ((SingleVariableLfSensitivityFactor<AcVariableType, AcEquationType>)
                         group.getFirstFactor()).getVariableElement();
-                Map<LfBus, Double> weights = weightsByPilot.computeIfAbsent(pilotBus, coordination::weightsForPilot);
+                LfBus coordinationPilotBus = coordinationContext.getNetwork().getBusById(pilotBus.getId());
+                Map<LfBus, Double> weights = weightsByPilot.computeIfAbsent(coordinationPilotBus, coordination::weightsForPilot);
                 RhsColumnBuilder builder = new RhsColumnBuilder(weights.size());
                 for (var entry : weights.entrySet()) {
-                    LfBus controlled = entry.getKey();
+                    LfBus controlled = context.getNetwork().getBusById(entry.getKey().getId());
                     double w = entry.getValue();
                     context.getEquationSystem()
                             .getEquation(controlled.getNum(), AcEquationType.BUS_TARGET_V)
@@ -293,10 +325,11 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      * @param cotangents dL/dfunction keyed by the base-network sensitivity factor, non-zero entries only.
      * @return dL/dvariable indexed by factor-group index.
      */
-    private double[] analyseAdjoint(AcLoadFlowContext context,
+    private double[] analyseAdjoint(AcLoadFlowContext context, AcLoadFlowContext coordinationContext,
                                    SensitivityFactorGroupList<AcVariableType, AcEquationType> factorGroups,
                                    Map<LfSensitivityFactor<AcVariableType, AcEquationType>, Double> cotangents,
-                                   Map<LfBus, Double> slackParticipationByBus) {
+                                   Map<LfBus, Double> slackParticipationByBus,
+                                   SlackDistribution slackDistribution) {
         var equationSystem = context.getEquationSystem();
         int equationCount = equationSystem.getIndex().getColumnCount();
 
@@ -305,11 +338,22 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         for (var group : factorGroups.getList()) {
             parameterRhs[group.getIndex()] = group.describeRhs(slackParticipationByBus);
         }
-        describeSvcPilotFactorsRhs(factorGroups, context).forEach((col, column) -> parameterRhs[col] = column);
+        describeSvcPilotFactorsRhs(factorGroups, coordinationContext, context).forEach((col, column) -> parameterRhs[col] = column);
 
         // the stored matrix is the transposed Jacobian, so solve() is the adjoint solve
         double[] lambda = computeStateCotangent(equationCount, cotangents); // solved in place
         context.getJacobianMatrix().solve(lambda);
+        // with the slack distribution in the system, the state cotangent gets a rank-1 correction and the
+        // slack bus balance its own cotangent (see SlackDistribution)
+        double slackBalanceCotangent = 0;
+        if (slackDistribution != null) {
+            double kappa = slackDistribution.dotParticipation(lambda) / slackDistribution.sigma();
+            double[] u = slackDistribution.u();
+            for (int i = 0; i < lambda.length; i++) {
+                lambda[i] += kappa * u[i];
+            }
+            slackBalanceCotangent = -kappa;
+        }
 
         // thetaBar = lambda . rhs per variable group, plus the direct df/dp term of branch parameters. The rhs
         // column already carries the forward's sign, so no extra sign here.
@@ -317,6 +361,9 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         for (var group : factorGroups.getList()) {
             int col = group.getIndex();
             double thetaG = parameterRhs[col].dot(lambda);
+            if (slackDistribution != null) {
+                thetaG += group.describeSlackBusRhs(slackDistribution.slackBus()) * slackBalanceCotangent;
+            }
             for (var factor : group.getFactors()) {
                 Double yBar = cotangents.get(factor);
                 if (yBar != null && yBar != 0.0) {
@@ -326,6 +373,104 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             thetaBar[col] = thetaG / getVariableBaseValue(group.getFirstFactor());
         }
         return thetaBar;
+    }
+
+    /**
+     * The distributed slack as one more unknown of the linearized system: {@code mu}, the active power the slack
+     * distribution adds, {@code alpha_i * mu} at each participating bus i. The slack bus active power balance,
+     * which the system otherwise leaves to the slack bus, is the matching equation:
+     * <pre>
+     *   [ J    b ] [ dx  ]   [ rhs           ]     b = -alpha on the active power equations of the participating buses
+     *   [ c^T  d ] [ dmu ] = [ slack bus rhs ]     c = d(slack bus active power)/dx, d = -alpha_slack
+     * </pre>
+     * Its adjoint is the plain one, {@code lambda0 = J^-T xBar}, corrected on the same factorization:
+     * {@code lambda = lambda0 + kappa * u} with {@code u = J^-T c}, {@code sigma = d - b.u},
+     * {@code kappa = b.lambda0 / sigma}, and the slack bus balance carries the cotangent {@code -kappa}.
+     *
+     * @param u the solved {@code J^-T c}, by equation column
+     */
+    private record SlackDistribution(LfBus slackBus, Map<LfBus, Double> participationByBus, double[] u, double sigma) {
+
+        static SlackDistribution create(AcLoadFlowContext context, LfNetwork lfNetwork, Map<LfBus, Double> participationByBus) {
+            List<LfBus> slackBuses = lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses();
+            if (slackBuses.size() != 1) {
+                throw new PowsyblException("Adjoint slack distribution supports a single slack bus, the network has "
+                        + slackBuses.size());
+            }
+            LfBus slackBus = slackBuses.getFirst();
+            double[] u = new double[context.getEquationSystem().getIndex().getColumnCount()];
+            @SuppressWarnings("unchecked")
+            Equation<AcVariableType, AcEquationType> slackP = (Equation<AcVariableType, AcEquationType>) slackBus.getP();
+            for (Map.Entry<Variable<AcVariableType>, List<EquationTerm<AcVariableType, AcEquationType>>> e
+                    : slackP.<EquationTerm<AcVariableType, AcEquationType>>getTermsByVariable().entrySet()) {
+                int row = e.getKey().getRow();
+                if (row < 0) {
+                    continue;
+                }
+                for (EquationTerm<AcVariableType, AcEquationType> term : e.getValue()) {
+                    if (term.isActive()) {
+                        u[row] += term.der(e.getKey());
+                    }
+                }
+            }
+            context.getJacobianMatrix().solve(u);
+            double sigma = participationByBus.getOrDefault(slackBus, 0d) - dotParticipation(participationByBus, u);
+            if (Math.abs(sigma) < 1e-12) {
+                throw new PowsyblException("Adjoint slack distribution: singular slack balance (sigma=" + sigma + ")");
+            }
+            return new SlackDistribution(slackBus, participationByBus, u, sigma);
+        }
+
+        double dotParticipation(double[] v) {
+            return dotParticipation(participationByBus, v);
+        }
+
+        /** b.v, b being the participation on the active power equations in the system (the slack bus has none). */
+        private static double dotParticipation(Map<LfBus, Double> participationByBus, double[] v) {
+            double dot = 0;
+            for (Map.Entry<LfBus, Double> e : participationByBus.entrySet()) {
+                LfBus bus = e.getKey();
+                Equation<?, ?> p = (Equation<?, ?>) bus.getP();
+                if (!bus.isSlack() && p.isActive()) {
+                    dot += e.getValue() * v[p.getColumn()];
+                }
+            }
+            return dot;
+        }
+    }
+
+    /**
+     * The slack participation the converged load flow actually distributes over: a generator the distribution
+     * holds at one of its bounds (its active power limits, or zero, since the distribution never changes the
+     * sign of a generation) does not move for a small imbalance and is left out, as the load flow left it out.
+     * The forward participation keeps every participating element, the imbalance direction being unknown there.
+     */
+    private Map<LfBus, Double> activeParticipationByBus(LfNetwork lfNetwork, LoadFlowParameters lfParameters) {
+        OpenLoadFlowParameters lfParametersExt = OpenLoadFlowParameters.get(lfParameters);
+        boolean useActiveLimits = lfParametersExt.isUseActiveLimits();
+        List<ParticipatingElement> participatingElements = new ArrayList<>(getParticipatingElements(
+                lfNetwork.getBuses(), lfParameters.getBalanceType(), lfParametersExt));
+        participatingElements.removeIf(e -> e.getElement() instanceof LfGenerator generator
+                && isAtDistributionBound(generator, useActiveLimits));
+        if (participatingElements.isEmpty()) {
+            throw new PowsyblException("Adjoint slack distribution: no element left to distribute the slack over");
+        }
+        ParticipatingElement.normalizeParticipationFactors(participatingElements);
+        return participatingElements.stream().collect(Collectors.toMap(
+                ParticipatingElement::getLfBus, e -> -e.getFactor(), Double::sum));
+    }
+
+    // the bounds of GenerationActivePowerDistributionStep, the generation sign included
+    private static boolean isAtDistributionBound(LfGenerator generator, boolean useActiveLimits) {
+        double targetP = generator.getTargetP();
+        double minTargetP = useActiveLimits ? generator.getMinTargetP() : -Double.MAX_VALUE;
+        double maxTargetP = useActiveLimits ? generator.getMaxTargetP() : Double.MAX_VALUE;
+        if (targetP < 0) {
+            maxTargetP = Math.min(maxTargetP, 0);
+        } else {
+            minTargetP = Math.max(minTargetP, 0);
+        }
+        return targetP <= minTargetP || targetP >= maxTargetP;
     }
 
     /**
@@ -412,8 +557,175 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                         .orElseThrow(() -> new PowsyblException("No cached AC load flow for this network, "
                                 + "run a load flow with networkCacheEnabled=true before runAdjoint."));
         NetworkCache.AcLfValue value = entry.getValues().get(0); // main synchronous network
-        AcLoadFlowContext context = value.getContext();
-        LfNetwork lfNetwork = value.getNetwork();
+        AcLoadFlowContext cachedContext = value.getContext();
+        // on its own system, the adjoint works on a copy of the solved network: the cached one, which the next
+        // load flow reuses, is never touched (null resource: nothing to close)
+        // smoothed reactive limits, tap changers regulating again (and their smoothed ratio limits): on the copy
+        OpenSensitivityAnalysisParameters sensiParametersExt = OpenSensitivityAnalysisParameters.getOrDefault(parameters);
+        LimitsSmoothing reactiveSmoothing = sensiParametersExt.isAdjointReactiveLimitsSmoothing()
+                ? new LimitsSmoothing(sensiParametersExt.getAdjointReactiveLimitsSmoothingMu(),
+                                      sensiParametersExt.getAdjointReactiveLimitsSmoothingVoltageScale())
+                : null;
+        boolean transformerVoltageControl = sensiParametersExt.isAdjointTransformerVoltageControl();
+        LimitsSmoothing ratioSmoothing = transformerVoltageControl && sensiParametersExt.isAdjointTransformerVoltageControlSmoothing()
+                ? new LimitsSmoothing(sensiParametersExt.getAdjointTransformerVoltageControlSmoothingMu(),
+                                      sensiParametersExt.getAdjointTransformerVoltageControlSmoothingVoltageScale())
+                : null;
+        boolean ownSystem = adjointOnNetworkCopy || reactiveSmoothing != null || transformerVoltageControl;
+        try (AcLoadFlowContext ownContext = ownSystem
+                ? createAdjointContext(cachedContext, reactiveSmoothing, transformerVoltageControl, ratioSmoothing,
+                                       sensiParametersExt.getAdjointSmoothingPolishIterations())
+                : null) {
+            return runAdjoint(network, variableSets, factors, cotangentsByFunction, variables,
+                    ownContext != null ? ownContext : cachedContext, cachedContext);
+        }
+    }
+
+    /**
+     * A context of its own for the adjoint, on a copy of the solved network of {@code cachedContext}: a new
+     * equation system, with the controls in the state the load flow left them (a PV bus switched PQ stays PQ, a
+     * tap held at its position stays held), and the state vector at the solution. Its Jacobian is factorized again
+     * on first use. The copy selects its slack and reference buses again, which must be the cached ones.
+     * With {@code reactiveSmoothing}, a bus controlling its own voltage gets smoothed reactive limits. With
+     * {@code transformerVoltageControl}, the taps regulate again (see {@link #enableTransformerVoltageControls}), and
+     * with {@code ratioSmoothing} their ratio limits are smoothed. The smoothed unknowns are set from the solution,
+     * then {@code polishIterations} Newton iterations move the state towards the smoothed load flow's solution.
+     * Package-private for tests.
+     */
+    static AcLoadFlowContext createAdjointContext(AcLoadFlowContext cachedContext, LimitsSmoothing reactiveSmoothing,
+                                                  boolean transformerVoltageControl, LimitsSmoothing ratioSmoothing,
+                                                  int polishIterations) {
+        LfNetwork lfNetwork = cachedContext.getNetwork();
+        LfNetwork copy = LfNetworkCopier.copy(lfNetwork, LoadFlowModel.AC, ReportNode.NO_OP);
+        for (LfSynchronousNetwork sc : lfNetwork.getSynchronousNetworks()) {
+            LfSynchronousNetwork copySc = copy.getSynchronousNetwork(sc.getNumSC());
+            if (!copySc.getSlackBuses().stream().map(LfBus::getId).toList().equals(sc.getSlackBuses().stream().map(LfBus::getId).toList())
+                    || !copySc.getReferenceBus().getId().equals(sc.getReferenceBus().getId())) {
+                throw new PowsyblException("Adjoint on a network copy: the copy selected other slack or reference buses than the load flow");
+            }
+        }
+        if (transformerVoltageControl) {
+            enableTransformerVoltageControls(copy, ratioSmoothing != null);
+        }
+        AcLoadFlowParameters parameters = cachedContext.getParameters();
+        boolean smoothed = reactiveSmoothing != null || ratioSmoothing != null;
+        if (smoothed) {
+            // the vectorized creator keeps the bus balances in arrays, which the smoothed rows do not extend
+            parameters = new AcLoadFlowParameters(parameters)
+                    .setEquationSystemCreationParameters(new AcEquationSystemCreationParameters(
+                            parameters.getEquationSystemCreationParameters().isForceA1Var(), reactiveSmoothing, ratioSmoothing))
+                    .setVectorized(false);
+        }
+        AcLoadFlowContext context = new AcLoadFlowContext(copy, parameters);
+        AcSolverUtil.initStateVector(copy, context.getEquationSystem(), new PreviousValueVoltageInitializer());
+        if (smoothed) {
+            initSmoothedLimitsState(copy, context.getEquationSystem());
+            polish(context, polishIterations);
+        }
+        return context;
+    }
+
+    /**
+     * Newton iterations on the system of {@code context} from its current state, without outer loops nor state
+     * scaling. Package-private for tests.
+     *
+     * @return the largest mismatch before each iteration and after the last one
+     */
+    static double[] polish(AcLoadFlowContext context, int iterations) {
+        double[] largestMismatches = new double[iterations + 1];
+        for (int i = 0; i <= iterations; i++) {
+            double[] mismatch = context.getEquationVector().getArray().clone();
+            Vectors.minus(mismatch, context.getTargetVector().getArray());
+            largestMismatches[i] = Arrays.stream(mismatch).map(Math::abs).max().orElse(0);
+            if (!Double.isFinite(largestMismatches[i])) {
+                throw new PowsyblException("Adjoint smoothed reactive limits: the polish diverged at iteration " + i);
+            }
+            if (i < iterations) {
+                context.getJacobianMatrix().solveTransposed(mismatch);
+                context.getEquationSystem().getStateVector().minus(mismatch);
+            }
+        }
+        return largestMismatches;
+    }
+
+    /**
+     * The tap changers' voltage control as the adjoint of a continuous ratio: the load flow ends with every tap
+     * rounded and its control off, which leaves the bus it holds free for the adjoint. Here a tap's control is on
+     * again, its ratio an unknown and its controlled bus voltage held, unless the load flow would not run it: the tap
+     * is at an end of its range (it cannot move further), its controlled bus is held by a generator, or (as the load
+     * flow decides) no bus controlling its voltage remains on the side it does not control. The deadband is ignored:
+     * a discrete tap answers a small change by nothing, then by a whole step, and on average as a continuous one.
+     * With {@code smoothRatioLimits}, a tap at the end of its range whose limits can be smoothed (see
+     * {@link AcEquationSystemCreator#canSmoothRatioLimits}) regulates too: its limit equations decide how much.
+     */
+    private static void enableTransformerVoltageControls(LfNetwork network, boolean smoothRatioLimits) {
+        for (LfBranch branch : network.<LfBranch>getControllerElements(VoltageControl.Type.TRANSFORMER)) {
+            Optional<TransformerVoltageControl> voltageControl = branch.getVoltageControl();
+            if (voltageControl.isEmpty() || branch.isDisabled() || !branch.isConnectedAtBothSides()) {
+                continue;
+            }
+            LfBus controlledBus = voltageControl.get().getControlledBus();
+            if (controlledBus.isGeneratorVoltageControlled() && controlledBus.isGeneratorVoltageControlEnabled()) {
+                continue;
+            }
+            int tapPosition = branch.getPiModel().getTapPosition();
+            Range<Integer> tapPositionRange = branch.getPiModel().getTapPositionRange();
+            boolean insideRange = tapPosition > tapPositionRange.getMinimum() && tapPosition < tapPositionRange.getMaximum();
+            if (insideRange || smoothRatioLimits && AcEquationSystemCreator.canSmoothRatioLimits(voltageControl.get())) {
+                branch.setVoltageControlEnabled(true);
+            }
+        }
+        network.fixTransformerVoltageControls();
+    }
+
+    /**
+     * The smoothed limits unknowns at the load flow's solution: the bus reactive generation that closes its reactive
+     * balance, and the voltage slacks that close {@code V + vPlus - vMinus = Vset} (the target of the control holding
+     * the bus, as in its voltage equation); a tap ratio is the solved one. A tap inside its range is on its target up
+     * to the rounding to a step, which is no saturation: its slacks are 0. The complementarity equations are not
+     * solved there: the adjoint linearizes the smoothed system at the exact solution.
+     */
+    private static void initSmoothedLimitsState(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        StateVector stateVector = equationSystem.getStateVector();
+        double[] x = stateVector.get().clone();
+        for (Variable<AcVariableType> v : equationSystem.getIndex().getSortedVariablesToFind()) {
+            switch (v.getType()) {
+                // its own -Q term is still 0, so the balance is the flows out of the bus: plus the load, the generation
+                case GENERATOR_Q -> {
+                    LfBus bus = network.getBus(v.getElementNum());
+                    x[v.getRow()] = ((Equation<?, ?>) bus.getQ()).eval() + bus.getLoadTargetQ();
+                }
+                case BUS_V_PLUS, BUS_V_MINUS -> {
+                    LfBus bus = network.getBus(v.getElementNum());
+                    double deviation = isHeldByATapInsideItsRange(bus) ? 0 : bus.getV() - bus.getHighestPriorityTargetV().orElseThrow();
+                    x[v.getRow()] = Math.max(0, v.getType() == AcVariableType.BUS_V_PLUS ? -deviation : deviation);
+                }
+                default -> {
+                    // set from the network by initStateVector
+                }
+            }
+        }
+        stateVector.set(x);
+    }
+
+    private static boolean isHeldByATapInsideItsRange(LfBus bus) {
+        if (bus.isGeneratorVoltageControlled() && bus.isGeneratorVoltageControlEnabled()) {
+            return false;
+        }
+        return bus.getTransformerVoltageControl()
+                .map(vc -> vc.getMergedControllerElements().stream().allMatch(branch -> {
+                    Range<Integer> range = branch.getPiModel().getTapPositionRange();
+                    int tapPosition = branch.getPiModel().getTapPosition();
+                    return tapPosition > range.getMinimum() && tapPosition < range.getMaximum();
+                }))
+                .orElse(false);
+    }
+
+    private Map<VariableRef, Double> runAdjoint(Network network, List<SensitivityVariableSet> variableSets,
+                                                List<SensitivityFactor> factors, Map<FunctionRef, Double> cotangentsByFunction,
+                                                List<AdjointVariable> variables, AcLoadFlowContext context,
+                                                AcLoadFlowContext cachedContext) {
+        LfNetwork lfNetwork = context.getNetwork();
         boolean breakers = context.getParameters().getNetworkParameters().isBreakers();
 
         Map<String, SensitivityVariableSet> variableSetsById = variableSets.stream()
@@ -456,7 +768,15 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             }
         }
 
-        double[] thetaBar = analyseAdjoint(context, factorGroups, cotangents, slackParticipationByBus);
+        // the slack distribution either folded into the injection rhs (the forward convention) or solved with the
+        // system, losses included (adjointSlackDistribution)
+        SlackDistribution slackDistribution = null;
+        Map<LfBus, Double> rhsParticipationByBus = slackParticipationByBus;
+        if (lfParameters.isDistributedSlack() && OpenSensitivityAnalysisParameters.getOrDefault(parameters).isAdjointSlackDistribution()) {
+            slackDistribution = SlackDistribution.create(context, lfNetwork, activeParticipationByBus(lfNetwork, lfParameters));
+            rhsParticipationByBus = Map.of();
+        }
+        double[] thetaBar = analyseAdjoint(context, cachedContext, factorGroups, cotangents, rhsParticipationByBus, slackDistribution);
 
         Map<VariableRef, Double> gradientByGroup = new HashMap<>();
         for (var group : factorGroups.getList()) {
@@ -464,42 +784,29 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             gradientByGroup.put(new VariableRef(declared.getVariableType(), declared.getVariableId()),
                     thetaBar[group.getIndex()]);
         }
-        return assembleGradients(variables, gradientByGroup, statusesByLever(factors, allLfFactors));
+        boolean anyFunctionResolves = allLfFactors.stream().anyMatch(f -> f.getStatus() == LfSensitivityFactor.Status.VALID
+                || f.getStatus() == LfSensitivityFactor.Status.VALID_ONLY_FOR_FUNCTION);
+        return assembleGradients(variables, gradientByGroup, anyFunctionResolves);
     }
 
     /**
-     * Factor statuses per declared lever: VALID_ONLY_FOR_FUNCTION or SKIP when the variable element did not
-     * resolve, VALID or ZERO when it did.
-     */
-    private static Map<VariableRef, Set<LfSensitivityFactor.Status>> statusesByLever(
-            List<SensitivityFactor> factors, List<LfSensitivityFactor<AcVariableType, AcEquationType>> allLfFactors) {
-        Map<VariableRef, Set<LfSensitivityFactor.Status>> statuses = new HashMap<>();
-        for (var lfFactor : allLfFactors) {
-            SensitivityFactor declared = factors.get(lfFactor.getIndex());
-            statuses.computeIfAbsent(new VariableRef(declared.getVariableType(), declared.getVariableId()),
-                    k -> EnumSet.noneOf(LfSensitivityFactor.Status.class)).add(lfFactor.getStatus());
-        }
-        return statuses;
-    }
-
-    /**
-     * One entry per declared lever, in declaration order. A lever without a group but with a
-     * VALID_ONLY_FOR_FUNCTION factor is outside the main component and reads 0, as the forward path writes.
-     * A SKIP lever (neither it nor any monitored function resolved) throws: the forward path writes NaN and
-     * reports the id separately, but a NaN in a gradient cannot be traced back by an optimiser.
+     * One entry per declared lever, in declaration order. A lever without a group is outside the main component
+     * and reads 0, as the forward path writes, when any monitored function of the request resolves, whatever the
+     * status of its own factors: only the first lever is paired with every function, the others with the anchor
+     * alone, which can be outside the component too. When no monitored function resolves, the
+     * request throws: the forward path writes NaN and reports the id separately, but a NaN in a gradient cannot
+     * be traced back by an optimiser.
      */
     private static Map<VariableRef, Double> assembleGradients(List<AdjointVariable> variables,
                                                               Map<VariableRef, Double> gradientByGroup,
-                                                              Map<VariableRef, Set<LfSensitivityFactor.Status>> statusesByLever) {
+                                                              boolean anyFunctionResolves) {
         List<VariableRef> unresolved = new ArrayList<>();
         Map<VariableRef, Double> gradientByVariable = new LinkedHashMap<>();
         for (AdjointVariable v : variables) {
             Double gradient = gradientByGroup.get(v.ref());
-            Set<LfSensitivityFactor.Status> statuses =
-                    statusesByLever.getOrDefault(v.ref(), EnumSet.noneOf(LfSensitivityFactor.Status.class));
             if (gradient != null) {
                 gradientByVariable.put(v.ref(), gradient);
-            } else if (statuses.contains(LfSensitivityFactor.Status.VALID_ONLY_FOR_FUNCTION)) {
+            } else if (anyFunctionResolves) {
                 gradientByVariable.put(v.ref(), 0.0);
             } else {
                 unresolved.add(v.ref());

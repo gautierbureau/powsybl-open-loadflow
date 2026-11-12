@@ -116,7 +116,16 @@
     "open-sensitivity-parameters" : {
       "debugDir" : "/work",
       "startWithFrozenACEmulation" : true,
-      "threadCount" : 1
+      "threadCount" : 1,
+      "adjointSlackDistribution" : false,
+      "adjointReactiveLimitsSmoothing" : false,
+      "adjointReactiveLimitsSmoothingMu" : 0.05,
+      "adjointReactiveLimitsSmoothingVoltageScale" : 50.0,
+      "adjointSmoothingPolishIterations" : 0,
+      "adjointTransformerVoltageControl" : false,
+      "adjointTransformerVoltageControlSmoothing" : false,
+      "adjointTransformerVoltageControlSmoothingMu" : 0.01,
+      "adjointTransformerVoltageControlSmoothingVoltageScale" : 1.0
     }
   }
 }

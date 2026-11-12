@@ -563,6 +563,15 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
         void addFactor(LfSensitivityFactor<V, E> factor);
 
         RhsColumn describeRhs(Map<LfBus, Double> participationByBus);
+
+        /**
+         * The entry this group's rhs would have on the active power equation of {@code slackBus}, which the
+         * system leaves out: what the variable injects at the slack bus itself. Non-zero only for an active
+         * injection at the slack bus and for a parameter of a branch connected to it.
+         */
+        default double describeSlackBusRhs(LfBus slackBus) {
+            return 0;
+        }
     }
 
     protected abstract static class AbstractSensitivityFactorGroup<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> implements SensitivityFactorGroup<V, E> {
@@ -686,6 +695,32 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
                     throw createVariableTypeNotImplementedException(variableType);
             }
             return builder.build();
+        }
+
+        @Override
+        public double describeSlackBusRhs(LfBus slackBus) {
+            if (variableElement == null) {
+                return 0;
+            }
+            return switch (variableType) {
+                case INJECTION_ACTIVE_POWER -> variableElement == slackBus ? 1 : 0;
+                case BRANCH_RESISTANCE, BRANCH_REACTANCE, BRANCH_ADMITTANCE -> {
+                    LfBranch branch = (LfBranch) variableElement;
+                    double[] partials = computeBranchFlowParameterPartials(branch, variableType);
+                    if (partials.length == 0) {
+                        yield 0;
+                    }
+                    double rhs = 0;
+                    if (branch.getBus1() == slackBus) {
+                        rhs -= partials[0]; // -∂p1/∂param
+                    }
+                    if (branch.getBus2() == slackBus) {
+                        rhs -= partials[2]; // -∂p2/∂param
+                    }
+                    yield rhs;
+                }
+                default -> 0;
+            };
         }
 
         /**
@@ -863,6 +898,19 @@ abstract class AbstractSensitivityAnalysis<V extends Enum<V> & Quantity, E exten
                     throw createVariableTypeNotImplementedException(variableType);
             }
             return builder.build();
+        }
+
+        @Override
+        public double describeSlackBusRhs(LfBus slackBus) {
+            Double weight = mainComponentWeights.get(slackBus);
+            if (weight == null) {
+                return 0;
+            }
+            return switch (variableType) {
+                case INJECTION_ACTIVE_POWER -> weight / mainComponentWeights.values().stream().mapToDouble(Math::abs).sum();
+                case HVDC_LINE_ACTIVE_POWER -> weight;
+                default -> 0;
+            };
         }
 
         protected boolean updateConnectivityWeights(Set<LfBus> nonConnectedBuses) {

@@ -50,6 +50,9 @@ public final class AcSolverUtil {
 
                 case DUMMY_P,
                      DUMMY_Q,
+                     GENERATOR_Q,
+                     BUS_V_PLUS,
+                     BUS_V_MINUS,
                      BUS_PHI_ZERO,
                      BUS_PHI_NEGATIVE:
                     x[v.getRow()] = 0;
@@ -128,7 +131,10 @@ public final class AcSolverUtil {
                     break;
 
                 case DUMMY_P,
-                     DUMMY_Q:
+                     DUMMY_Q,
+                     GENERATOR_Q,
+                     BUS_V_PLUS,
+                     BUS_V_MINUS:
                     // nothing to do
                     break;
 
