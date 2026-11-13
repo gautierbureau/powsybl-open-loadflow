@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.sensi;
 
+import com.powsybl.commons.config.ModuleConfig;
 import com.powsybl.commons.config.PlatformConfig;
 import com.powsybl.commons.extensions.AbstractExtension;
 import com.powsybl.openloadflow.ac.equations.LimitsSmoothing;
@@ -33,6 +34,8 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
     private boolean adjointTransformerVoltageControlSmoothing = ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_DEFAULT_VALUE;
     private double adjointTransformerVoltageControlSmoothingMu = ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_MU_DEFAULT_VALUE;
     private double adjointTransformerVoltageControlSmoothingVoltageScale = ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_DEFAULT_VALUE;
+    private boolean adjointTransformerDeadband = ADJOINT_TRANSFORMER_DEADBAND_DEFAULT_VALUE;
+    private double adjointTransformerDeadbandMu = ADJOINT_TRANSFORMER_DEADBAND_MU_DEFAULT_VALUE;
 
     public static final String DEBUG_DIR_PARAM_NAME = "debugDir";
     public static final String DEBUG_DIR_DEFAULT_VALUE = "";
@@ -58,12 +61,17 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
     public static final double ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_MU_DEFAULT_VALUE = LimitsSmoothing.RATIO_DEFAULT_MU;
     public static final String ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME = "adjointTransformerVoltageControlSmoothingVoltageScale";
     public static final double ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_DEFAULT_VALUE = LimitsSmoothing.RATIO_DEFAULT_VOLTAGE_SCALE;
+    public static final String ADJOINT_TRANSFORMER_DEADBAND_PARAM_NAME = "adjointTransformerDeadband";
+    public static final boolean ADJOINT_TRANSFORMER_DEADBAND_DEFAULT_VALUE = false;
+    public static final String ADJOINT_TRANSFORMER_DEADBAND_MU_PARAM_NAME = "adjointTransformerDeadbandMu";
+    public static final double ADJOINT_TRANSFORMER_DEADBAND_MU_DEFAULT_VALUE = LimitsSmoothing.DEADBAND_DEFAULT_MU;
 
     public static final List<String> SPECIFIC_PARAMETERS_NAMES = List.of(DEBUG_DIR_PARAM_NAME, START_WITH_FROZEN_AC_EMULATION_PARAM_NAME, THREAD_COUNT_PARAM_NAME,
             ADJOINT_SLACK_DISTRIBUTION_PARAM_NAME, ADJOINT_REACTIVE_LIMITS_SMOOTHING_PARAM_NAME, ADJOINT_REACTIVE_LIMITS_SMOOTHING_MU_PARAM_NAME,
             ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME, ADJOINT_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME,
             ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_PARAM_NAME, ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_PARAM_NAME,
-            ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_MU_PARAM_NAME, ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME);
+            ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_MU_PARAM_NAME, ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME,
+            ADJOINT_TRANSFORMER_DEADBAND_PARAM_NAME, ADJOINT_TRANSFORMER_DEADBAND_MU_PARAM_NAME);
 
     @Override
     public String getName() {
@@ -216,6 +224,38 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
         return this;
     }
 
+    public boolean isAdjointTransformerDeadband() {
+        return adjointTransformerDeadband;
+    }
+
+    /**
+     * The tap changers in the adjoint as the load flow leaves them, held at their tap, but with a smoothed deadband:
+     * a tap's ratio moves only as the voltage it controls reaches an edge of its band, the wider of half its deadband
+     * and half the voltage change of one of its steps. A tap well inside its band stays held, one at its edge regulates,
+     * one in between partly: the load flow, which rounds a tap to its closest step, moves it only once a change takes
+     * its voltage past the next step. Applies to the transformers controlling the voltage of one of their ends that no
+     * generator holds, several in parallel moving together; the others stay held. It costs one more factorization. Excludes
+     * {@link #setAdjointTransformerVoltageControl adjointTransformerVoltageControl}. Off by default.
+     */
+    public OpenSensitivityAnalysisParameters setAdjointTransformerDeadband(boolean adjointTransformerDeadband) {
+        this.adjointTransformerDeadband = adjointTransformerDeadband;
+        return this;
+    }
+
+    public double getAdjointTransformerDeadbandMu() {
+        return adjointTransformerDeadbandMu;
+    }
+
+    /**
+     * The smoothing of the deadband, per unit of the controlled voltage: about the voltage change the gradient is
+     * meant for. A tap at {@code a} from the edge of its band answers as a fraction of about {@code (mu / a)^2} of a
+     * regulating one; 0+ gives the held taps.
+     */
+    public OpenSensitivityAnalysisParameters setAdjointTransformerDeadbandMu(double adjointTransformerDeadbandMu) {
+        this.adjointTransformerDeadbandMu = adjointTransformerDeadbandMu;
+        return this;
+    }
+
     public static OpenSensitivityAnalysisParameters getOrDefault(SensitivityAnalysisParameters sensitivityAnalysisParameters) {
         OpenSensitivityAnalysisParameters sensiParametersExt = sensitivityAnalysisParameters.getExtension(OpenSensitivityAnalysisParameters.class);
         if (sensiParametersExt == null) {
@@ -242,15 +282,25 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
                                 ADJOINT_REACTIVE_LIMITS_SMOOTHING_VOLTAGE_SCALE_DEFAULT_VALUE))
                         .setAdjointSmoothingPolishIterations(config.getIntProperty(ADJOINT_SMOOTHING_POLISH_ITERATIONS_PARAM_NAME,
                                 ADJOINT_SMOOTHING_POLISH_ITERATIONS_DEFAULT_VALUE))
-                        .setAdjointTransformerVoltageControl(config.getBooleanProperty(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_PARAM_NAME,
-                                ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_DEFAULT_VALUE))
-                        .setAdjointTransformerVoltageControlSmoothing(config.getBooleanProperty(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_PARAM_NAME,
-                                ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_DEFAULT_VALUE))
-                        .setAdjointTransformerVoltageControlSmoothingMu(config.getDoubleProperty(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_MU_PARAM_NAME,
-                                ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_MU_DEFAULT_VALUE))
-                        .setAdjointTransformerVoltageControlSmoothingVoltageScale(config.getDoubleProperty(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME,
-                                ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_DEFAULT_VALUE)));
+                        .loadTransformerSettings(config));
         return parameters;
+    }
+
+    /** The tap changer settings of the adjoint, from the platform configuration. */
+    private OpenSensitivityAnalysisParameters loadTransformerSettings(ModuleConfig config) {
+        return this
+                .setAdjointTransformerVoltageControl(config.getBooleanProperty(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_PARAM_NAME,
+                        ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_DEFAULT_VALUE))
+                .setAdjointTransformerVoltageControlSmoothing(config.getBooleanProperty(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_PARAM_NAME,
+                        ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_DEFAULT_VALUE))
+                .setAdjointTransformerVoltageControlSmoothingMu(config.getDoubleProperty(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_MU_PARAM_NAME,
+                        ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_MU_DEFAULT_VALUE))
+                .setAdjointTransformerVoltageControlSmoothingVoltageScale(config.getDoubleProperty(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME,
+                        ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_DEFAULT_VALUE))
+                .setAdjointTransformerDeadband(config.getBooleanProperty(ADJOINT_TRANSFORMER_DEADBAND_PARAM_NAME,
+                        ADJOINT_TRANSFORMER_DEADBAND_DEFAULT_VALUE))
+                .setAdjointTransformerDeadbandMu(config.getDoubleProperty(ADJOINT_TRANSFORMER_DEADBAND_MU_PARAM_NAME,
+                        ADJOINT_TRANSFORMER_DEADBAND_MU_DEFAULT_VALUE));
     }
 
     public static OpenSensitivityAnalysisParameters load(Map<String, String> properties) {
@@ -283,6 +333,10 @@ public class OpenSensitivityAnalysisParameters extends AbstractExtension<Sensiti
                 .ifPresent(value -> parameters.setAdjointTransformerVoltageControlSmoothingMu(Double.parseDouble(value)));
         Optional.ofNullable(properties.get(ADJOINT_TRANSFORMER_VOLTAGE_CONTROL_SMOOTHING_VOLTAGE_SCALE_PARAM_NAME))
                 .ifPresent(value -> parameters.setAdjointTransformerVoltageControlSmoothingVoltageScale(Double.parseDouble(value)));
+        Optional.ofNullable(properties.get(ADJOINT_TRANSFORMER_DEADBAND_PARAM_NAME))
+                .ifPresent(value -> parameters.setAdjointTransformerDeadband(Boolean.parseBoolean(value)));
+        Optional.ofNullable(properties.get(ADJOINT_TRANSFORMER_DEADBAND_MU_PARAM_NAME))
+                .ifPresent(value -> parameters.setAdjointTransformerDeadbandMu(Double.parseDouble(value)));
         return parameters;
     }
 }

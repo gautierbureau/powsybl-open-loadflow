@@ -629,10 +629,17 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                 ? new LimitsSmoothing(sensiParametersExt.getAdjointTransformerVoltageControlSmoothingMu(),
                                       sensiParametersExt.getAdjointTransformerVoltageControlSmoothingVoltageScale())
                 : null;
-        boolean ownSystem = adjointOnNetworkCopy || reactiveSmoothing != null || transformerVoltageControl;
+        LimitsSmoothing deadbandSmoothing = sensiParametersExt.isAdjointTransformerDeadband()
+                ? new LimitsSmoothing(sensiParametersExt.getAdjointTransformerDeadbandMu(), LimitsSmoothing.DEADBAND_DEFAULT_VOLTAGE_SCALE)
+                : null;
+        if (deadbandSmoothing != null && transformerVoltageControl) {
+            throw new PowsyblException("adjointTransformerDeadband and adjointTransformerVoltageControl exclude each other: "
+                    + "the deadband starts from the taps held at their tap");
+        }
+        boolean ownSystem = adjointOnNetworkCopy || reactiveSmoothing != null || transformerVoltageControl || deadbandSmoothing != null;
         try (AcLoadFlowContext ownContext = ownSystem
                 ? createAdjointContext(cachedContext, reactiveSmoothing, transformerVoltageControl, ratioSmoothing,
-                                       sensiParametersExt.getAdjointSmoothingPolishIterations())
+                                       deadbandSmoothing, sensiParametersExt.getAdjointSmoothingPolishIterations())
                 : null) {
             return runAdjoint(network, variableSets, factors, cotangentsByFunction, variables,
                     ownContext != null ? ownContext : cachedContext, cachedContext);
@@ -646,13 +653,14 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
      * on first use. The copy selects its slack and reference buses again, which must be the cached ones.
      * With {@code reactiveSmoothing}, a bus controlling its own voltage gets smoothed reactive limits. With
      * {@code transformerVoltageControl}, the taps regulate again (see {@link #enableTransformerVoltageControls}), and
-     * with {@code ratioSmoothing} their ratio limits are smoothed. The smoothed unknowns are set from the solution,
+     * with {@code ratioSmoothing} their ratio limits are smoothed. With {@code deadbandSmoothing}, the taps stay held
+     * but get a smoothed deadband (see {@link AcEquationSystemCreator#tapDeadbandHalfWidth}). The smoothed unknowns are set from the solution,
      * then {@code polishIterations} Newton iterations move the state towards the smoothed load flow's solution.
      * Package-private for tests.
      */
     static AcLoadFlowContext createAdjointContext(AcLoadFlowContext cachedContext, LimitsSmoothing reactiveSmoothing,
                                                   boolean transformerVoltageControl, LimitsSmoothing ratioSmoothing,
-                                                  int polishIterations) {
+                                                  LimitsSmoothing deadbandSmoothing, int polishIterations) {
         LfNetwork lfNetwork = cachedContext.getNetwork();
         LfNetwork copy = LfNetworkCopier.copy(lfNetwork, LoadFlowModel.AC, ReportNode.NO_OP);
         for (LfSynchronousNetwork sc : lfNetwork.getSynchronousNetworks()) {
@@ -666,12 +674,13 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             enableTransformerVoltageControls(copy, ratioSmoothing != null);
         }
         AcLoadFlowParameters parameters = cachedContext.getParameters();
-        boolean smoothed = reactiveSmoothing != null || ratioSmoothing != null;
+        boolean smoothed = reactiveSmoothing != null || ratioSmoothing != null || deadbandSmoothing != null;
         if (smoothed) {
             // the vectorized creator keeps the bus balances in arrays, which the smoothed rows do not extend
             parameters = new AcLoadFlowParameters(parameters)
                     .setEquationSystemCreationParameters(new AcEquationSystemCreationParameters(
-                            parameters.getEquationSystemCreationParameters().isForceA1Var(), reactiveSmoothing, ratioSmoothing))
+                            parameters.getEquationSystemCreationParameters().isForceA1Var(), reactiveSmoothing, ratioSmoothing,
+                            deadbandSmoothing))
                     .setVectorized(false);
         }
         AcLoadFlowContext context = new AcLoadFlowContext(copy, parameters);
@@ -752,6 +761,14 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                 case GENERATOR_Q -> {
                     LfBus bus = network.getBus(v.getElementNum());
                     x[v.getRow()] = ((Equation<?, ?>) bus.getQ()).eval() + bus.getLoadTargetQ();
+                }
+                // the held taps' ratio move: the smoothed solution of their deadband pair at the solved voltage
+                case BUS_TAP_RAISE, BUS_TAP_LOWER -> {
+                    AcEquationType pair = v.getType() == AcVariableType.BUS_TAP_RAISE
+                            ? AcEquationType.BUS_TAP_DEADBAND_RAISE : AcEquationType.BUS_TAP_DEADBAND_LOWER;
+                    Equation<AcVariableType, AcEquationType> equation = equationSystem.getEquation(v.getElementNum(), pair).orElseThrow();
+                    LimitComplementarityEquationTerm<?> term = (LimitComplementarityEquationTerm<?>) equation.getTerms().getFirst();
+                    x[v.getRow()] = term.smoothedSlack();
                 }
                 case BUS_V_PLUS, BUS_V_MINUS -> {
                     LfBus bus = network.getBus(v.getElementNum());

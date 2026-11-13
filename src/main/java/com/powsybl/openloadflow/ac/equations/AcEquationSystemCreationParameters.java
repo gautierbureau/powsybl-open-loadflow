@@ -18,6 +18,8 @@ public class AcEquationSystemCreationParameters {
 
     private final LimitsSmoothing ratioLimitsSmoothing;
 
+    private final LimitsSmoothing tapDeadbandSmoothing;
+
     public AcEquationSystemCreationParameters() {
         this(false);
     }
@@ -41,9 +43,21 @@ public class AcEquationSystemCreationParameters {
      */
     public AcEquationSystemCreationParameters(boolean forceA1Var, LimitsSmoothing reactiveLimitsSmoothing,
                                               LimitsSmoothing ratioLimitsSmoothing) {
+        this(forceA1Var, reactiveLimitsSmoothing, ratioLimitsSmoothing, null);
+    }
+
+    /**
+     * @param tapDeadbandSmoothing when not null, the tap changers held at their tap on a bus whose voltage control can
+     *                             be smoothed (see {@link AcEquationSystemCreator#canSmoothTapDeadband}) get a smoothed
+     *                             deadband: their ratios move only as the voltage reaches an edge of its band (see
+     *                             {@link AcEquationSystemCreator#tapDeadbandHalfWidth})
+     */
+    public AcEquationSystemCreationParameters(boolean forceA1Var, LimitsSmoothing reactiveLimitsSmoothing,
+                                              LimitsSmoothing ratioLimitsSmoothing, LimitsSmoothing tapDeadbandSmoothing) {
         this.forceA1Var = forceA1Var;
         this.reactiveLimitsSmoothing = reactiveLimitsSmoothing;
         this.ratioLimitsSmoothing = ratioLimitsSmoothing;
+        this.tapDeadbandSmoothing = tapDeadbandSmoothing;
     }
 
     public boolean isForceA1Var() {
@@ -58,12 +72,17 @@ public class AcEquationSystemCreationParameters {
         return ratioLimitsSmoothing;
     }
 
+    public LimitsSmoothing getTapDeadbandSmoothing() {
+        return tapDeadbandSmoothing;
+    }
+
     @Override
     public String toString() {
         return "AcEquationSystemCreationParameters(" +
                 "forceA1Var=" + forceA1Var +
                 (reactiveLimitsSmoothing != null ? ", reactiveLimitsSmoothing=" + reactiveLimitsSmoothing : "") +
                 (ratioLimitsSmoothing != null ? ", ratioLimitsSmoothing=" + ratioLimitsSmoothing : "") +
+                (tapDeadbandSmoothing != null ? ", tapDeadbandSmoothing=" + tapDeadbandSmoothing : "") +
                 ')';
     }
 }

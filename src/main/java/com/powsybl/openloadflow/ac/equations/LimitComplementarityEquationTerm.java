@@ -117,6 +117,15 @@ public class LimitComplementarityEquationTerm<T extends LfElement> extends Abstr
         return variables;
     }
 
+    /**
+     * The slack that solves this pair at the current state, given the headroom {@code a}: {@code b = mu^2 / a}, the
+     * headroom being floored at {@code mu / 1000} (a controller past its switch counts as just at it, fully switched).
+     */
+    public double smoothedSlack() {
+        double a = Math.max(a(), mu * 1e-3);
+        return mu * mu / a / voltageScale;
+    }
+
     private double a() {
         if (Double.isNaN(bound)) {
             bound = boundSupplier.getAsDouble();

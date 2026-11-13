@@ -45,7 +45,7 @@ class OpenSensitivityAnalysisProviderTest extends AbstractSensitivityAnalysisTes
     void specificParametersTest() {
         var provider = new OpenSensitivityAnalysisProvider();
 
-        assertEquals(12, provider.getSpecificParametersNames().size());
+        assertEquals(14, provider.getSpecificParametersNames().size());
 
         SensitivityAnalysisParameters parameters = new SensitivityAnalysisParameters();
 

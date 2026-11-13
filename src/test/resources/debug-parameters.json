@@ -125,7 +125,9 @@
       "adjointTransformerVoltageControl" : false,
       "adjointTransformerVoltageControlSmoothing" : false,
       "adjointTransformerVoltageControlSmoothingMu" : 0.01,
-      "adjointTransformerVoltageControlSmoothingVoltageScale" : 1.0
+      "adjointTransformerVoltageControlSmoothingVoltageScale" : 1.0,
+      "adjointTransformerDeadband" : false,
+      "adjointTransformerDeadbandMu" : 0.002
     }
   }
 }
