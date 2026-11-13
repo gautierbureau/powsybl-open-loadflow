@@ -349,6 +349,46 @@ public class DTGraph<V, E> implements GraphModel<V, E> {
         return vertexToTreeNode.get(v).getNeighborEdges();
     }
 
+    // GraphModel methods upstream removed (#1482) and this branch's interface still has
+
+    @Override
+    public Set<E> getEdgesBetween(V vertex1, V vertex2) {
+        Set<E> between = new LinkedHashSet<>();
+        for (E e : getNeighborEdgesOf(vertex1)) {
+            V source = getEdgeSource(e);
+            V target = getEdgeTarget(e);
+            if (vertex1.equals(source) && vertex2.equals(target) || vertex1.equals(target) && vertex2.equals(source)) {
+                between.add(e);
+            }
+        }
+        return between;
+    }
+
+    @Override
+    public Set<E> getEdges() {
+        return Collections.unmodifiableSet(edges.keySet());
+    }
+
+    @Override
+    public int getNeighborEdgeCountOf(V v) {
+        return getNeighborEdgesOf(v).size();
+    }
+
+    @Override
+    public Set<V> getVertices() {
+        return Collections.unmodifiableSet(vertexToTreeNode.keySet());
+    }
+
+    @Override
+    public List<V> getNeighborVerticesOf(V v) {
+        List<V> neighbors = new ArrayList<>();
+        for (E e : getNeighborEdgesOf(v)) {
+            V source = getEdgeSource(e);
+            neighbors.add(v.equals(source) ? getEdgeTarget(e) : source);
+        }
+        return neighbors;
+    }
+
     public int getNbConnectedComponent() {
         return roots.size();
     }

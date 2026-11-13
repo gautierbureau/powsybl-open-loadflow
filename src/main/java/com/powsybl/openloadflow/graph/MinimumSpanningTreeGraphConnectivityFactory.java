@@ -16,4 +16,9 @@ public class MinimumSpanningTreeGraphConnectivityFactory<V, E> implements GraphC
     public GraphConnectivity<V, E> create() {
         return new MinimumSpanningTreeGraphConnectivity<>();
     }
+
+    @Override
+    public boolean supportsIncremental() {
+        return true;                                         // edge additions are supported (updateConnectivity(EdgeAdd))
+    }
 }
