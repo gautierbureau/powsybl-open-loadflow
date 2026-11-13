@@ -12,6 +12,7 @@ import com.powsybl.commons.report.ReportNode;
 import com.powsybl.contingency.*;
 import com.powsybl.contingency.strategy.OperatorStrategy;
 import com.powsybl.contingency.strategy.condition.TrueCondition;
+import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.PhaseTapChanger;
 import com.powsybl.iidm.network.VoltageLevel;
@@ -846,6 +847,36 @@ class WoodburyDcSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnal
                     operatorStrategies, actions, ReportNode.NO_OP);
             // the bay's load is picked up through L2
             assertEquals(650.0, getOperatorStrategyResult(result, "strategy").getNetworkResult().getBranchResult("L2").getP1(), DELTA_POWER);
+        }
+    }
+
+    /**
+     * A generator action on a generator the contingency disconnects (B8-G, connected by L7-8-1 only): it cannot apply,
+     * as in the DC security analysis, instead of injecting its change on a bus outside the main component.
+     */
+    @Test
+    void testFastDcSaGeneratorActionOnDisconnectedGenerator() {
+        Network network = IeeeCdfNetworkFactory.create14();
+        List<Contingency> contingencies = List.of(new Contingency("L7-8-1", new BranchContingency("L7-8-1")));
+        List<Action> actions = List.of(
+                new GeneratorActionBuilder().withId("g8Up").withGeneratorId("B8-G").withActivePowerRelativeValue(true).withActivePowerValue(20.0).build(),
+                new GeneratorActionBuilder().withId("g2Down").withGeneratorId("B2-G").withActivePowerRelativeValue(true).withActivePowerValue(-20.0).build());
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("redispatch", ContingencyContext.specificContingency("L7-8-1"), new TrueCondition(), List.of("g8Up", "g2Down")));
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(false);
+        SecurityAnalysisResult expected = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(true);
+        SecurityAnalysisResult fast = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+
+        for (BranchResult branchResult : getOperatorStrategyResult(expected, "redispatch").getNetworkResult().getBranchResults()) {
+            BranchResult other = getOperatorStrategyResult(fast, "redispatch").getNetworkResult().getBranchResult(branchResult.getBranchId());
+            if (other != null && !Double.isNaN(branchResult.getP1())) {
+                assertEquals(branchResult.getP1(), other.getP1(), DELTA_POWER, branchResult.getBranchId());
+            }
         }
     }
 }
