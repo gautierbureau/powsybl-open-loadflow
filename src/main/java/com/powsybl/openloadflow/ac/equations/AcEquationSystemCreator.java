@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.network.*;
 import com.powsybl.openloadflow.network.TransformerPhaseControl.Mode;
 import com.powsybl.openloadflow.util.Evaluable;
 import com.powsybl.openloadflow.util.EvaluableConstants;
+import org.apache.commons.lang3.Range;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -630,12 +631,22 @@ public class AcEquationSystemCreator {
 
                     updateTransformerVoltageControlEquations(voltageControl, equationSystem);
 
-                    LimitsSmoothing smoothing = creationParameters.getRatioLimitsSmoothing();
-                    if (smoothing != null && canSmoothRatioLimits(voltageControl)
-                            && voltageControl.getMergedControllerElements().getFirst().isVoltageControlEnabled()) {
-                        createTransformerSmoothedRatioLimitsEquations(voltageControl, equationSystem, smoothing);
-                    }
+                    createTransformerSmoothedEquations(voltageControl, equationSystem);
                 });
+    }
+
+    /** The smoothed ratio limits of a regulating tap, or the smoothed deadband of a held one, when asked for. */
+    private void createTransformerSmoothedEquations(TransformerVoltageControl voltageControl,
+                                                    EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        LimitsSmoothing smoothing = creationParameters.getRatioLimitsSmoothing();
+        if (smoothing != null && canSmoothRatioLimits(voltageControl)
+                && voltageControl.getMergedControllerElements().getFirst().isVoltageControlEnabled()) {
+            createTransformerSmoothedRatioLimitsEquations(voltageControl, equationSystem, smoothing);
+        }
+        LimitsSmoothing deadband = creationParameters.getTapDeadbandSmoothing();
+        if (deadband != null && canSmoothTapDeadband(voltageControl)) {
+            createTransformerDeadbandEquations(voltageControl, equationSystem, deadband);
+        }
     }
 
     /**
@@ -685,6 +696,113 @@ public class AcEquationSystemCreator {
         equationSystem.createEquation(branch, AcEquationType.BRANCH_RHO1_LIMIT_LO)
                 .addTerm(LimitComplementarityEquationTerm.ratio(branch, r1, vMinus, false, raisesVoltage,
                         piModel.getMinR1(), piModel.getMaxR1(), smoothing));
+    }
+
+    /** The load flow's deadband when the network gives none (see AbstractTransformerVoltageControlOuterLoop). */
+    public static final double MIN_TAP_TARGET_DEADBAND_KV = 0.1;
+
+    /**
+     * Whether the held taps of a voltage control can get a smoothed deadband: its main control, visible, holding no
+     * other control, its bus not held by a generator, and every enabled controller a transformer connected at both
+     * sides with the controlled bus at one of its ends (which tells how its ratio moves that voltage). Several
+     * transformers in parallel share it.
+     */
+    public static boolean canSmoothTapDeadband(TransformerVoltageControl voltageControl) {
+        if (voltageControl.getMergeStatus() != VoltageControl.MergeStatus.MAIN || voltageControl.isHidden()
+                || !voltageControl.getMergedDependentVoltageControls().isEmpty()) {
+            return false;
+        }
+        LfBus controlledBus = voltageControl.getControlledBus();
+        if (controlledBus.isGeneratorVoltageControlled() && controlledBus.isGeneratorVoltageControlEnabled()) {
+            return false;
+        }
+        List<LfBranch> controllers = tapDeadbandControllers(voltageControl);
+        return !controllers.isEmpty() && controllers.stream().allMatch(b -> !b.isVoltageControlEnabled()
+                && b.isConnectedAtBothSides() && (controlledBus == b.getBus1() || controlledBus == b.getBus2()));
+    }
+
+    private static List<LfBranch> tapDeadbandControllers(TransformerVoltageControl voltageControl) {
+        return voltageControl.getMergedControllerElements().stream().filter(b -> !b.isDisabled()).toList();
+    }
+
+    /**
+     * Half the width of the band the taps of a bus hold its voltage in, per unit: the load flow moves them only once
+     * the voltage leaves its target by more than half the deadband (0.1 kV when the network gives none), and then
+     * rounds each to its closest step, which leaves the voltage up to half a step off. So the wider of the two: half
+     * the deadband, and half the voltage change of the first step any of them takes: the smallest mean step of their
+     * ranges, at the target voltage. Transformers in parallel share one continuous ratio before each is rounded, so
+     * identical ones step together: the band is not narrower for being shared.
+     */
+    public static double tapDeadbandHalfWidth(TransformerVoltageControl voltageControl) {
+        double halfDeadband = voltageControl.getTargetDeadband()
+                .orElse(MIN_TAP_TARGET_DEADBAND_KV / voltageControl.getControlledBus().getNominalV()) / 2;
+        List<LfBranch> controllers = tapDeadbandControllers(voltageControl);
+        double smallestStep = Double.POSITIVE_INFINITY;
+        for (LfBranch branch : controllers) {
+            PiModel piModel = branch.getPiModel();
+            Range<Integer> range = piModel.getTapPositionRange();
+            int steps = range.getMaximum() - range.getMinimum();
+            if (steps > 0) {
+                smallestStep = Math.min(smallestStep, (piModel.getMaxR1() - piModel.getMinR1()) / steps / piModel.getR1());
+            }
+        }
+        double halfStep = Double.isFinite(smallestStep)
+                ? voltageControl.getTargetValue() * smallestStep / 2
+                : 0;
+        return Math.max(halfDeadband, halfStep);
+    }
+
+    /**
+     * Smoothed deadband of the taps the load flow left held on a bus: the ratio of each, the solved one, may move by
+     * {@code r1 - s raise + s lower = r1Solved} ({@code s = 1} when the bus is on its side 2, where a higher ratio
+     * raises it, {@code -1} on its side 1), all the transformers in parallel by the same {@code raise} and
+     * {@code lower}, which start only once the voltage reaches the low or the high edge of its band
+     * ({@code Vset -+ halfWidth}, see {@link #tapDeadbandHalfWidth}): two smoothed complementarity equations (see
+     * {@link LimitComplementarityEquationTerm}) between the voltage's room to that edge and the move. At the solved
+     * state, with the moves at the smoothed solution, the taps at {@code a} from an edge answer a voltage change
+     * {@code dV} by a move of about {@code mu^2 / (voltageScale a^2) dV}: held well inside their band, regulating at
+     * its edge. A transformer at an end of its range does not take a move past it; when none can, the move is not
+     * created.
+     */
+    private static void createTransformerDeadbandEquations(TransformerVoltageControl voltageControl,
+                                                           EquationSystem<AcVariableType, AcEquationType> equationSystem,
+                                                           LimitsSmoothing smoothing) {
+        LfBus controlledBus = voltageControl.getControlledBus();
+        double halfWidth = tapDeadbandHalfWidth(voltageControl);
+        double low = voltageControl.getTargetValue() - halfWidth;
+        double high = voltageControl.getTargetValue() + halfWidth;
+        VariableSet<AcVariableType> variableSet = equationSystem.getVariableSet();
+        Variable<AcVariableType> v = variableSet.getVariable(controlledBus.getNum(), AcVariableType.BUS_V);
+        Variable<AcVariableType> raise = variableSet.getVariable(controlledBus.getNum(), AcVariableType.BUS_TAP_RAISE);
+        Variable<AcVariableType> lower = variableSet.getVariable(controlledBus.getNum(), AcVariableType.BUS_TAP_LOWER);
+        boolean canRaise = false;
+        boolean canLower = false;
+        for (LfBranch branch : tapDeadbandControllers(voltageControl)) {
+            boolean side2 = controlledBus == branch.getBus2();
+            PiModel piModel = branch.getPiModel();
+            Range<Integer> range = piModel.getTapPositionRange();
+            boolean canRise = piModel.getTapPosition() < range.getMaximum();
+            boolean canFall = piModel.getTapPosition() > range.getMinimum();
+            Equation<AcVariableType, AcEquationType> ratio = equationSystem.getEquation(branch.getNum(), AcEquationType.BRANCH_TARGET_RHO1)
+                    .orElseThrow();
+            // raising the voltage is a rise of the ratio on side 2, a fall on side 1
+            if (side2 ? canRise : canFall) {
+                ratio.addTerm(side2 ? raise.<AcEquationType>createTerm().minus() : raise.createTerm());
+                canRaise = true;
+            }
+            if (side2 ? canFall : canRise) {
+                ratio.addTerm(side2 ? lower.createTerm() : lower.<AcEquationType>createTerm().minus());
+                canLower = true;
+            }
+        }
+        if (canRaise) {
+            equationSystem.createEquation(controlledBus, AcEquationType.BUS_TAP_DEADBAND_RAISE)
+                    .addTerm(new LimitComplementarityEquationTerm<>(controlledBus, v, raise, low, 1, smoothing));
+        }
+        if (canLower) {
+            equationSystem.createEquation(controlledBus, AcEquationType.BUS_TAP_DEADBAND_LOWER)
+                    .addTerm(new LimitComplementarityEquationTerm<>(controlledBus, v, lower, high, -1, smoothing));
+        }
     }
 
     public static void createR1DistributionEquations(TransformerVoltageControl voltageControl,

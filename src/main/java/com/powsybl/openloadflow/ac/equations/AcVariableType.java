@@ -19,6 +19,8 @@ public enum AcVariableType implements Quantity {
     GENERATOR_Q("q_g", ElementType.BUS), // reactive generation of a voltage controller bus (smoothed reactive limits)
     BUS_V_PLUS("v_plus", ElementType.BUS), // voltage shortfall below the target, [Vset - V]+ (smoothed limits)
     BUS_V_MINUS("v_minus", ElementType.BUS), // voltage excess above the target, [V - Vset]+ (smoothed limits)
+    BUS_TAP_RAISE("tap_raise", ElementType.BUS), // ratio move of the held taps of a bus raising its voltage (smoothed tap deadband)
+    BUS_TAP_LOWER("tap_lower", ElementType.BUS), // ratio move of the held taps of a bus lowering its voltage (smoothed tap deadband)
     BUS_V_ZERO("vh", ElementType.BUS), // bus voltage magnitude for zero sequence
     BUS_PHI_ZERO("\u03C6h", ElementType.BUS), // bus voltage angle for zero sequence
     BUS_V_NEGATIVE("vi", ElementType.BUS), // bus voltage magnitude for negative sequence
