@@ -2141,6 +2141,28 @@ class OpenSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest {
     }
 
     @Test
+    void reportTestDcFastMode() throws IOException {
+        var network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+
+        List<Contingency> contingencies = createAllBranchesContingencies(network);
+
+        ReportNode reportNode = ReportNode.newRootReportNode()
+                .withResourceBundles(PowsyblOpenLoadFlowReportResourceBundle.BASE_NAME, PowsyblTestReportResourceBundle.TEST_BASE_NAME)
+                .withMessageTemplate("TestSecurityAnalysis")
+                .build();
+
+        LoadFlowParameters loadFlowParameters = new LoadFlowParameters()
+                .setDc(true);
+        SecurityAnalysisParameters securityAnalysisParameters = new SecurityAnalysisParameters()
+                .setLoadFlowParameters(loadFlowParameters);
+        securityAnalysisParameters.addExtension(OpenSecurityAnalysisParameters.class, new OpenSecurityAnalysisParameters().setDcFastMode(true));
+        runSecurityAnalysis(network, contingencies, Collections.emptyList(), securityAnalysisParameters, reportNode);
+
+        // every contingency's report is a child of the network's, beside the pre-contingency simulation
+        assertReportEquals("/saReportDcFastMode.txt", reportNode);
+    }
+
+    @Test
     void testBranchOpenAtOneSideLoss() {
         var network = ConnectedComponentNetworkFactory.createTwoComponentWithGeneratorAndLoad();
         network.getLine("l46").getTerminal1().disconnect();
