@@ -36,6 +36,8 @@ public abstract class AbstractNetworkResult {
 
     protected final StateMonitorIndex zeroImpedanceMonitorIndex;
 
+    protected final MonitoredElementIndex monitoredElementIndex;
+
     protected final boolean createResultExtension;
 
     protected final LoadFlowModel loadFlowModel;
@@ -46,7 +48,22 @@ public abstract class AbstractNetworkResult {
 
     static final List<LfBranch.BranchType> T3WT_BRANCH_TYPES = List.of(TRANSFO_3_LEG_1, TRANSFO_3_LEG_2, TRANSFO_3_LEG_3);
 
-    public record StateMonitorIndexes(StateMonitorIndex monitorIndex, StateMonitorIndex zeroImpedanceMonitorIndex) {
+    /**
+     * The monitors of a security analysis, and the elements they select in its networks: share one
+     * {@link MonitoredElementIndex} across the results of a run so each network is searched once per monitor.
+     */
+    public record StateMonitorIndexes(StateMonitorIndex monitorIndex, StateMonitorIndex zeroImpedanceMonitorIndex,
+                                      MonitoredElementIndex monitoredElementIndex) {
+
+        public StateMonitorIndexes {
+            Objects.requireNonNull(monitorIndex);
+            Objects.requireNonNull(zeroImpedanceMonitorIndex);
+            Objects.requireNonNull(monitoredElementIndex);
+        }
+
+        public StateMonitorIndexes(StateMonitorIndex monitorIndex, StateMonitorIndex zeroImpedanceMonitorIndex) {
+            this(monitorIndex, zeroImpedanceMonitorIndex, new MonitoredElementIndex());
+        }
     }
 
     protected final Map<LfBranch, ChangedPhaseTapChanger> changedPhaseTapChangers = new HashMap<>();
@@ -55,6 +72,7 @@ public abstract class AbstractNetworkResult {
         this.network = Objects.requireNonNull(network);
         this.monitorIndex = Objects.requireNonNull(monitorIndexes.monitorIndex);
         this.zeroImpedanceMonitorIndex = Objects.requireNonNull(monitorIndexes.zeroImpedanceMonitorIndex);
+        this.monitoredElementIndex = monitorIndexes.monitoredElementIndex;
         this.createResultExtension = createResultExtension;
         this.loadFlowModel = loadFlowModel;
         this.dcPowerFactor = dcPowerFactor;
@@ -63,24 +81,16 @@ public abstract class AbstractNetworkResult {
     protected void addResults(StateMonitor monitor, Consumer<LfBranch> branchConsumer, Predicate<LfBranch> isBranchDisabled,
                               Consumer<LfBus> busConsumer, Consumer<String> threeWindingsTransformerResultsConsumer) {
         Objects.requireNonNull(monitor);
-        if (!monitor.getBranchIds().isEmpty()) {
-            network.getBranches().stream()
-                    .filter(lfBranch -> !isBranchDisabled.test(lfBranch))
-                    .forEach(lfBranch -> {
-                        for (String originalId : lfBranch.getOriginalIds()) {
-                            if (monitor.getBranchIds().contains(originalId)) {
-                                branchConsumer.accept(lfBranch);
-                                break; // only generate result at first original ID match
-                            }
-                        }
-                    });
+        for (LfBranch lfBranch : monitoredElementIndex.getBranches(network, monitor)) {
+            if (!isBranchDisabled.test(lfBranch)) {
+                branchConsumer.accept(lfBranch);
+            }
         }
 
-        if (!monitor.getVoltageLevelIds().isEmpty()) {
-            network.getBuses().stream()
-                    .filter(lfBus -> monitor.getVoltageLevelIds().contains(lfBus.getVoltageLevelId()))
-                    .filter(lfBus -> !lfBus.isDisabled())
-                    .forEach(busConsumer);
+        for (LfBus lfBus : monitoredElementIndex.getBuses(network, monitor)) {
+            if (!lfBus.isDisabled()) {
+                busConsumer.accept(lfBus);
+            }
         }
 
         if (!monitor.getThreeWindingsTransformerIds().isEmpty()) {
