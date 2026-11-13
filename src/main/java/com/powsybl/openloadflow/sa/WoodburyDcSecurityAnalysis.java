@@ -25,6 +25,7 @@ import com.powsybl.openloadflow.dc.fastdc.ComputedContingencyElement;
 import com.powsybl.openloadflow.dc.fastdc.ComputedElement;
 import com.powsybl.openloadflow.dc.fastdc.ConnectivityBreakAnalysis;
 import com.powsybl.openloadflow.dc.fastdc.ConnectivityBreakAnalysis.ConnectivityAnalysisResult;
+import com.powsybl.openloadflow.dc.fastdc.EnergizableIslands;
 import com.powsybl.openloadflow.dc.fastdc.WoodburyEngine;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.lf.util.LfReports;
@@ -110,7 +111,7 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                                                     ConnectivityAnalysisResult connectivityAnalysisResult, Map<String, ComputedContingencyElement> contingencyElementByBranch,
                                                     ReportNode reportNode) {
         return calculatePostContingencyAndOperatorStrategyStates(loadFlowContext, contingenciesStates, flowStates, connectivityAnalysisResult, contingencyElementByBranch,
-                Collections.emptyMap(), DenseMatrix.EMPTY, reportNode);
+                Collections.emptyMap(), DenseMatrix.EMPTY, EnergizableIslands.none(), reportNode);
     }
 
     /**
@@ -121,12 +122,15 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
      */
     private double[] calculatePostContingencyAndOperatorStrategyStates(DcLoadFlowContext loadFlowContext, DenseMatrix contingenciesStates, double[] flowStates,
                                                                        ConnectivityAnalysisResult connectivityAnalysisResult, Map<String, ComputedContingencyElement> contingencyElementByBranch,
-                                                                       Map<LfAction, List<ComputedElement>> actionElementByLfAction, DenseMatrix actionsStates, ReportNode reportNode) {
+                                                                       Map<LfAction, List<ComputedElement>> actionElementByLfAction, DenseMatrix actionsStates,
+                                                                       EnergizableIslands energizableIslands, ReportNode reportNode) {
         PropagatedContingency contingency = connectivityAnalysisResult.getPropagatedContingency();
         Set<LfBus> disabledBuses = connectivityAnalysisResult.getDisabledBuses();
         Set<LfBranch> partialDisabledBranches = connectivityAnalysisResult.getPartialDisabledBranches();
         Set<String> elementsToReconnect = connectivityAnalysisResult.getElementsToReconnect();
         List<LfAction> operatorStrategyLfActions = connectivityAnalysisResult.getOperatorStrategy() != null ? connectivityAnalysisResult.getOperatorStrategy().getActions() : Collections.emptyList();
+        // the islands the actions energize get their injections back (undone by the network state restoration)
+        energizableIslands.energize(operatorStrategyLfActions);
 
         // reset active flow of hvdc line without power
         connectivityAnalysisResult.getHvdcsWithoutPower().forEach(hvdcWithoutPower -> {
@@ -393,6 +397,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 OperatorStrategies.indexByContingencyId(propagatedContingencies, operatorStrategies, actionsById, true);
         Set<Action> neededActions = OperatorStrategies.getNeededActions(operatorStrategiesByContingencyId, actionsById);
         Map<String, LfAction> lfActionById = LfActionUtils.createLfActions(lfNetwork, neededActions, network); // only convert needed actions
+        // the parts of the network dead in the base case that an action may energize: in the base case's system, before it is built
+        EnergizableIslands energizableIslands = EnergizableIslands.prepare(lfNetwork, lfActionById.values());
 
         OpenSecurityAnalysisParameters openSecurityAnalysisParameters = OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters);
         boolean createResultExtension = openSecurityAnalysisParameters.isCreateResultExtension();
@@ -443,7 +449,7 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
             // the map is indexed by lf actions as different kind of actions can be given on the same branch
             Map<LfAction, List<ComputedElement>> actionElementsIndexByLfAction = ComputedElement.createActionElementsIndexByLfAction(lfActionById, context.getEquationSystem(),
-                    context.getParameters().getEquationSystemCreationParameters());
+                    context.getParameters().getEquationSystemCreationParameters(), energizableIslands);
 
             // compute states with +1 -1 to model the actions in Woodbury engine
             // note that the number of columns in the matrix depends on the number of distinct branches affected by the action elements
@@ -476,7 +482,7 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
             Function<ConnectivityAnalysisResult, double[]> toPostContingencyAndOperatorStrategyStates = postContingencyAndOperatorStrategyConnectivityAnalysisResult ->
                     calculatePostContingencyAndOperatorStrategyStates(context, connectivityBreakAnalysisResults.contingenciesStates(),
                             workingContingencyStates, postContingencyAndOperatorStrategyConnectivityAnalysisResult,
-                            connectivityBreakAnalysisResults.contingencyElementByBranch(), actionElementsIndexByLfAction, actionsStates, reportNode);
+                            connectivityBreakAnalysisResults.contingencyElementByBranch(), actionElementsIndexByLfAction, actionsStates, energizableIslands, reportNode);
             ToFastDcResults toFastDcResults = new ToFastDcResults(toPostContingencyStates, toPostContingencyAndOperatorStrategyConnectivityAnalysisResult, toPostContingencyAndOperatorStrategyStates);
 
             LOGGER.info("Processing post contingency results for contingencies with no connectivity break");
