@@ -27,12 +27,14 @@ import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.results.BranchResult;
+import com.powsybl.security.results.NetworkResult;
 import com.powsybl.security.results.OperatorStrategyResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
@@ -815,30 +817,55 @@ class WoodburyDcSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnal
         assertEquals(1, operatorStrategyResult.getNetworkResult().getBranchResults().size());
     }
 
-    /** Closing a breaker towards a bay that is dead in the base case (an open load bay). */
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testDcSaActionClosingBreakerTowardsDeadBay(boolean dcFastMode) {
+    /**
+     * Closing breakers towards a bay that is dead in the base case (an open load bay, reachable from the bus bar by BX and
+     * from the L1 bay by BY): the fast DC results are the DC security analysis's, the bay's load picked up, the base case
+     * and the contingencies unchanged.
+     */
+    @Test
+    void testFastDcSaEnergizesDeadBay() {
         Network network = NodeBreakerNetworkFactory.create();
         VoltageLevel vl2 = network.getVoltageLevel("VL2");
         vl2.getNodeBreakerView().newBreaker().setId("BX").setNode1(0).setNode2(10).setOpen(true).add();
+        vl2.getNodeBreakerView().newBreaker().setId("BY").setNode1(1).setNode2(10).setOpen(true).add();
         vl2.newLoad().setId("LDX").setNode(10).setP0(50.0).setQ0(0.0).add();
-        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
-        List<Action> actions = List.of(new SwitchAction("closeBX", "BX", false));
-        List<OperatorStrategy> operatorStrategies = List.of(
-                new OperatorStrategy("strategy", ContingencyContext.specificContingency("L1"), new TrueCondition(), List.of("closeBX")));
-        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(dcFastMode);
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")),
+                new Contingency("L2", new BranchContingency("L2")));
+        List<Action> actions = List.of(new SwitchAction("closeBX", "BX", false), new SwitchAction("closeBY", "BY", false));
+        List<OperatorStrategy> operatorStrategies = new ArrayList<>();
+        for (Contingency contingency : contingencies) {
+            String c = contingency.getId();
+            operatorStrategies.add(new OperatorStrategy(c + "-BX", ContingencyContext.specificContingency(c), new TrueCondition(), List.of("closeBX")));
+            operatorStrategies.add(new OperatorStrategy(c + "-BY", ContingencyContext.specificContingency(c), new TrueCondition(), List.of("closeBY")));
+            operatorStrategies.add(new OperatorStrategy(c + "-both", ContingencyContext.specificContingency(c), new TrueCondition(), List.of("closeBX", "closeBY")));
+        }
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
 
-        if (dcFastMode) {
-            CompletionException exception = assertThrows(CompletionException.class, () -> runSecurityAnalysis(network, contingencies,
-                    createAllBranchesMonitors(network), securityAnalysisParameters, operatorStrategies, actions, ReportNode.NO_OP));
-            assertEquals("Action 'closeBX' connects branch 'BX' to bus 'VL2_10', which is not energized in the base case: "
-                    + "not supported in fast DC security analysis", exception.getCause().getMessage());
-        } else {
-            SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, createAllBranchesMonitors(network), securityAnalysisParameters,
-                    operatorStrategies, actions, ReportNode.NO_OP);
-            // the bay's load is picked up through L2
-            assertEquals(650.0, getOperatorStrategyResult(result, "strategy").getNetworkResult().getBranchResult("L2").getP1(), DELTA_POWER);
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(false);
+        SecurityAnalysisResult expected = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(true);
+        SecurityAnalysisResult fast = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+
+        assertSameBranchResults(expected.getPreContingencyResult().getNetworkResult(), fast.getPreContingencyResult().getNetworkResult());
+        for (Contingency contingency : contingencies) {
+            assertSameBranchResults(getPostContingencyResult(expected, contingency.getId()).getNetworkResult(),
+                    getPostContingencyResult(fast, contingency.getId()).getNetworkResult());
+        }
+        for (OperatorStrategy strategy : operatorStrategies) {
+            assertSameBranchResults(getOperatorStrategyResult(expected, strategy.getId()).getNetworkResult(),
+                    getOperatorStrategyResult(fast, strategy.getId()).getNetworkResult());
+        }
+        // the bay's load picked up through L2 when L1 is lost
+        assertEquals(650.0, getOperatorStrategyResult(fast, "L1-BX").getNetworkResult().getBranchResult("L2").getP1(), DELTA_POWER);
+    }
+
+    private static void assertSameBranchResults(NetworkResult expected, NetworkResult actual) {
+        for (BranchResult branchResult : expected.getBranchResults()) {
+            BranchResult other = actual.getBranchResult(branchResult.getBranchId());
+            assertNotNull(other, branchResult.getBranchId());
+            assertEquals(branchResult.getP1(), other.getP1(), DELTA_POWER, branchResult.getBranchId());
         }
     }
 }

@@ -217,7 +217,7 @@ public final class ConnectivityBreakAnalysis {
                 : operatorStrategy.getActions().stream().filter(LfAction::isValid).filter(AbstractLfBranchAction.class::isInstance).toList();
         List<ComputedElement> modifyingConnectivityCandidates = Stream.concat(
                 contingency != null ? contingency.getBranchIdsToOpen().keySet().stream().map(contingencyElementByBranch::get) : Stream.empty(),
-                lfActions.stream().map(actionElementByBranch::get).flatMap(Collection::stream)
+                lfActions.stream().map(actionElementByBranch::get).filter(Objects::nonNull).flatMap(Collection::stream)
         ).sorted(Comparator.comparing(element -> element.getLfBranch().getId())).toList();
 
         // we confirm the breaking of connectivity by network connectivity
