@@ -91,6 +91,7 @@ public final class ConnectivityBreakAnalysis {
             return disabledElements.disabledBuses;
         }
 
+        /** The buses of the slack's connected component, or null when the analysis was asked not to compute it. */
         public Set<LfBus> getSlackConnectedComponent() {
             return slackConnectedComponent;
         }
@@ -206,6 +207,18 @@ public final class ConnectivityBreakAnalysis {
     public static Optional<ConnectivityAnalysisResult> computeConnectivityAnalysisResult(LfNetwork lfNetwork,
                                                                                           PropagatedContingency contingency, Map<String, ComputedContingencyElement> contingencyElementByBranch,
                                                                                           LfOperatorStrategy operatorStrategy, Map<LfAction, List<ComputedElement>> actionElementByBranch) {
+        return computeConnectivityAnalysisResult(lfNetwork, contingency, contingencyElementByBranch, operatorStrategy, actionElementByBranch, true);
+    }
+
+    /**
+     * As above; without {@code withSlackConnectedComponent} the result does not carry the slack's connected component
+     * (null): materializing it copies every bus of the main component, per breaking contingency, and only the
+     * sensitivity analysis reads it.
+     */
+    public static Optional<ConnectivityAnalysisResult> computeConnectivityAnalysisResult(LfNetwork lfNetwork,
+                                                                                          PropagatedContingency contingency, Map<String, ComputedContingencyElement> contingencyElementByBranch,
+                                                                                          LfOperatorStrategy operatorStrategy, Map<LfAction, List<ComputedElement>> actionElementByBranch,
+                                                                                          boolean withSlackConnectedComponent) {
         GraphConnectivity<LfBus, LfBranch> connectivity = lfNetwork.getConnectivity();
 
         // concatenate all computed elements, to apply them on the connectivity
@@ -239,7 +252,8 @@ public final class ConnectivityBreakAnalysis {
                 Set<LfHvdc> hvdcsWithoutPower = PropagatedContingency.getHvdcsWithoutPower(lfNetwork, disabledBuses, connectivity);
                 connectivityAnalysisResult = new ConnectivityAnalysisResult(contingency, operatorStrategy, lfNetwork, elementsToReconnect,
                         new DisabledElements(disabledBuses, connectivity.getEdgesRemovedFromMainComponent(), hvdcsWithoutPower),
-                        connectivity.getConnectedComponent(lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().getFirst()), createdSynchronousComponents);
+                        withSlackConnectedComponent ? connectivity.getConnectedComponent(lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().getFirst()) : null,
+                        createdSynchronousComponents);
             }
         } finally {
             connectivity.undoTemporaryChanges();
