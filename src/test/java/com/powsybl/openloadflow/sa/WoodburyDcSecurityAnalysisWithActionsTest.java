@@ -14,6 +14,7 @@ import com.powsybl.contingency.strategy.OperatorStrategy;
 import com.powsybl.contingency.strategy.condition.TrueCondition;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.PhaseTapChanger;
+import com.powsybl.iidm.network.VoltageLevel;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
@@ -812,5 +813,32 @@ class WoodburyDcSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnal
         assertEquals(0, operatorStrategyResult.getLimitViolationsResult().getLimitViolations().size());
         // in fast dc mode, no branch result is created for disabled branches on one side
         assertEquals(1, operatorStrategyResult.getNetworkResult().getBranchResults().size());
+    }
+
+    /** Closing a breaker towards a bay that is dead in the base case (an open load bay). */
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testDcSaActionClosingBreakerTowardsDeadBay(boolean dcFastMode) {
+        Network network = NodeBreakerNetworkFactory.create();
+        VoltageLevel vl2 = network.getVoltageLevel("VL2");
+        vl2.getNodeBreakerView().newBreaker().setId("BX").setNode1(0).setNode2(10).setOpen(true).add();
+        vl2.newLoad().setId("LDX").setNode(10).setP0(50.0).setQ0(0.0).add();
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<Action> actions = List.of(new SwitchAction("closeBX", "BX", false));
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("strategy", ContingencyContext.specificContingency("L1"), new TrueCondition(), List.of("closeBX")));
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(dcFastMode);
+
+        if (dcFastMode) {
+            CompletionException exception = assertThrows(CompletionException.class, () -> runSecurityAnalysis(network, contingencies,
+                    createAllBranchesMonitors(network), securityAnalysisParameters, operatorStrategies, actions, ReportNode.NO_OP));
+            assertEquals("Action 'closeBX' connects branch 'BX' to bus 'VL2_10', which is not energized in the base case: "
+                    + "not supported in fast DC security analysis", exception.getCause().getMessage());
+        } else {
+            SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, createAllBranchesMonitors(network), securityAnalysisParameters,
+                    operatorStrategies, actions, ReportNode.NO_OP);
+            // the bay's load is picked up through L2
+            assertEquals(650.0, getOperatorStrategyResult(result, "strategy").getNetworkResult().getBranchResult("L2").getP1(), DELTA_POWER);
+        }
     }
 }
