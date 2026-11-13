@@ -439,7 +439,9 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                     securityAnalysisParameters.getModifiedMonitoredElementsParameters());
 
             // compute states with +1 -1 to model the contingencies and run connectivity analysis
-            ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivityBreakAnalysisResults = ConnectivityBreakAnalysis.run(context, propagatedContingencies);
+            // the security analysis does not read the slack bus's connected component: not owned per breaking contingency
+            ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivityBreakAnalysisResults
+                    = ConnectivityBreakAnalysis.run(context, propagatedContingencies, Collections.emptyList(), false);
 
             // the map is indexed by lf actions as different kind of actions can be given on the same branch
             Map<LfAction, List<ComputedElement>> actionElementsIndexByLfAction = ComputedElement.createActionElementsIndexByLfAction(lfActionById, context.getEquationSystem(),
@@ -470,7 +472,7 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 (postContingencyConnectivityAnalysisResult, operatorStrategyLfActions) ->
                     ConnectivityBreakAnalysis.processPostContingencyAndPostOperatorStrategyConnectivityAnalysisResult(
                             context, postContingencyConnectivityAnalysisResult, connectivityBreakAnalysisResults.contingencyElementByBranch(), connectivityBreakAnalysisResults.contingenciesStates(),
-                            operatorStrategyLfActions, actionElementsIndexByLfAction, actionsStates);
+                            operatorStrategyLfActions, actionElementsIndexByLfAction, actionsStates, false);
 
             // function to compute post contingency and post operator strategy states
             Function<ConnectivityAnalysisResult, double[]> toPostContingencyAndOperatorStrategyStates = postContingencyAndOperatorStrategyConnectivityAnalysisResult ->
