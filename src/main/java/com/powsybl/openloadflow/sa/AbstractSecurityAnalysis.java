@@ -84,6 +84,14 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
     protected StateMonitorIndex zeroImpedanceMonitoredIndex;
 
+    /** The elements the monitors select in the networks of this run, shared by all its network results. */
+    protected final MonitoredElementIndex monitoredElementIndex = new MonitoredElementIndex();
+
+    /** The monitors of this run and the elements they select, shared by every network result of the run. */
+    protected AbstractNetworkResult.StateMonitorIndexes stateMonitorIndexes() {
+        return new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex, monitoredElementIndex);
+    }
+
     protected final ReportNode reportNode;
 
     protected Level logLevel = Level.INFO; // level of the post contingency and action logs
@@ -534,7 +542,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             List<StateMonitor> zeroImpedanceStateMonitors = extractZeroImpedanceStateMonitors(lfNetwork);
             this.zeroImpedanceMonitoredIndex = new StateMonitorIndex(zeroImpedanceStateMonitors);
             var preContingencyNetworkResult = new PreContingencyNetworkResult(lfNetwork,
-                new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex), createResultExtension,
+                stateMonitorIndexes(), createResultExtension,
                     loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor());
             List<OperatorStrategyResult> operatorStrategyResults = new ArrayList<>();
 
@@ -644,7 +652,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitScalings, securityAnalysisParameters.getIncreasedViolationsParameters());
 
         LoadFlowModel loadFlowModel = securityAnalysisParameters.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC;
-        var postContingencyNetworkResult = new PostContingencyNetworkResult(network, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex),
+        var postContingencyNetworkResult = new PostContingencyNetworkResult(network, stateMonitorIndexes(),
                 createResultExtension, preContingencyNetworkResult, contingency, loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor(),
                 securityAnalysisParameters.getModifiedMonitoredElementsParameters());
 
@@ -714,7 +722,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         PostContingencyComputationStatus status = postContingencyStatusFromLoadFlowResult(result);
         var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitScalings, securityAnalysisParameters.getIncreasedViolationsParameters());
         LoadFlowModel loadFlowModel = securityAnalysisParameters.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC;
-        var postActionsNetworkResult = new PostContingencyNetworkResult(network, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex), createResultExtension,
+        var postActionsNetworkResult = new PostContingencyNetworkResult(network, stateMonitorIndexes(), createResultExtension,
                 preContingencyNetworkResult, contingency, loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor(),
                 securityAnalysisParameters.getModifiedMonitoredElementsParameters());
 
