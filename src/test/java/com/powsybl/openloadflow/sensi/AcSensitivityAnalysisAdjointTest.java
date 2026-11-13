@@ -1842,7 +1842,7 @@ class AcSensitivityAnalysisAdjointTest {
         AcLoadFlowContext cachedContext = NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow()
                 .getValues().get(0).getContext();
         try (AcLoadFlowContext context = AcSensitivityAnalysis.createAdjointContext(cachedContext,
-                new LimitsSmoothing(LimitsSmoothing.REACTIVE_DEFAULT_MU, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), false, null, 0)) {
+                new LimitsSmoothing(LimitsSmoothing.REACTIVE_DEFAULT_MU, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), false, null, null, 0)) {
             double[] mismatches = AcSensitivityAnalysis.polish(context, 6);
             assertTrue(mismatches[0] > 1e-4, "the exact solution is not the smoothed one, got " + mismatches[0]);
             assertTrue(mismatches[6] < 1e-10, "the polish must converge, got " + Arrays.toString(mismatches));
@@ -2032,5 +2032,197 @@ class AcSensitivityAnalysisAdjointTest {
         assertTrue(heldSlope > 0.3 && Math.abs(followedSlope) < 0.05, heldSlope + " / " + followedSlope);
         assertTrue(smoothedAtEnd > followedSlope && smoothedAtEnd < heldSlope,
                 "smoothed " + smoothedAtEnd + " outside [" + followedSlope + ", " + heldSlope + "]");
+    }
+
+    // ---- the tap changers' smoothed deadband in the adjoint ----
+
+    /** {@link #t2wtWithFineTaps} with a deadband of {@code deadbandKv} on BUS_3. */
+    private static Network t2wtWithFineTapsAndDeadband(double targetV, double deadbandKv) {
+        Network network = t2wtWithFineTaps(targetV);
+        network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getVoltageRegulation().setTargetDeadband(deadbandKv);
+        return network;
+    }
+
+    private static double load3GradientDeadband(Network network, LoadFlowParameters lfp, double mu, String bus) {
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        sensiParams.addExtension(OpenSensitivityAnalysisParameters.class, new OpenSensitivityAnalysisParameters()
+                .setAdjointTransformerDeadband(true).setAdjointTransformerDeadbandMu(mu));
+        return new AcSensitivityAnalysis(new SparseMatrixFactory(), new DTreeGraphConnectivityFactory<>(), sensiParams)
+                .runAdjoint(network, network.getVariantManager().getWorkingVariantId(), List.of(),
+                        Map.of(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, bus), 1.0),
+                        levers(SensitivityVariableType.INJECTION_REACTIVE_POWER, List.of("LOAD_3")))
+                .get(varKey(SensitivityVariableType.INJECTION_REACTIVE_POWER, "LOAD_3"));
+    }
+
+    /** Well inside a wide deadband, a vanishing smoothing leaves the tap held: the frozen gradient. */
+    @Test
+    void tapDeadbandWithAVanishingSmoothingHoldsTheTap() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtWithFineTapsAndDeadband(32, 2.0);
+        double frozenBus3 = load3Gradient(network, lfp, false, "BUS_3");
+        double frozenBus2 = load3Gradient(network, lfp, false, "BUS_2");
+        double v3 = busVoltage(network, "BUS_3");
+        assertTrue(Math.abs(v3 - 32) < 0.9, "BUS_3 must sit inside its +-1 kV band, at " + v3);
+        assertEquals(frozenBus3, load3GradientDeadband(network, lfp, 1e-7, "BUS_3"), 1e-6 * Math.abs(frozenBus3));
+        assertEquals(frozenBus2, load3GradientDeadband(network, lfp, 1e-7, "BUS_2"), 1e-6 * Math.abs(frozenBus2));
+    }
+
+    /**
+     * Without a deadband the band is the load flow's 0.1 kV, and the rounding to one of the fine steps leaves BUS_3
+     * near its middle, a few hundredths of a kV from its edges: a smoothing well above that makes the tap regulate.
+     */
+    @Test
+    void tapDeadbandNearItsEdgeRegulates() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtWithFineTaps(32);
+        double regulatingBus2 = load3Gradient(network, lfp, true, "BUS_2");
+        double frozenBus3 = load3Gradient(network, lfp, false, "BUS_3");
+        double mu = 0.05;
+        assertEquals(regulatingBus2, load3GradientDeadband(network, lfp, mu, "BUS_2"), 1e-2 * Math.abs(regulatingBus2));
+        assertEquals(0, load3GradientDeadband(network, lfp, mu, "BUS_3"), 1e-2 * Math.abs(frozenBus3));
+    }
+
+    /** As the smoothing grows past the distance to the edge, the gradient moves from the held tap's to the regulating one's. */
+    @Test
+    void tapDeadbandMovesFromHeldToRegulatingAsTheSmoothingGrows() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtWithFineTaps(32);
+        double frozen = load3Gradient(network, lfp, false, "BUS_3");
+        double previous = frozen;
+        for (double mu : new double[] {1e-6, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 1e-1}) {
+            double g = load3GradientDeadband(network, lfp, mu, "BUS_3");
+            assertTrue(g <= previous + 1e-12 && g >= -1e-9, "mu " + mu + ": " + g + " after " + previous);
+            previous = g;
+        }
+        assertEquals(frozen, load3GradientDeadband(network, lfp, 1e-6, "BUS_3"), 1e-3 * frozen);
+        assertTrue(previous < 1e-2 * frozen, "a wide smoothing must regulate: " + previous);
+    }
+
+    /**
+     * At the end of its range, with its bus below the band it cannot reach, the tap can only move back, at the band's
+     * upper edge, far above: it stays held, up to the smoothing's (mu / a)^2 reach to that edge.
+     */
+    @Test
+    void tapDeadbandKeepsATapAtTheEndOfItsRangeHeld() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtWithFineTaps(36);
+        double frozen = load3Gradient(network, lfp, false, "BUS_3");
+        assertEquals(400, network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getSolvedTapPosition());
+        assertEquals(frozen, load3GradientDeadband(network, lfp, 1e-3, "BUS_3"), 1e-3 * Math.abs(frozen));
+        assertEquals(frozen, load3GradientDeadband(network, lfp, 1e-6, "BUS_3"), 1e-9 * Math.abs(frozen));
+    }
+
+    @Test
+    void tapDeadbandExcludesTheRegulatingTaps() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtWithFineTaps(32);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        sensiParams.addExtension(OpenSensitivityAnalysisParameters.class, new OpenSensitivityAnalysisParameters()
+                .setAdjointTransformerDeadband(true).setAdjointTransformerVoltageControl(true));
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(), new DTreeGraphConnectivityFactory<>(), sensiParams);
+        Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents =
+                Map.of(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "BUS_3"), 1.0);
+        List<AcSensitivityAnalysis.AdjointVariable> variables = levers(SensitivityVariableType.INJECTION_REACTIVE_POWER, List.of("LOAD_3"));
+        String variantId = network.getVariantManager().getWorkingVariantId();
+        assertThrows(PowsyblException.class, () -> analysis.runAdjoint(network, variantId, List.of(), cotangents, variables));
+    }
+
+    /**
+     * {@link #t2wtWithFineTaps} with the transformer the other way round: BUS_3 on its side 1, the tap changer on that
+     * side regulating it, so that a higher ratio lowers the voltage it controls.
+     */
+    private static Network t2wtWithFineTapsOnSide1(double targetV) {
+        Network network = VoltageControlNetworkFactory.createNetworkWithT2wt();
+        network.getTwoWindingsTransformer("T2wT").remove();
+        TwoWindingsTransformer t2wt = network.getSubstation("SUBSTATION").newTwoWindingsTransformer()
+                .setId("T2wT").setRatedU1(33.0).setRatedU2(132.0).setR(17.0).setX(10.0)
+                .setG(0.00573921028466483).setB(0.000573921028466483).setBus1("BUS_3").setBus2("BUS_2").add();
+        var adder = t2wt.newRatioTapChanger();
+        for (int k = 0; k <= 400; k++) {
+            adder.beginStep().setRho(0.9 + 0.0005 * k).setR(0).setX(0).setG(0).setB(0).endStep();
+        }
+        adder.setTapPosition(200)
+                .setLoadTapChangingCapabilities(true)
+                .newVoltageRegulation()
+                    .withTargetValue(targetV)
+                    .withRegulating(false)
+                    .withTerminal(t2wt.getTerminal1())
+                    .withMode(RegulationMode.VOLTAGE)
+                    .add()
+                .add();
+        t2wt.getRatioTapChanger().getVoltageRegulation().setTargetDeadband(0).setRegulating(true);
+        return network;
+    }
+
+    /** The same as {@link #tapDeadbandNearItsEdgeRegulates}, the tap controlling the bus of its side 1. */
+    @Test
+    void tapDeadbandNearItsEdgeRegulatesOnSide1() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtWithFineTapsOnSide1(32);
+        double frozenBus3 = load3Gradient(network, lfp, false, "BUS_3");
+        int tap = network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getSolvedTapPosition();
+        assertTrue(tap > 0 && tap < 400, "the tap must regulate inside its range, at " + tap);
+        double regulatingBus2 = load3Gradient(network, lfp, true, "BUS_2");
+        assertTrue(frozenBus3 > 0.01, "the frozen tap leaves BUS_3 free, got " + frozenBus3);
+        double previous = frozenBus3;
+        for (double mu : new double[] {1e-4, 1e-3, 1e-2, 5e-2}) {
+            double g = load3GradientDeadband(network, lfp, mu, "BUS_3");
+            assertTrue(g <= previous + 1e-12 && g >= -1e-9, "mu " + mu + ": " + g + " after " + previous);
+            previous = g;
+        }
+        assertEquals(0, previous, 1e-2 * frozenBus3);
+        assertEquals(regulatingBus2, load3GradientDeadband(network, lfp, 0.05, "BUS_2"), 1e-2 * Math.abs(regulatingBus2));
+    }
+
+    /** {@link #t2wtWithFineTaps} with a second, identical transformer in parallel, both regulating BUS_3. */
+    private static Network t2wtParallelWithFineTaps(double targetV) {
+        Network network = t2wtWithFineTaps(targetV);
+        TwoWindingsTransformer t2wt2 = network.getSubstation("SUBSTATION").newTwoWindingsTransformer()
+                .setId("T2wT2").setRatedU1(132.0).setRatedU2(33.0).setR(17.0).setX(10.0)
+                .setG(0.00573921028466483).setB(0.000573921028466483).setBus1("BUS_2").setBus2("BUS_3").add();
+        var adder = t2wt2.newRatioTapChanger();
+        for (int k = 0; k <= 400; k++) {
+            adder.beginStep().setRho(0.9 + 0.0005 * k).setR(0).setX(0).setG(0).setB(0).endStep();
+        }
+        adder.setTapPosition(200)
+                .setLoadTapChangingCapabilities(true)
+                .newVoltageRegulation()
+                    .withTargetValue(targetV)
+                    .withRegulating(false)
+                    .withTerminal(t2wt2.getTerminal2())
+                    .withMode(RegulationMode.VOLTAGE)
+                    .add()
+                .add();
+        t2wt2.getRatioTapChanger().getVoltageRegulation().setTargetDeadband(0).setRegulating(true);
+        return network;
+    }
+
+    /** Transformers in parallel share the band of their bus: held with a vanishing smoothing, regulating with a wide one. */
+    @Test
+    void tapDeadbandCoversTransformersInParallel() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtParallelWithFineTaps(32);
+        for (String id : List.of("T2wT", "T2wT2")) {
+            int tap = network.getTwoWindingsTransformer(id).getRatioTapChanger().getTapPosition();
+            assertTrue(tap >= 0 && tap <= 400, id + " at " + tap);
+        }
+        double frozenBus3 = load3Gradient(network, lfp, false, "BUS_3");
+        double frozenBus2 = load3Gradient(network, lfp, false, "BUS_2");
+        double regulatingBus2 = load3Gradient(network, lfp, true, "BUS_2");
+        assertTrue(frozenBus3 > 0.1, "the frozen taps leave BUS_3 free, got " + frozenBus3);
+        assertTrue(Math.abs(regulatingBus2 - frozenBus2) > 1e-2 * Math.abs(frozenBus2), frozenBus2 + " / " + regulatingBus2);
+        assertEquals(frozenBus3, load3GradientDeadband(network, lfp, 1e-7, "BUS_3"), 1e-6 * frozenBus3);
+        double previous = frozenBus3;
+        for (double mu : new double[] {1e-4, 1e-3, 1e-2, 5e-2}) {
+            double g = load3GradientDeadband(network, lfp, mu, "BUS_3");
+            assertTrue(g <= previous + 1e-12 && g >= -1e-9, "mu " + mu + ": " + g + " after " + previous);
+            previous = g;
+        }
+        assertEquals(0, previous, 1e-2 * frozenBus3);
+        assertEquals(regulatingBus2, load3GradientDeadband(network, lfp, 0.05, "BUS_2"), 1e-2 * Math.abs(regulatingBus2));
     }
 }

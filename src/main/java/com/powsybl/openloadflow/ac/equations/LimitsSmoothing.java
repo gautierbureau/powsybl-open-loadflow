@@ -36,6 +36,12 @@ public record LimitsSmoothing(double mu, double voltageScale) {
     /** A ratio change moves the voltage it controls by about as much, per unit. */
     public static final double RATIO_DEFAULT_VOLTAGE_SCALE = 1.0;
 
+    /** Tap changer deadband: per unit of the controlled voltage, a few tenths of a step at 63-90 kV. */
+    public static final double DEADBAND_DEFAULT_MU = 0.002;
+
+    /** A ratio change moves the voltage it controls by about as much, per unit. */
+    public static final double DEADBAND_DEFAULT_VOLTAGE_SCALE = 1.0;
+
     public LimitsSmoothing {
         if (!(mu > 0) || !Double.isFinite(mu)) {
             throw new IllegalArgumentException("Limits smoothing mu must be finite and > 0: " + mu);
