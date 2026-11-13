@@ -389,8 +389,11 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         // Therefore, we can also assume that lfNetwork contains only one synchronous network
 
         Map<String, Action> actionsById = Actions.indexById(actions);
+        // In MT the operator strategy check is performed before running the simulations: a partition holds only some of
+        // the contingencies the strategies refer to
+        boolean checkOperatorStrategies = OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters).getThreadCount() == 1;
         Map<String, List<Indexed<OperatorStrategy>>> operatorStrategiesByContingencyId =
-                OperatorStrategies.indexByContingencyId(propagatedContingencies, operatorStrategies, actionsById, true);
+                OperatorStrategies.indexByContingencyId(propagatedContingencies, operatorStrategies, actionsById, checkOperatorStrategies);
         Set<Action> neededActions = OperatorStrategies.getNeededActions(operatorStrategiesByContingencyId, actionsById);
         Map<String, LfAction> lfActionById = LfActionUtils.createLfActions(lfNetwork, neededActions, network); // only convert needed actions
 

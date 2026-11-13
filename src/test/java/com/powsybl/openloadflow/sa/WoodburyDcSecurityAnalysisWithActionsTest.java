@@ -790,4 +790,34 @@ class WoodburyDcSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnal
         // in fast dc mode, no branch result is created for disabled branches on one side
         assertEquals(1, operatorStrategyResult.getNetworkResult().getBranchResults().size());
     }
+
+    /** Multi-threaded: each partition holds some of the contingencies, the strategies of the others are not an error. */
+    @Test
+    void testFastDcSaOperatorStrategiesMultiThreaded() {
+        Network network = PhaseControlFactory.createWithOneT2wtTwoLines();
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")),
+                new Contingency("L2", new BranchContingency("L2")));
+        List<Action> actions = List.of(new PhaseTapChangerTapPositionAction("pstAbsChange", "PS1", false, 0));
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("strategyL1", ContingencyContext.specificContingency("L1"), new TrueCondition(), List.of("pstAbsChange")),
+                new OperatorStrategy("strategyL2", ContingencyContext.specificContingency("L2"), new TrueCondition(), List.of("pstAbsChange")));
+
+        SecurityAnalysisResult singleThreaded = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setThreadCount(2);
+        SecurityAnalysisResult multiThreaded = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+
+        for (String strategy : List.of("strategyL1", "strategyL2")) {
+            for (String branch : List.of("L1", "L2", "PS1")) {
+                var expected = getOperatorStrategyResult(singleThreaded, strategy).getNetworkResult().getBranchResult(branch);
+                var actual = getOperatorStrategyResult(multiThreaded, strategy).getNetworkResult().getBranchResult(branch);
+                assertEquals(expected == null, actual == null);
+                if (expected != null) {
+                    assertEquals(expected.getP1(), actual.getP1(), DELTA_POWER);
+                }
+            }
+        }
+    }
 }
