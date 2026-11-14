@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.network;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -66,5 +67,75 @@ public class NetworkState {
         ElementState.restore(areaStates);
         // Set excluded slack buses of each synchronous network
         network.getSynchronousNetworks().forEach(scLfNetwork -> scLfNetwork.setExcludedSlackBuses(excludedSlackBuses));
+    }
+
+    /**
+     * Restores ONLY the given buses and branches — plus every HVDC and area, the excluded slack buses, and the
+     * voltage magnitude and angle of EVERY bus. For a caller that knows nothing else changed since the save: a
+     * precomputed post-contingency state injected into the network moves every bus voltage, while the contingency
+     * itself only touched its own elements. Elements are restored in the order {@link #restore()} uses; anything
+     * else changed since the save stays changed.
+     *
+     * @param buses the buses to restore entirely
+     * @param branches the branches to restore
+     */
+    public void restore(Collection<LfBus> buses, Collection<LfBranch> branches) {
+        restore(buses, branches, true);
+    }
+
+    /**
+     * As {@link #restore(Collection, Collection)}; with {@code voltages} false the voltage magnitude and angle of the
+     * buses NOT listed are left as they are - for a caller that overwrites them before anything reads them, and that
+     * restores the rest itself ({@link #restoreVoltages()}, {@link #restoreVoltages(Collection)}) otherwise.
+     */
+    public void restore(Collection<LfBus> buses, Collection<LfBranch> branches, boolean voltages) {
+        Objects.requireNonNull(buses);
+        Objects.requireNonNull(branches);
+        LOGGER.trace("Restoring network state of {} buses and {} branches", buses.size(), branches.size());
+        boolean[] busListed = new boolean[busStates.size()];
+        for (LfBus bus : buses) {
+            checkSaved(busStates, bus);
+            busListed[bus.getNum()] = true;
+        }
+        for (int num = 0; num < busStates.size(); num++) {
+            BusState state = busStates.get(num);
+            if (busListed[num]) {
+                state.restore();
+            } else if (voltages) {
+                state.restoreVoltage();
+            }
+        }
+        int[] branchNums = branches.stream().mapToInt(LfBranch::getNum).distinct().sorted().toArray();
+        for (LfBranch branch : branches) {
+            checkSaved(branchStates, branch);
+        }
+        for (int num : branchNums) {
+            branchStates.get(num).restore();
+        }
+        ElementState.restore(hvdcStates);
+        ElementState.restore(areaStates);
+        network.getSynchronousNetworks().forEach(scLfNetwork -> scLfNetwork.setExcludedSlackBuses(excludedSlackBuses));
+    }
+
+    private static <T extends LfElement> void checkSaved(List<? extends ElementState<T>> states, T element) {
+        int num = element.getNum();
+        if (num < 0 || num >= states.size() || states.get(num).element != element) {
+            throw new IllegalArgumentException("Element " + element.getId() + " is not part of the saved network state");
+        }
+    }
+
+    /** Restores the saved voltage magnitude and angle of every bus, and nothing else. */
+    public void restoreVoltages() {
+        for (BusState state : busStates) {
+            state.restoreVoltage();
+        }
+    }
+
+    /** Restores the saved voltage magnitude and angle of the given buses, and nothing else. */
+    public void restoreVoltages(Collection<LfBus> buses) {
+        for (LfBus bus : buses) {
+            checkSaved(busStates, bus);
+            busStates.get(bus.getNum()).restoreVoltage();
+        }
     }
 }
