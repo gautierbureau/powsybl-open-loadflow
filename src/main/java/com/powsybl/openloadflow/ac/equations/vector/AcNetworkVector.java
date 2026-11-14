@@ -165,69 +165,96 @@ public class AcNetworkVector extends AbstractLfNetworkListener
      * Update all power flows and their derivatives.
      */
     public void updateClosedBranches(double[] state) {
+        updateClosedBranches(state, true);
+    }
+
+    public void updateClosedBranches(double[] state, boolean withDerivatives) {
         var w = new DoubleWrapper();
-
         for (int branchNum = 0; branchNum < branchVector.getSize(); branchNum++) {
+            updateClosedBranch(branchNum, state, withDerivatives, w);
+        }
+    }
 
-            if (!branchVector.disabled[branchNum]) {
+    /**
+     * Update the power flows of the given branches only (values, no derivatives): every other branch keeps what it
+     * had, so this is only for a caller that reads no other branch before the next full update.
+     */
+    public void updateClosedBranches(double[] state, int[] branchNums) {
+        var w = new DoubleWrapper();
+        for (int branchNum : branchNums) {
+            updateClosedBranch(branchNum, state, false, w);
+        }
+    }
 
-                branchVector.r1State[branchNum] = branchVector.r1Row[branchNum] != -1 ? state[branchVector.r1Row[branchNum]]
-                        : branchVector.r1[branchNum];
-                branchVector.a1State[branchNum] = branchVector.a1Row[branchNum] != -1 ? state[branchVector.a1Row[branchNum]]
-                        : branchVector.a1[branchNum];
+    private void updateClosedBranch(int branchNum, double[] state, boolean withDerivatives, DoubleWrapper w) {
+        if (!branchVector.disabled[branchNum]) {
 
-                if (isBranchConnectedSide1(branchNum) && isBranchConnectedSide2(branchNum)) {
-                    double ph1 = state[branchVector.ph1Row[branchNum]];
-                    double ph2 = state[branchVector.ph2Row[branchNum]];
-                    double a1 = branchVector.a1State[branchNum];
+            branchVector.r1State[branchNum] = branchVector.r1Row[branchNum] != -1 ? state[branchVector.r1Row[branchNum]]
+                    : branchVector.r1[branchNum];
+            branchVector.a1State[branchNum] = branchVector.a1Row[branchNum] != -1 ? state[branchVector.a1Row[branchNum]]
+                    : branchVector.a1[branchNum];
 
-                    double theta1 = theta1(
-                            branchVector.ksi[branchNum],
-                            ph1,
-                            a1,
-                            ph2);
-                    double theta2 = theta2(
-                            branchVector.ksi[branchNum],
-                            ph1,
-                            a1,
-                            ph2);
-                    double sinTheta1 = FastMath.sinAndCos(theta1, w);
-                    double cosTheta1 = w.value;
-                    double sinTheta2 = FastMath.sinAndCos(theta2, w);
-                    double cosTheta2 = w.value;
+            if (isBranchConnectedSide1(branchNum) && isBranchConnectedSide2(branchNum)) {
+                double ph1 = state[branchVector.ph1Row[branchNum]];
+                double ph2 = state[branchVector.ph2Row[branchNum]];
+                double a1 = branchVector.a1State[branchNum];
 
-                    double v1 = state[branchVector.v1Row[branchNum]];
-                    double v2 = state[branchVector.v2Row[branchNum]];
-                    double r1 = branchVector.r1State[branchNum];
+                double theta1 = theta1(
+                        branchVector.ksi[branchNum],
+                        ph1,
+                        a1,
+                        ph2);
+                double theta2 = theta2(
+                        branchVector.ksi[branchNum],
+                        ph1,
+                        a1,
+                        ph2);
+                double sinTheta1 = FastMath.sinAndCos(theta1, w);
+                double cosTheta1 = w.value;
+                double sinTheta2 = FastMath.sinAndCos(theta2, w);
+                double cosTheta2 = w.value;
 
-                    // p1
-                    updateP1AndDerivatives(branchNum, v1, r1, v2, sinTheta1, cosTheta1);
+                double v1 = state[branchVector.v1Row[branchNum]];
+                double v2 = state[branchVector.v2Row[branchNum]];
+                double r1 = branchVector.r1State[branchNum];
 
-                    // q1
-                    updateQ1AndDerivatives(branchNum, v1, r1, v2, sinTheta1, cosTheta1);
+                // p1
+                updateP1AndDerivatives(branchNum, v1, r1, v2, sinTheta1, cosTheta1, withDerivatives);
 
-                    // i1
-                    branchVector.i1[branchNum] = FastMath.hypot(branchVector.p1[branchNum], branchVector.q1[branchNum]) / v1;
+                // q1
+                updateQ1AndDerivatives(branchNum, v1, r1, v2, sinTheta1, cosTheta1, withDerivatives);
 
-                    // p2
-                    updateP2AndDerivatives(branchNum, v1, r1, v2, sinTheta2, cosTheta2);
+                // i1
+                branchVector.i1[branchNum] = FastMath.hypot(branchVector.p1[branchNum], branchVector.q1[branchNum]) / v1;
 
-                    // q2
-                    updateQ2AndDerivatives(branchNum, v1, r1, v2, sinTheta2, cosTheta2);
+                // p2
+                updateP2AndDerivatives(branchNum, v1, r1, v2, sinTheta2, cosTheta2, withDerivatives);
 
-                    // i2
-                    branchVector.i2[branchNum] = FastMath.hypot(branchVector.p2[branchNum], branchVector.q2[branchNum]) / v2;
-                }
+                // q2
+                updateQ2AndDerivatives(branchNum, v1, r1, v2, sinTheta2, cosTheta2, withDerivatives);
+
+                // i2
+                branchVector.i2[branchNum] = FastMath.hypot(branchVector.p2[branchNum], branchVector.q2[branchNum]) / v2;
             }
         }
     }
 
     public void updateNetworkState() {
+        updateNetworkState(true);
+    }
+
+    /**
+     * @param withDerivatives false to refresh only the branch FLOW VALUES and skip their partial
+     *        derivatives — valid only when no Jacobian will be built before the next full update
+     *        (see {@link com.powsybl.openloadflow.equations.StateVector#setValuesOnly(double[])}).
+     *        The derivatives are about four fifths of this method's work.
+     */
+    public void updateNetworkState(boolean withDerivatives) {
         Stopwatch stopwatch = Stopwatch.createStarted();
 
         double[] state = equationSystem.getStateVector().get();
         updateBuses(state);
-        updateClosedBranches(state);
+        updateClosedBranches(state, withDerivatives);
         stopwatch.stop();
         LOGGER.debug("AC network vector update in {} us", stopwatch.elapsed(TimeUnit.MICROSECONDS));
     }
@@ -323,11 +350,24 @@ public class AcNetworkVector extends AbstractLfNetworkListener
 
     @Override
     public void onStateUpdate() {
-        updateVariables();
-        updateNetworkState();
+        onStateUpdate(false);
     }
 
-    private void updateP1AndDerivatives(int branchNum, double v1, double r1, double v2, double sinTheta1, double cosTheta1) {
+    @Override
+    public void onStateUpdate(boolean valuesOnly) {
+        updateVariables();
+        updateNetworkState(!valuesOnly);
+    }
+
+    @Override
+    public void onStateUpdate(int[] closedBranchNums) {
+        updateVariables();
+        double[] state = equationSystem.getStateVector().get();
+        updateBuses(state);
+        updateClosedBranches(state, closedBranchNums);
+    }
+
+    private void updateP1AndDerivatives(int branchNum, double v1, double r1, double v2, double sinTheta1, double cosTheta1, boolean withDerivatives) {
         branchVector.p1[branchNum] = ClosedBranchSide1ActiveFlowEquationTerm.p1(
             branchVector.y[branchNum],
             branchVector.sinKsi[branchNum],
@@ -336,6 +376,10 @@ public class AcNetworkVector extends AbstractLfNetworkListener
             r1,
             v2,
             sinTheta1);
+
+        if (!withDerivatives) {
+            return;                                          // values-only state update: the caller
+        }                                                    // will not build a Jacobian from this state
 
         branchVector.dp1dv1[branchNum] = ClosedBranchSide1ActiveFlowEquationTerm.dp1dv1(
             branchVector.y[branchNum],
@@ -383,7 +427,7 @@ public class AcNetworkVector extends AbstractLfNetworkListener
             sinTheta1);
     }
 
-    private void updateQ1AndDerivatives(int branchNum, double v1, double r1, double v2, double sinTheta1, double cosTheta1) {
+    private void updateQ1AndDerivatives(int branchNum, double v1, double r1, double v2, double sinTheta1, double cosTheta1, boolean withDerivatives) {
         branchVector.q1[branchNum] = ClosedBranchSide1ReactiveFlowEquationTerm.q1(
             branchVector.y[branchNum],
             branchVector.cosKsi[branchNum],
@@ -400,6 +444,10 @@ public class AcNetworkVector extends AbstractLfNetworkListener
             r1,
             v2,
             cosTheta1);
+
+        if (!withDerivatives) {
+            return;                                          // values-only state update: the caller
+        }                                                    // will not build a Jacobian from this state
 
         branchVector.dq1dv2[branchNum] = ClosedBranchSide1ReactiveFlowEquationTerm.dq1dv2(
             branchVector.y[branchNum],
@@ -438,7 +486,7 @@ public class AcNetworkVector extends AbstractLfNetworkListener
             cosTheta1);
     }
 
-    private void updateP2AndDerivatives(int branchNum, double v1, double r1, double v2, double sinTheta2, double cosTheta2) {
+    private void updateP2AndDerivatives(int branchNum, double v1, double r1, double v2, double sinTheta2, double cosTheta2, boolean withDerivatives) {
         branchVector.p2[branchNum] = ClosedBranchSide2ActiveFlowEquationTerm.p2(
             branchVector.y[branchNum],
             branchVector.sinKsi[branchNum],
@@ -447,6 +495,10 @@ public class AcNetworkVector extends AbstractLfNetworkListener
             r1,
             v2,
             sinTheta2);
+
+        if (!withDerivatives) {
+            return;                                          // values-only state update: the caller
+        }                                                    // will not build a Jacobian from this state
 
         branchVector.dp2dv1[branchNum] = ClosedBranchSide2ActiveFlowEquationTerm.dp2dv1(
             branchVector.y[branchNum],
@@ -491,7 +543,7 @@ public class AcNetworkVector extends AbstractLfNetworkListener
             sinTheta2);
     }
 
-    private void updateQ2AndDerivatives(int branchNum, double v1, double r1, double v2, double sinTheta2, double cosTheta2) {
+    private void updateQ2AndDerivatives(int branchNum, double v1, double r1, double v2, double sinTheta2, double cosTheta2, boolean withDerivatives) {
         branchVector.q2[branchNum] = ClosedBranchSide2ReactiveFlowEquationTerm.q2(
             branchVector.y[branchNum],
             branchVector.cosKsi[branchNum],
@@ -500,6 +552,10 @@ public class AcNetworkVector extends AbstractLfNetworkListener
             r1,
             v2,
             cosTheta2);
+
+        if (!withDerivatives) {
+            return;                                          // values-only state update: the caller
+        }                                                    // will not build a Jacobian from this state
 
         branchVector.dq2dv1[branchNum] = ClosedBranchSide2ReactiveFlowEquationTerm.dq2dv1(
             branchVector.y[branchNum],
