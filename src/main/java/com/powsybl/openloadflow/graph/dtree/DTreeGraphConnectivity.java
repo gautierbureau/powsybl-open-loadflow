@@ -158,6 +158,48 @@ public class DTreeGraphConnectivity<V, E> extends AbstractGraphConnectivity<V, E
         }
     }
 
+    /**
+     * The spanning forest answers main component membership in the depth of a vertex, and the modifications are undone
+     * and applied again directly in it: the comparisons of a temporary changes context are computed from the components
+     * its modifications touch (with every breaker of a network retained, the vertices out of the main component are many).
+     */
+    @Override
+    protected MainComponentProbe<V, E> getMainComponentProbe() {
+        return new MainComponentProbe<>() {
+            @Override
+            public boolean containsVertex(V vertex) {
+                return getGraph().containsVertex(vertex);
+            }
+
+            @Override
+            public boolean isInMainComponent(V vertex, V mainComponentVertex) {
+                return getGraph().rootOf(vertex) == getMainComponentRoot(mainComponentVertex);
+            }
+
+            @Override
+            public Set<V> copyComponent(V vertex) {
+                return new HashSet<>(getGraph().createComponentView(vertex));
+            }
+
+            @Override
+            public void revert(Deque<GraphModification<V, E>> modifications) {
+                Iterator<GraphModification<V, E>> it = modifications.descendingIterator();
+                while (it.hasNext()) {
+                    it.next().undo(getGraph());
+                }
+                componentSets = null;
+            }
+
+            @Override
+            public void reapply(Deque<GraphModification<V, E>> modifications) {
+                for (GraphModification<V, E> m : modifications) {
+                    m.apply(getGraph());
+                }
+                componentSets = null;
+            }
+        };
+    }
+
     @Override
     public boolean supportTemporaryChangesNesting() {
         return true;
