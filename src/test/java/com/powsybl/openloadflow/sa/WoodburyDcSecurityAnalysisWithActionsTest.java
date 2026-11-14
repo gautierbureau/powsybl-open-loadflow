@@ -12,6 +12,7 @@ import com.powsybl.commons.report.ReportNode;
 import com.powsybl.contingency.*;
 import com.powsybl.contingency.strategy.OperatorStrategy;
 import com.powsybl.contingency.strategy.condition.TrueCondition;
+import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.PhaseTapChanger;
 import com.powsybl.loadflow.LoadFlowParameters;
@@ -26,6 +27,7 @@ import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.results.BranchResult;
+import com.powsybl.security.results.NetworkResult;
 import com.powsybl.security.results.OperatorStrategyResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -812,5 +814,34 @@ class WoodburyDcSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnal
         assertEquals(0, operatorStrategyResult.getLimitViolationsResult().getLimitViolations().size());
         // in fast dc mode, no branch result is created for disabled branches on one side
         assertEquals(1, operatorStrategyResult.getNetworkResult().getBranchResults().size());
+    }
+
+    /**
+     * An operator strategy opening a branch its contingency already opens: no effect, as in the DC security analysis (the
+     * Woodbury update removed that branch twice).
+     */
+    @Test
+    void testFastDcSaActionOpeningABranchOpenedByTheContingency() {
+        Network network = IeeeCdfNetworkFactory.create14();
+        List<Contingency> contingencies = List.of(new Contingency("L1-2", new BranchContingency("L1-2-1")));
+        List<Action> actions = List.of(new TerminalsConnectionAction("openL1-2", "L1-2-1", true));
+        List<OperatorStrategy> operatorStrategies = List.of(new OperatorStrategy("strategy", ContingencyContext.specificContingency("L1-2"),
+                new TrueCondition(), List.of("openL1-2")));
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(false);
+        SecurityAnalysisResult expected = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(true);
+        SecurityAnalysisResult fast = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+
+        NetworkResult expectedStrategy = getOperatorStrategyResult(expected, "strategy").getNetworkResult();
+        NetworkResult fastStrategy = getOperatorStrategyResult(fast, "strategy").getNetworkResult();
+        for (BranchResult branchResult : expectedStrategy.getBranchResults()) {
+            if (!Double.isNaN(branchResult.getP1())) {
+                assertEquals(branchResult.getP1(), fastStrategy.getBranchResult(branchResult.getBranchId()).getP1(), DELTA_POWER, branchResult.getBranchId());
+            }
+        }
     }
 }
