@@ -40,6 +40,14 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
 
         boolean isDisabled(int termElementNum);
 
+        /**
+         * Constant part of the term moved to the right-hand side (target vector). Zero by default;
+         * overridden by affine terms (e.g. DC flows with a fixed phase shift).
+         */
+        default double rhs(int termElementNum) {
+            return 0;
+        }
+
         double[] eval();
 
         double eval(int termElementNum);
@@ -82,6 +90,10 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
 
     public ElementType getElementType() {
         return elementType;
+    }
+
+    public Evaluator<V> getEvaluator() {
+        return evaluator;
     }
 
     public EquationArray<V, E> getEquationArray() {

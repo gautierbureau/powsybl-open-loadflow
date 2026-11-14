@@ -215,22 +215,30 @@ public class OpenSensitivityAnalysisProvider implements SensitivityAnalysisProvi
         }
 
         GraphConnectivityFactory<LfBus, LfBranch> selectedConnectivityFactory;
-        if (operatorStrategies.isEmpty()) {
-            selectedConnectivityFactory = connectivityFactory;
-        } else {
-            LOGGER.warn("Naive (and slow!!!) connectivity algorithm has been selected because at least one operator strategy is configured");
+        if (!operatorStrategies.isEmpty() && !connectivityFactory.supportsIncremental()) {
             selectedConnectivityFactory = new NaiveGraphConnectivityFactory<>(LfBus::getNum);
+        } else {
+            selectedConnectivityFactory = connectivityFactory;
         }
 
         AbstractSensitivityAnalysis<?, ?> analysis;
         if (loadFlowParameters.isDc()) {
-            analysis = new DcSensitivityAnalysis(matrixFactory, selectedConnectivityFactory, sensitivityAnalysisParameters);
+            analysis = createDcSensitivityAnalysis(selectedConnectivityFactory, sensitivityAnalysisParameters);
         } else {
             analysis = createAcSensitivityAnalysis(matrixFactory, selectedConnectivityFactory, sensitivityAnalysisParameters);
         }
         analysis.analyse(network, workingVariantId, contingencies, operatorStrategies, actions, creationParameters, variableSets,
                 decoratedFactorReader, resultWriter, sensiReportNode, sensitivityAnalysisParametersExt, computationManager.getExecutor());
         return null;
+    }
+
+    /**
+     * The DC sensitivity analysis engine. An alternative engine (a device one) is installed by
+     * overriding this.
+     */
+    protected AbstractSensitivityAnalysis<?, ?> createDcSensitivityAnalysis(GraphConnectivityFactory<LfBus, LfBranch> selectedConnectivityFactory,
+                                                                            SensitivityAnalysisParameters sensitivityAnalysisParameters) {
+        return new DcSensitivityAnalysis(matrixFactory, selectedConnectivityFactory, sensitivityAnalysisParameters);
     }
 
     public CompletableFuture<Void> run(Network network,

@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.graph;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
+import com.powsybl.openloadflow.graph.dtree.DTreeGraphConnectivity;
 import com.powsybl.openloadflow.network.*;
 import com.powsybl.openloadflow.network.impl.Networks;
 import org.jgrapht.alg.connectivity.BiconnectivityInspector;
@@ -72,6 +73,12 @@ class BridgesTest {
     @Test
     void testMst() {
         Set<String> bridges = testBridgesOnConnectivity(lfNetwork, new MinimumSpanningTreeGraphConnectivity<>(), "Even-Shiloach");
+        assertEquals(bridgesSetReference, bridges);
+    }
+
+    @Test
+    void testDTree() {
+        Set<String> bridges = testBridgesOnConnectivity(lfNetwork, new DTreeGraphConnectivity<>(), "DTree");
         assertEquals(bridgesSetReference, bridges);
     }
 

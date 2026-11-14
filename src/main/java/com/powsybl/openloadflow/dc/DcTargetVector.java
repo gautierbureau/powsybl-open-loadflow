@@ -56,6 +56,31 @@ public class DcTargetVector extends TargetVector<DcVariableType, DcEquationType>
         targets[equation.getColumn()] -= equation.rhs();
     }
 
+    /**
+     * Vectorized counterpart of {@link #init(SingleEquation, LfNetwork, double[])} for the (only)
+     * arrayed DC equation {@code BUS_TARGET_P}. Kept numerically identical to the scalar path: the base
+     * active power target (plus the multi-slack adjustment) minus the sum of the active branch-term
+     * right-hand sides (non-zero only for fixed phase shifters).
+     */
+    public static void init(EquationArray<DcVariableType, DcEquationType> equationArray, LfNetwork network, double[] targets) {
+        if (equationArray.getType() != DcEquationType.BUS_TARGET_P) {
+            throw new IllegalStateException("Unexpected DC equation array type: " + equationArray.getType());
+        }
+        for (int elementNum = 0; elementNum < equationArray.getElementCount(); elementNum++) {
+            if (equationArray.isElementActive(elementNum)) {
+                int column = equationArray.getElementNumToColumn(elementNum);
+                LfBus bus = network.getBus(elementNum);
+                targets[column] = bus.getTargetP();
+                // Only used for multi slack (BUS_TARGET_P equation is disabled for first slack bus)
+                if (bus.isSlack()) {
+                    LfSynchronousNetwork lfScNetwork = network.getSynchronousNetwork(bus.getNumSC());
+                    targets[column] += DcLoadFlowEngine.getActivePowerMismatch(lfScNetwork.getBuses()) / lfScNetwork.getSlackBuses().size();
+                }
+                targets[column] -= equationArray.getRhs(elementNum);
+            }
+        }
+    }
+
     public DcTargetVector(LfNetwork network, EquationSystem<DcVariableType, DcEquationType> equationSystem) {
         super(network, equationSystem, new Initializer<>() {
             @Override
@@ -65,7 +90,7 @@ public class DcTargetVector extends TargetVector<DcVariableType, DcEquationType>
 
             @Override
             public void initialize(EquationArray<DcVariableType, DcEquationType> equationArray, LfNetwork network, double[] targets) {
-                throw new UnsupportedOperationException("Equation Arrays not implemented in DC");
+                DcTargetVector.init(equationArray, network, targets);
             }
         });
     }

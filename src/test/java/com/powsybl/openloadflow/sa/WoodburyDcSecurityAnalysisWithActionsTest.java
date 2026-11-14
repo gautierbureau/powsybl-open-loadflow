@@ -12,8 +12,11 @@ import com.powsybl.commons.report.ReportNode;
 import com.powsybl.contingency.*;
 import com.powsybl.contingency.strategy.OperatorStrategy;
 import com.powsybl.contingency.strategy.condition.TrueCondition;
+import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.PhaseTapChanger;
+import com.powsybl.iidm.network.VoltageLevel;
+import com.powsybl.iidm.network.extensions.SlackTerminal;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
@@ -26,6 +29,7 @@ import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.results.BranchResult;
+import com.powsybl.security.results.NetworkResult;
 import com.powsybl.security.results.OperatorStrategyResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -789,5 +793,166 @@ class WoodburyDcSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnal
         assertEquals(0, operatorStrategyResult.getLimitViolationsResult().getLimitViolations().size());
         // in fast dc mode, no branch result is created for disabled branches on one side
         assertEquals(1, operatorStrategyResult.getNetworkResult().getBranchResults().size());
+    }
+
+    /** Multi-threaded: each partition holds some of the contingencies, the strategies of the others are not an error. */
+    @Test
+    void testFastDcSaOperatorStrategiesMultiThreaded() {
+        Network network = PhaseControlFactory.createWithOneT2wtTwoLines();
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")),
+                new Contingency("L2", new BranchContingency("L2")));
+        List<Action> actions = List.of(new PhaseTapChangerTapPositionAction("pstAbsChange", "PS1", false, 0));
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("strategyL1", ContingencyContext.specificContingency("L1"), new TrueCondition(), List.of("pstAbsChange")),
+                new OperatorStrategy("strategyL2", ContingencyContext.specificContingency("L2"), new TrueCondition(), List.of("pstAbsChange")));
+
+        SecurityAnalysisResult singleThreaded = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setThreadCount(2);
+        SecurityAnalysisResult multiThreaded = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+
+        for (String strategy : List.of("strategyL1", "strategyL2")) {
+            for (String branch : List.of("L1", "L2", "PS1")) {
+                var expected = getOperatorStrategyResult(singleThreaded, strategy).getNetworkResult().getBranchResult(branch);
+                var actual = getOperatorStrategyResult(multiThreaded, strategy).getNetworkResult().getBranchResult(branch);
+                assertEquals(expected == null, actual == null);
+                if (expected != null) {
+                    assertEquals(expected.getP1(), actual.getP1(), DELTA_POWER);
+                }
+            }
+        }
+    }
+
+    /** Closing a breaker towards a bay that is dead in the base case (an open load bay). */
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testDcSaActionClosingBreakerTowardsDeadBay(boolean dcFastMode) {
+        Network network = NodeBreakerNetworkFactory.create();
+        VoltageLevel vl2 = network.getVoltageLevel("VL2");
+        vl2.getNodeBreakerView().newBreaker().setId("BX").setNode1(0).setNode2(10).setOpen(true).add();
+        vl2.newLoad().setId("LDX").setNode(10).setP0(50.0).setQ0(0.0).add();
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<Action> actions = List.of(new SwitchAction("closeBX", "BX", false));
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("strategy", ContingencyContext.specificContingency("L1"), new TrueCondition(), List.of("closeBX")));
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(dcFastMode);
+
+        if (dcFastMode) {
+            CompletionException exception = assertThrows(CompletionException.class, () -> runSecurityAnalysis(network, contingencies,
+                    createAllBranchesMonitors(network), securityAnalysisParameters, operatorStrategies, actions, ReportNode.NO_OP));
+            assertEquals("Action 'closeBX' connects branch 'BX' to bus 'VL2_10', which is not energized in the base case: "
+                    + "not supported in fast DC security analysis", exception.getCause().getMessage());
+        } else {
+            SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, createAllBranchesMonitors(network), securityAnalysisParameters,
+                    operatorStrategies, actions, ReportNode.NO_OP);
+            // the bay's load is picked up through L2
+            assertEquals(650.0, getOperatorStrategyResult(result, "strategy").getNetworkResult().getBranchResult("L2").getP1(), DELTA_POWER);
+        }
+    }
+
+    /**
+     * A generator action on a generator the contingency disconnects (B8-G, connected by L7-8-1 only): it cannot apply,
+     * as in the DC security analysis, instead of injecting its change on a bus outside the main component.
+     */
+    @Test
+    void testFastDcSaGeneratorActionOnDisconnectedGenerator() {
+        Network network = IeeeCdfNetworkFactory.create14();
+        List<Contingency> contingencies = List.of(new Contingency("L7-8-1", new BranchContingency("L7-8-1")));
+        List<Action> actions = List.of(
+                new GeneratorActionBuilder().withId("g8Up").withGeneratorId("B8-G").withActivePowerRelativeValue(true).withActivePowerValue(20.0).build(),
+                new GeneratorActionBuilder().withId("g2Down").withGeneratorId("B2-G").withActivePowerRelativeValue(true).withActivePowerValue(-20.0).build());
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("redispatch", ContingencyContext.specificContingency("L7-8-1"), new TrueCondition(), List.of("g8Up", "g2Down")));
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(false);
+        SecurityAnalysisResult expected = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(true);
+        SecurityAnalysisResult fast = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+
+        for (BranchResult branchResult : getOperatorStrategyResult(expected, "redispatch").getNetworkResult().getBranchResults()) {
+            BranchResult other = getOperatorStrategyResult(fast, "redispatch").getNetworkResult().getBranchResult(branchResult.getBranchId());
+            if (other != null && !Double.isNaN(branchResult.getP1())) {
+                assertEquals(branchResult.getP1(), other.getP1(), DELTA_POWER, branchResult.getBranchId());
+            }
+        }
+    }
+
+    /**
+     * A contingency stranding the slack bus (B8, connected by L7-8-1 only): as the DC security analysis, the fast one keeps
+     * the largest component, for the contingency and for an operator strategy (a balanced redispatch and a line opened).
+     */
+    @Test
+    void testFastDcSaContingencyStrandingTheSlackBus() {
+        Network network = IeeeCdfNetworkFactory.create14();
+        List<Contingency> contingencies = List.of(new Contingency("L7-8-1", new BranchContingency("L7-8-1")));
+        List<Action> actions = List.of(
+                new GeneratorActionBuilder().withId("g2Down").withGeneratorId("B2-G").withActivePowerRelativeValue(true).withActivePowerValue(-20.0).build(),
+                new GeneratorActionBuilder().withId("g3Up").withGeneratorId("B3-G").withActivePowerRelativeValue(true).withActivePowerValue(20.0).build(),
+                new TerminalsConnectionAction("openL6-13", "L6-13-1", true));
+        List<OperatorStrategy> operatorStrategies = List.of(new OperatorStrategy("strategy", ContingencyContext.specificContingency("L7-8-1"),
+                new TrueCondition(), List.of("g2Down", "g3Up", "openL6-13")));
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+        // the slack bus on B8 (the network's slack terminal extension moved there from B1)
+        network.getVoltageLevel("VL1").removeExtension(SlackTerminal.class);
+        SlackTerminal.attach(network.getGenerator("B8-G").getTerminal().getBusBreakerView().getBus());
+
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(false);
+        SecurityAnalysisResult expected = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(true);
+        SecurityAnalysisResult fast = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+
+        NetworkResult expectedContingency = getPostContingencyResult(expected, "L7-8-1").getNetworkResult();
+        NetworkResult fastContingency = getPostContingencyResult(fast, "L7-8-1").getNetworkResult();
+        assertEquals(19, fastContingency.getBranchResults().size());   // every branch but the contingency's
+        assertSameBranchResults(expectedContingency, fastContingency);
+        assertSameBranchResults(getOperatorStrategyResult(expected, "strategy").getNetworkResult(),
+                getOperatorStrategyResult(fast, "strategy").getNetworkResult());
+    }
+
+    private static void assertSameBranchResults(NetworkResult expected, NetworkResult actual) {
+        for (BranchResult branchResult : expected.getBranchResults()) {
+            if (Double.isNaN(branchResult.getP1())) {
+                continue;
+            }
+            BranchResult other = actual.getBranchResult(branchResult.getBranchId());
+            assertNotNull(other, branchResult.getBranchId());
+            assertEquals(branchResult.getP1(), other.getP1(), DELTA_POWER, branchResult.getBranchId());
+        }
+    }
+
+    /**
+     * An operator strategy opening a branch its contingency already opens: no effect, as in the DC security analysis (the
+     * Woodbury update removed that branch twice).
+     */
+    @Test
+    void testFastDcSaActionOpeningABranchOpenedByTheContingency() {
+        Network network = IeeeCdfNetworkFactory.create14();
+        List<Contingency> contingencies = List.of(new Contingency("L1-2", new BranchContingency("L1-2-1")));
+        List<Action> actions = List.of(new TerminalsConnectionAction("openL1-2", "L1-2-1", true));
+        List<OperatorStrategy> operatorStrategies = List.of(new OperatorStrategy("strategy", ContingencyContext.specificContingency("L1-2"),
+                new TrueCondition(), List.of("openL1-2")));
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(false);
+        SecurityAnalysisResult expected = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(true);
+        SecurityAnalysisResult fast = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+
+        NetworkResult expectedStrategy = getOperatorStrategyResult(expected, "strategy").getNetworkResult();
+        NetworkResult fastStrategy = getOperatorStrategyResult(fast, "strategy").getNetworkResult();
+        for (BranchResult branchResult : expectedStrategy.getBranchResults()) {
+            if (!Double.isNaN(branchResult.getP1())) {
+                assertEquals(branchResult.getP1(), fastStrategy.getBranchResult(branchResult.getBranchId()).getP1(), DELTA_POWER, branchResult.getBranchId());
+            }
+        }
     }
 }

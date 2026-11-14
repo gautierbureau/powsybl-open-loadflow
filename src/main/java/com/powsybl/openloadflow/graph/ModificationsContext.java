@@ -1,11 +1,13 @@
 /**
- * Copyright (c) 2022, RTE (http://www.rte-france.com)
+ * Copyright (c) 2022-2026, RTE (http://www.rte-france.com)
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
 package com.powsybl.openloadflow.graph;
+
+import com.powsybl.openloadflow.graph.dtree.AbstractSetView;
 
 import java.util.*;
 import java.util.function.Function;
@@ -27,13 +29,31 @@ public class ModificationsContext<V, E> {
     private Map<E, AbstractEdgeModification<V, E>> edgeFirstModificationMap;
     private V mainComponentVertex;
 
+    /** When not null, the comparisons are computed from the components the modifications touch (see {@link MainComponentProbe}),
+     *  and no snapshot of the vertices outside the main component is taken when the context starts. */
+    private final MainComponentProbe<V, E> probe;
+    /** The main component vertex when the context started: the "before" of the comparisons is relative to it. */
+    private final V initialMainComponentVertex;
+    /** The main component membership before the modifications of the vertices the local comparisons looked at. */
+    private Map<V, Boolean> inMainComponentBefore;
+
     public ModificationsContext(Function<V, Set<V>> verticesNotInMainComponentGetter, V mainComponentVertex) {
+        this(verticesNotInMainComponentGetter, mainComponentVertex, null);
+    }
+
+    public ModificationsContext(Function<V, Set<V>> verticesNotInMainComponentGetter, V mainComponentVertex, MainComponentProbe<V, E> probe) {
         this.mainComponentVertex = mainComponentVertex;
         this.verticesNotInMainComponentGetter = verticesNotInMainComponentGetter;
+        // the main component is the vertex's: the biggest one (null vertex) may change with the modifications anywhere
+        this.probe = mainComponentVertex != null ? probe : null;
+        this.initialMainComponentVertex = mainComponentVertex;
     }
 
     public void computeVerticesNotInMainComponentBefore() {
-        this.verticesNotInMainComponentBefore = verticesNotInMainComponentGetter.apply(mainComponentVertex);
+        if (probe != null) {
+            return;
+        }
+        this.verticesNotInMainComponentBefore = AbstractSetView.copyIfNeeded(verticesNotInMainComponentGetter.apply(mainComponentVertex));
     }
 
     public void add(GraphModification<V, E> graphModification) {
@@ -47,6 +67,7 @@ public class ModificationsContext<V, E> {
         verticesRemovedFromMainComponent = null;
         edgesRemovedFromMainComponent = null;
         edgeFirstModificationMap = null;
+        inMainComponentBefore = null;
     }
 
     public Deque<GraphModification<V, E>> getModifications() {
@@ -61,9 +82,13 @@ public class ModificationsContext<V, E> {
     }
 
     public Set<V> getVerticesRemovedFromMainComponent() {
+        if (verticesRemovedFromMainComponent == null && localComparisons()) {
+            computeLocalComparisons();
+        }
         if (verticesRemovedFromMainComponent == null) {
             Set<V> result = new HashSet<>(getVerticesNotInMainComponentAfter());
-            result.removeAll(verticesNotInMainComponentBefore);
+            result.removeAll(getVerticesNotInMainComponentBefore());
+
             if (!result.isEmpty()) {
                 // remove vertices added in between
                 // note that there is no VertexRemove modification, thus we do not need to check if vertex is in the graph in the end
@@ -82,10 +107,14 @@ public class ModificationsContext<V, E> {
     }
 
     public Set<V> getVerticesAddedToMainComponent() {
+        if (verticesAddedToMainComponent == null && localComparisons()) {
+            computeLocalComparisons();
+        }
         if (verticesAddedToMainComponent == null) {
-            Set<V> result = new HashSet<>(verticesNotInMainComponentBefore);
+            Set<V> result = new HashSet<>(getVerticesNotInMainComponentBefore());
             Set<V> verticesNotInMainComponentAfter = getVerticesNotInMainComponentAfter();
             result.removeAll(verticesNotInMainComponentAfter);
+
             // add vertices added to main component in between
             // note that there is no VertexRemove modification, thus we do not need to check if vertex is in the graph before / in the end
             getAddedVertexStream().filter(addedVertex -> !verticesNotInMainComponentAfter.contains(addedVertex)).forEach(result::add);
@@ -118,7 +147,7 @@ public class ModificationsContext<V, E> {
         modifications.stream().filter(EdgeRemove.class::isInstance).map(m -> ((EdgeRemove<V, E>) m).e)
                 .filter(edgeRemoved -> !graph.containsEdge(edgeRemoved)) // the edge was not added afterwards
                 .filter(this::graphContainedEdgeBefore) // the edge was in the graph before the modifications
-                .filter(edgeRemoved -> !verticesNotInMainComponentBefore.contains((edgeFirstModificationMap.get(edgeRemoved)).v1)) // one of the original vertices of the edge was in the main component
+                .filter(edgeRemoved -> isInMainComponentBefore((edgeFirstModificationMap.get(edgeRemoved)).v1)) // one of the original vertices of the edge was in the main component
                 .forEach(result::add);
 
         return result;
@@ -168,6 +197,115 @@ public class ModificationsContext<V, E> {
     }
 
     public boolean isInMainComponentBefore(V vertex) {
-        return !verticesNotInMainComponentBefore.contains(vertex);
+        if (probe == null) {
+            return !verticesNotInMainComponentBefore.contains(vertex);
+        }
+        if (modifications.isEmpty()) {
+            return probe.isInMainComponent(vertex, initialMainComponentVertex);
+        }
+        if (localComparisons()) {
+            computeLocalComparisons();
+            Boolean before = inMainComponentBefore.get(vertex);
+            if (before != null) {
+                return before;
+            }
+        }
+        probe.revert(modifications);
+        try {
+            return probe.containsVertex(vertex) && probe.isInMainComponent(vertex, initialMainComponentVertex);
+        } finally {
+            probe.reapply(modifications);
+        }
     }
+
+    /** The comparisons are local while the main component vertex is the one the context started with. */
+    private boolean localComparisons() {
+        return probe != null && Objects.equals(mainComponentVertex, initialMainComponentVertex);
+    }
+
+    /** The snapshot of the vertices out of the main component before the modifications: taken when the context started,
+     *  or, with a probe whose main component vertex changed since, on the graph with the modifications reverted. */
+    private Set<V> getVerticesNotInMainComponentBefore() {
+        if (verticesNotInMainComponentBefore == null) {
+            probe.revert(modifications);
+            try {
+                verticesNotInMainComponentBefore = AbstractSetView.copyIfNeeded(verticesNotInMainComponentGetter.apply(initialMainComponentVertex));
+            } finally {
+                probe.reapply(modifications);
+            }
+        }
+        return verticesNotInMainComponentBefore;
+    }
+
+    /**
+     * The vertices removed from and added to the main component, from the components the modifications touch: a
+     * component no modification touches is the same before and after, in the main component or out of it both times.
+     * So a vertex removed is out of the main component after, in a component holding a touched vertex, and was in
+     * it before; a vertex added was out of it before, in a component holding a touched vertex, and is in it after.
+     * The before side is read on the graph with the modifications reverted (then applied again): the cost is that of
+     * the modifications and of the components they touch, not of every vertex out of the main component.
+     */
+    private void computeLocalComparisons() {
+        if (inMainComponentBefore != null) {
+            return;
+        }
+        Set<V> addedVertices = getAddedVertexStream().collect(Collectors.toCollection(HashSet::new));
+        Set<V> touched = new LinkedHashSet<>();
+        for (GraphModification<V, E> m : modifications) {
+            if (m instanceof AbstractEdgeModification<V, E> edgeModification) {
+                touched.add(edgeModification.v1);
+                touched.add(edgeModification.v2);
+            } else if (m instanceof VertexAdd<V, E> vertexAdd) {
+                touched.add(vertexAdd.v);
+            }
+        }
+        Set<V> outAfter = new HashSet<>();
+        for (V v : touched) {
+            if (!outAfter.contains(v) && probe.containsVertex(v) && !probe.isInMainComponent(v, mainComponentVertex)) {
+                outAfter.addAll(probe.copyComponent(v));
+            }
+        }
+        Map<V, Boolean> before = new HashMap<>();
+        Set<V> outBefore = new HashSet<>();
+        probe.revert(modifications);
+        try {
+            for (V v : touched) {
+                if (!addedVertices.contains(v) && probe.containsVertex(v)) {
+                    boolean in = probe.isInMainComponent(v, mainComponentVertex);
+                    before.put(v, in);
+                    if (!in && !outBefore.contains(v)) {
+                        outBefore.addAll(probe.copyComponent(v));
+                    }
+                }
+            }
+            for (V v : outAfter) {
+                if (!addedVertices.contains(v) && !before.containsKey(v)) {
+                    before.put(v, probe.isInMainComponent(v, mainComponentVertex));
+                }
+            }
+        } finally {
+            probe.reapply(modifications);
+        }
+        Set<V> removed = new HashSet<>();
+        for (V v : outAfter) {
+            if (Boolean.TRUE.equals(before.get(v))) {
+                removed.add(v);
+            }
+        }
+        Set<V> added = new HashSet<>();
+        for (V v : outBefore) {
+            if (probe.isInMainComponent(v, mainComponentVertex)) {
+                added.add(v);
+            }
+        }
+        for (V v : addedVertices) {
+            if (probe.isInMainComponent(v, mainComponentVertex)) {
+                added.add(v);
+            }
+        }
+        inMainComponentBefore = before;
+        verticesRemovedFromMainComponent = removed;
+        verticesAddedToMainComponent = added;
+    }
+
 }

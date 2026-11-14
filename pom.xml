@@ -19,7 +19,7 @@
     </parent>
 
     <artifactId>powsybl-open-loadflow</artifactId>
-    <version>2.4.0-SNAPSHOT-gpu</version>
+    <version>2.4.0-SNAPSHOT-gpu-dc</version>
 
     <name>powsybl open loadflow</name>
     <description>An open source loadflow based on PowSyBl</description>
@@ -83,6 +83,10 @@
                                 <include>com/powsybl/openloadflow/util/LoadFlowAssert.class</include>
                                 <include>com/powsybl/openloadflow/util/LoadFlowResultBuilder.class</include>
                                 <include>com/powsybl/openloadflow/sa/AbstractOpenSecurityAnalysisTest.class</include>
+                                <include>com/powsybl/openloadflow/sensi/AbstractSensitivityAnalysisTest.class</include>
+                                <include>com/powsybl/openloadflow/sensi/DcSensitivityAnalysisTest*.class</include>
+                                <include>com/powsybl/openloadflow/sensi/DcSensitivityAnalysisContingenciesTest*.class</include>
+                                <include>com/powsybl/openloadflow/sensi/DcSensitivityAnalysisActionsTest*.class</include>
                             </includes>
                         </configuration>
                     </execution>
@@ -215,6 +219,11 @@
         <dependency>
             <groupId>com.powsybl</groupId>
             <artifactId>powsybl-iidm-impl</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.powsybl</groupId>
+            <artifactId>powsybl-matpower-converter</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

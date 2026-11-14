@@ -2378,41 +2378,52 @@ class OpenSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest {
     }
 
     @Test
-    void testDcFastModeInFirstSlackComponentOnly() {
+    void testDcFastModeInLargestComponent() {
         Network network = ConnectedComponentNetworkFactory.createThreeCcLinkedByASingleBus();
         List<StateMonitor> monitors = createAllBranchesMonitors(network);
         List<Contingency> contingencies = List.of(new Contingency("line", new BranchContingency("l34"), new BranchContingency("l45")));
-        SecurityAnalysisParameters parameters = new SecurityAnalysisParameters();
 
-        // Run fast DC security analysis
-        parameters.getLoadFlowParameters().setDc(true);
-        OpenLoadFlowParameters openLoadFlowParameters = OpenLoadFlowParameters.create(parameters.getLoadFlowParameters())
-                .setSlackBusSelectionMode(SlackBusSelectionMode.NAME);
-        OpenSecurityAnalysisParameters openSecurityAnalysisParameters = new OpenSecurityAnalysisParameters();
-        openSecurityAnalysisParameters.setDcFastMode(true);
-        parameters.addExtension(OpenSecurityAnalysisParameters.class, openSecurityAnalysisParameters);
+        // the contingency leaves the slack bus b3 in a component smaller than the largest one: as the DC (and AC) security
+        // analysis, the fast DC one takes the largest component as the main one, the slack bus's being lost
+        PostContingencyResult dc = runDcFastModeInLargestComponent(network, contingencies, monitors, List.of("b3_vl"), false);
+        PostContingencyResult fast = runDcFastModeInLargestComponent(network, contingencies, monitors, List.of("b3_vl"), true);
+        assertEquals(4, fast.getNetworkResult().getBranchResults().size());
+        for (BranchResult branchResult : dc.getNetworkResult().getBranchResults()) {
+            assertEquals(branchResult.getP1(), fast.getNetworkResult().getBranchResult(branchResult.getBranchId()).getP1(), LoadFlowAssert.DELTA_POWER);
+        }
+        assertEquals(-1, fast.getNetworkResult().getBranchResult("l48").getP1(), LoadFlowAssert.DELTA_POWER);
+        // the other components' generation and load lost, the slack bus's component among them
+        assertEquals(dc.getConnectivityResult().getDisconnectedGenerationActivePower(),
+                fast.getConnectivityResult().getDisconnectedGenerationActivePower(), LoadFlowAssert.DELTA_POWER);
+        assertEquals(dc.getConnectivityResult().getDisconnectedLoadActivePower(),
+                fast.getConnectivityResult().getDisconnectedLoadActivePower(), LoadFlowAssert.DELTA_POWER);
 
-        List<List<String>> slackBusesIdList = List.of(List.of("b3_vl"), List.of("b3_vl", "b7_vl"), List.of("b3_vl", "b7_vl", "b10_vl"));
-        // verify that for each list of slacks buses, fast dc sa runs only in component of first slack bus
-        slackBusesIdList.forEach(slackBusesId -> {
-            openLoadFlowParameters.setSlackBusesIds(slackBusesId)
-                    .setMaxSlackBusCount(slackBusesId.size());
-            SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, monitors, parameters, ReportNode.NO_OP);
-            PostContingencyResult postContingencyResult = result.getPostContingencyResults().get(0);
-            assertSame(PostContingencyComputationStatus.CONVERGED, postContingencyResult.getStatus());
-
-            // verify only flows in slack component have been computed
+        // with several slack buses, the fast DC security analysis still runs in the component of the first one only
+        for (List<String> slackBusesId : List.of(List.of("b3_vl", "b7_vl"), List.of("b3_vl", "b7_vl", "b10_vl"))) {
+            PostContingencyResult postContingencyResult = runDcFastModeInLargestComponent(network, contingencies, monitors, slackBusesId, true);
             assertEquals(3, postContingencyResult.getNetworkResult().getBranchResults().size());
-
-            // verify flows on the branches
             assertEquals(-1, postContingencyResult.getNetworkResult().getBranchResult("l12").getP1(), LoadFlowAssert.DELTA_POWER);
             assertEquals(0, postContingencyResult.getNetworkResult().getBranchResult("l13").getP1(), LoadFlowAssert.DELTA_POWER);
             assertEquals(1, postContingencyResult.getNetworkResult().getBranchResult("l23").getP1(), LoadFlowAssert.DELTA_POWER);
-
-            // verify active load and generation of other components have been lost
             assertEquals(6, postContingencyResult.getConnectivityResult().getDisconnectedGenerationActivePower(), LoadFlowAssert.DELTA_POWER);
             assertEquals(7, postContingencyResult.getConnectivityResult().getDisconnectedLoadActivePower(), LoadFlowAssert.DELTA_POWER);
-        });
+        }
+    }
+
+    private PostContingencyResult runDcFastModeInLargestComponent(Network network, List<Contingency> contingencies, List<StateMonitor> monitors,
+                                                                  List<String> slackBusesId, boolean dcFastMode) {
+        SecurityAnalysisParameters parameters = new SecurityAnalysisParameters();
+        parameters.getLoadFlowParameters().setDc(true);
+        OpenLoadFlowParameters.create(parameters.getLoadFlowParameters())
+                .setSlackBusSelectionMode(SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(slackBusesId)
+                .setMaxSlackBusCount(slackBusesId.size());
+        OpenSecurityAnalysisParameters openSecurityAnalysisParameters = new OpenSecurityAnalysisParameters();
+        openSecurityAnalysisParameters.setDcFastMode(dcFastMode);
+        parameters.addExtension(OpenSecurityAnalysisParameters.class, openSecurityAnalysisParameters);
+        PostContingencyResult result = runSecurityAnalysis(network, contingencies, monitors, parameters, ReportNode.NO_OP).getPostContingencyResults().get(0);
+        assertSame(PostContingencyComputationStatus.CONVERGED, result.getStatus());
+        return result;
     }
 
     @Test
