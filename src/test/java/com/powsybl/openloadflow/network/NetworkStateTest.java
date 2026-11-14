@@ -72,4 +72,59 @@ class NetworkStateTest {
         List<LfBranch> none = List.of();
         assertThrows(IllegalArgumentException.class, () -> state.restore(foreign, none));
     }
+
+    @Test
+    void voltageOnlyRestores() {
+        LfNetwork lfNetwork = Networks.load(EurostagTutorialExample1Factory.create(), new MostMeshedSlackBusSelector()).getFirst();
+        LfBus loadBus = lfNetwork.getBusById("VLLOAD_0");
+        LfLoad load = loadBus.getLoads().getFirst();
+        LfBus genBus = lfNetwork.getBusById("VLGEN_0");
+        LfGenerator gen = genBus.getGenerators().getFirst();
+        double loadTargetP = load.getTargetP();
+        double genTargetP = gen.getTargetP();
+        double[] v = lfNetwork.getBuses().stream().mapToDouble(LfBus::getV).toArray();
+        double[] angle = lfNetwork.getBuses().stream().mapToDouble(LfBus::getAngle).toArray();
+        NetworkState state = NetworkState.save(lfNetwork);
+
+        // without the voltages: the listed bus is restored entirely, the other buses keep their voltages
+        load.setTargetP(loadTargetP + 1);
+        moveVoltages(lfNetwork);
+        state.restore(List.of(loadBus), List.of(), false);
+        assertEquals(loadTargetP, load.getTargetP(), 0);
+        assertEquals(v[loadBus.getNum()], loadBus.getV(), 0);
+        for (LfBus bus : lfNetwork.getBuses()) {
+            if (bus != loadBus) {
+                assertEquals(v[bus.getNum()] + 0.1, bus.getV(), 0, bus.getId());
+                assertEquals(angle[bus.getNum()] + 0.1, bus.getAngle(), 0, bus.getId());
+            }
+        }
+
+        // the voltages of the given buses only, and nothing else
+        gen.setTargetP(genTargetP + 1);
+        state.restoreVoltages(List.of(genBus));
+        assertEquals(v[genBus.getNum()], genBus.getV(), 0);
+        assertEquals(angle[genBus.getNum()], genBus.getAngle(), 0);
+        assertEquals(genTargetP + 1, gen.getTargetP(), 0);
+        LfBus otherBus = lfNetwork.getBusById("VLHV1_0");
+        assertEquals(v[otherBus.getNum()] + 0.1, otherBus.getV(), 0);
+
+        // the voltages of every bus, and nothing else
+        state.restoreVoltages();
+        for (LfBus bus : lfNetwork.getBuses()) {
+            assertEquals(v[bus.getNum()], bus.getV(), 0, bus.getId());
+            assertEquals(angle[bus.getNum()], bus.getAngle(), 0, bus.getId());
+        }
+        assertEquals(genTargetP + 1, gen.getTargetP(), 0);
+
+        LfNetwork other = Networks.load(EurostagTutorialExample1Factory.create(), new MostMeshedSlackBusSelector()).getFirst();
+        List<LfBus> foreign = List.of(other.getBusById("VLLOAD_0"));
+        assertThrows(IllegalArgumentException.class, () -> state.restoreVoltages(foreign));
+    }
+
+    private static void moveVoltages(LfNetwork lfNetwork) {
+        for (LfBus bus : lfNetwork.getBuses()) {
+            bus.setV(bus.getV() + 0.1);
+            bus.setAngle(bus.getAngle() + 0.1);
+        }
+    }
 }
