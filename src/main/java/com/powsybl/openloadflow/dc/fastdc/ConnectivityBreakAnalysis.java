@@ -206,8 +206,11 @@ public final class ConnectivityBreakAnalysis {
      */
     private static Optional<ConnectivityAnalysisResult> computeConnectivityAnalysisResult(LfNetwork lfNetwork,
                                                                                           PropagatedContingency contingency, Map<String, ComputedContingencyElement> contingencyElementByBranch,
-                                                                                          LfOperatorStrategy operatorStrategy, Map<LfAction, List<ComputedElement>> actionElementByBranch) {
+                                                                                          LfOperatorStrategy operatorStrategy, Map<LfAction, List<ComputedElement>> actionElementByBranch,
+                                                                                          boolean relocateSlackBus) {
         GraphConnectivity<LfBus, LfBranch> connectivity = lfNetwork.getConnectivity();
+        LfBus slackBus = lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
+        boolean relocated = false;
 
         // concatenate all computed elements, to apply them on the connectivity
         // only branch actions (line/switch open/close) can modify connectivity: other actions (e.g. PST tap, generator/load
@@ -229,6 +232,20 @@ public final class ConnectivityBreakAnalysis {
             // apply all modifications of connectivity, due to the lost/enabled/disabled branches
             modifyingConnectivityCandidates.forEach(computedElement -> computedElement.applyToConnectivity(connectivity));
 
+            // as the AC and DC security analyses (PropagatedContingency, relocateSlackBus): when the slack bus is left out of the
+            // largest component, the largest is the main one and the slack bus's component is lost. The slack bus stays the
+            // reference of the equation system: the elements to reconnect keep the lost part attached, without injection.
+            // With a single slack bus only: the other slack buses of a multi-slack network take a share of the mismatch in
+            // their own P equation, which a main component holding one of them would read (they would have to be re-selected,
+            // as the AC security analysis does)
+            if (relocateSlackBus && lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().size() == 1
+                    && PropagatedContingency.isSlackBusIsolated(connectivity, slackBus)) {
+                String contingencyId = contingency != null ? contingency.getContingency().getId() : "";
+                LOGGER.debug("Contingency '{}' leads to an isolated slack bus: the largest component is the main one", contingencyId);
+                connectivity.setMainComponentVertex(connectivity.getLargestConnectedComponent().iterator().next());
+                relocated = true;
+            }
+
             // filter the branches that really impacts connectivity
             // the traversal order of the set must be deterministic to ensure consistent element selection when multiple elements can restore connectivity
             // without this, fast DC post contingency states may vary for buses disconnected from main connected component, depending on which elements were selected
@@ -249,6 +266,9 @@ public final class ConnectivityBreakAnalysis {
             }
         } finally {
             connectivity.undoTemporaryChanges();
+            if (relocated) {
+                connectivity.setMainComponentVertex(slackBus);   // the network's main component vertex again
+            }
         }
         return Optional.ofNullable(connectivityAnalysisResult);
     }
@@ -336,6 +356,15 @@ public final class ConnectivityBreakAnalysis {
 
     public static ConnectivityBreakAnalysisResults run(DcLoadFlowContext loadFlowContext, List<PropagatedContingency> contingencies,
                                                        List<String> permanentContingencyBranchIds) {
+        return run(loadFlowContext, contingencies, permanentContingencyBranchIds, false);
+    }
+
+    /**
+     * @param relocateSlackBus as the AC and DC security analyses: a contingency leaving the slack bus out of the largest
+     *                         component loses the slack bus's component, not the largest one
+     */
+    public static ConnectivityBreakAnalysisResults run(DcLoadFlowContext loadFlowContext, List<PropagatedContingency> contingencies,
+                                                       List<String> permanentContingencyBranchIds, boolean relocateSlackBus) {
         // index contingency elements by branch id (including permanent contingency branches)
         Map<String, ComputedContingencyElement> contingencyElementByBranch = createContingencyElementsIndexByBranchId(contingencies,
                 loadFlowContext.getNetwork(), loadFlowContext.getEquationSystem(), loadFlowContext.getParameters().getEquationSystemCreationParameters(),
@@ -368,7 +397,8 @@ public final class ConnectivityBreakAnalysis {
         stopwatch.reset().start();
         for (PropagatedContingency propagatedContingency : potentiallyBreakingConnectivityContingencies) {
             // compute connectivity analysis result, with contingency only
-            computeConnectivityAnalysisResult(loadFlowContext.getNetwork(), propagatedContingency, contingencyElementByBranch, null, Collections.emptyMap())
+            computeConnectivityAnalysisResult(loadFlowContext.getNetwork(), propagatedContingency, contingencyElementByBranch, null, Collections.emptyMap(),
+                    relocateSlackBus)
                     .ifPresentOrElse(connectivityBreakingAnalysisResults::add,
                         () -> nonBreakingConnectivityAnalysisResults.add(ConnectivityAnalysisResult.createNonBreakingConnectivityAnalysisResult(propagatedContingency,
                             null, loadFlowContext.getNetwork())));
@@ -391,6 +421,21 @@ public final class ConnectivityBreakAnalysis {
                                                                                                                      LfOperatorStrategy operatorStrategy,
                                                                                                                      Map<LfAction, List<ComputedElement>> actionElementsIndexByLfAction,
                                                                                                                      DenseMatrix actionsStates) {
+        return processPostContingencyAndPostOperatorStrategyConnectivityAnalysisResult(loadFlowContext, postContingencyConnectivityAnalysisResult,
+                contingencyElementByBranch, contingenciesStates, operatorStrategy, actionElementsIndexByLfAction, actionsStates, false);
+    }
+
+    /**
+     * @param relocateSlackBus as {@link #run(DcLoadFlowContext, List, List, boolean)}
+     */
+    public static ConnectivityAnalysisResult processPostContingencyAndPostOperatorStrategyConnectivityAnalysisResult(DcLoadFlowContext loadFlowContext,
+                                                                                                                     ConnectivityAnalysisResult postContingencyConnectivityAnalysisResult,
+                                                                                                                     Map<String, ComputedContingencyElement> contingencyElementByBranch,
+                                                                                                                     DenseMatrix contingenciesStates,
+                                                                                                                     LfOperatorStrategy operatorStrategy,
+                                                                                                                     Map<LfAction, List<ComputedElement>> actionElementsIndexByLfAction,
+                                                                                                                     DenseMatrix actionsStates,
+                                                                                                                     boolean relocateSlackBus) {
         Objects.requireNonNull(loadFlowContext);
         Objects.requireNonNull(postContingencyConnectivityAnalysisResult);
         Objects.requireNonNull(contingencyElementByBranch);
@@ -416,7 +461,8 @@ public final class ConnectivityBreakAnalysis {
 
         // compute the connectivity result for the contingency and the associated actions
         String contingencyId = contingency != null ? contingency.getContingency().getId() : "";
-        return computeConnectivityAnalysisResult(lfNetwork, contingency, contingencyElementByBranch, operatorStrategy, actionElementsIndexByLfAction)
+        return computeConnectivityAnalysisResult(lfNetwork, contingency, contingencyElementByBranch, operatorStrategy, actionElementsIndexByLfAction,
+                relocateSlackBus)
                 .map(postContingencyAndOperatorStrategyConnectivityAnalysisResult -> {
                     LOGGER.debug("After graph based connectivity analysis, the contingency '{}' and operator strategy '{}' break connectivity",
                             contingencyId, operatorStrategy.getIndexedOperatorStrategy().value().getId());
