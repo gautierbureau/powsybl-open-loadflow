@@ -750,6 +750,23 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 operatorStrategy.getContingencyContext().getContingencyId(), network, stopwatch.elapsed(TimeUnit.MILLISECONDS));
     }
 
+    /**
+     * The post-contingency result of a contingency without operator strategies, answered without changing the network,
+     * or empty to run the contingency as usual (apply, loss distribution, simulation, restore). A subclass that answers
+     * reports what the usual path would report on {@code reportNode}, and puts back whatever
+     * {@link PropagatedContingency#toLfContingency} changed in the network (the excluded slack buses of a relocated slack
+     * bus, which {@code networkState} holds); it reads the contingency's topology from its disabled network.
+     */
+    protected Optional<PostContingencyResult> resultWithoutNetwork(LfNetwork network, C context, PropagatedContingency propagatedContingency,
+                                                                   LfContingency lfContingency, NetworkState networkState,
+                                                                   LimitViolationManager preContingencyLimitViolationManager,
+                                                                   SecurityAnalysisParameters securityAnalysisParameters,
+                                                                   PreContingencyNetworkResult preContingencyNetworkResult,
+                                                                   boolean createResultExtension, List<LimitScaling> limitScalings,
+                                                                   ReportNode reportNode) {
+        return Optional.empty();
+    }
+
     private void processContingency(LfNetwork lfNetwork, SecurityAnalysisParameters securityAnalysisParameters,
                                     List<LimitScaling> limitScalings, ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution,
                                     ReportNode networkReportNode, LfContingency lfContingency, P p, NetworkState networkState,
@@ -761,6 +778,18 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                                     List<OperatorStrategyResult> operatorStrategyResults, Iterator<PropagatedContingency> contingencyIt) {
         ReportNode postContSimReportNode = LfReports.createPostContingencySimulation(networkReportNode, lfContingency.getId());
         lfNetwork.setReportNode(postContSimReportNode);
+
+        // A subclass may answer a contingency without operator strategies from a result it computed elsewhere, without
+        // changing the network: nothing is then applied, distributed, simulated or restored here
+        if (!operatorStrategiesByContingencyId.containsKey(lfContingency.getId())) {
+            Optional<PostContingencyResult> answered = resultWithoutNetwork(lfNetwork, context, propagatedContingency, lfContingency,
+                    networkState, preContingencyLimitViolationManager, securityAnalysisParameters, preContingencyNetworkResult,
+                    createResultExtension, limitScalings, postContSimReportNode);
+            if (answered.isPresent()) {
+                postContingencyResults.add(answered.get());
+                return;
+            }
+        }
 
         ContingencyLoadFlowParameters contingencyLoadFlowParameters = propagatedContingency.getContingency().getExtension(ContingencyLoadFlowParameters.class);
         if (contingencyLoadFlowParameters != null) {
