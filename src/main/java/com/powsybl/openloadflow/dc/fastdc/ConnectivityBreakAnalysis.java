@@ -92,6 +92,7 @@ public final class ConnectivityBreakAnalysis {
             return disabledElements.disabledBuses;
         }
 
+        /** The buses of the slack bus's connected component, or null when the analysis was asked not to compute it. */
         public Set<LfBus> getSlackConnectedComponent() {
             return slackConnectedComponent;
         }
@@ -204,10 +205,21 @@ public final class ConnectivityBreakAnalysis {
      * Compute post contingency and operator strategy connectivity analysis result by analyzing network connectivity.
      * Both contingency and actions can impact connectivity.
      */
-    private static Optional<ConnectivityAnalysisResult> computeConnectivityAnalysisResult(LfNetwork lfNetwork,
-                                                                                          PropagatedContingency contingency, Map<String, ComputedContingencyElement> contingencyElementByBranch,
-                                                                                          LfOperatorStrategy operatorStrategy, Map<LfAction, List<ComputedElement>> actionElementByBranch,
-                                                                                          boolean relocateSlackBus) {
+    /**
+     * The connectivity analysis of a contingency, with an operator strategy or not, for a caller that selected the
+     * potentially breaking contingencies itself, with its own sensitivity criterion: confirms the breaking on the
+     * network connectivity, and gives the elements to reconnect and the disabled elements.
+     *
+     * @param withSlackConnectedComponent whether the result carries the slack bus's connected component. Building it
+     *                                    copies every bus of the main component, per breaking contingency, and only the
+     *                                    sensitivity analysis reads it: without it, the result carries null.
+     * @param relocateSlackBus as {@link #run(DcLoadFlowContext, List, List, boolean)}
+     * @return the result if the contingency, with the strategy's actions, breaks the connectivity, empty otherwise
+     */
+    public static Optional<ConnectivityAnalysisResult> computeConnectivityAnalysisResult(LfNetwork lfNetwork,
+                                                                                         PropagatedContingency contingency, Map<String, ComputedContingencyElement> contingencyElementByBranch,
+                                                                                         LfOperatorStrategy operatorStrategy, Map<LfAction, List<ComputedElement>> actionElementByBranch,
+                                                                                         boolean withSlackConnectedComponent, boolean relocateSlackBus) {
         GraphConnectivity<LfBus, LfBranch> connectivity = lfNetwork.getConnectivity();
         LfBus slackBus = lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
         boolean relocated = false;
@@ -261,7 +273,9 @@ public final class ConnectivityBreakAnalysis {
                 Set<LfHvdc> hvdcsWithoutPower = PropagatedContingency.getHvdcsWithoutPower(lfNetwork, disabledBuses, connectivity);
                 connectivityAnalysisResult = new ConnectivityAnalysisResult(contingency, operatorStrategy, lfNetwork, elementsToReconnect,
                         new DisabledElements(disabledBuses, connectivity.getEdgesRemovedFromMainComponent(), hvdcsWithoutPower),
-                        AbstractSetView.copyIfNeeded(connectivity.getConnectedComponent(lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().getFirst())),
+                        withSlackConnectedComponent
+                                ? AbstractSetView.copyIfNeeded(connectivity.getConnectedComponent(lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().getFirst()))
+                                : null,
                         createdSynchronousComponents);
             }
         } finally {
@@ -317,6 +331,16 @@ public final class ConnectivityBreakAnalysis {
         }
 
         return elementsToReconnect;
+    }
+
+    /**
+     * The computed element of every branch the contingencies open, indexed by branch id, with their computed element
+     * indexes set: for a caller that runs {@link #computeConnectivityAnalysisResult} itself.
+     */
+    public static Map<String, ComputedContingencyElement> createContingencyElementsIndexByBranchId(List<PropagatedContingency> contingencies,
+                                                                                                   LfNetwork lfNetwork, EquationSystem<DcVariableType, DcEquationType> equationSystem,
+                                                                                                   DcEquationSystemCreationParameters creationParameters) {
+        return createContingencyElementsIndexByBranchId(contingencies, lfNetwork, equationSystem, creationParameters, Collections.emptyList());
     }
 
     private static Map<String, ComputedContingencyElement> createContingencyElementsIndexByBranchId(List<PropagatedContingency> contingencies,
@@ -398,7 +422,7 @@ public final class ConnectivityBreakAnalysis {
         for (PropagatedContingency propagatedContingency : potentiallyBreakingConnectivityContingencies) {
             // compute connectivity analysis result, with contingency only
             computeConnectivityAnalysisResult(loadFlowContext.getNetwork(), propagatedContingency, contingencyElementByBranch, null, Collections.emptyMap(),
-                    relocateSlackBus)
+                    true, relocateSlackBus)
                     .ifPresentOrElse(connectivityBreakingAnalysisResults::add,
                         () -> nonBreakingConnectivityAnalysisResults.add(ConnectivityAnalysisResult.createNonBreakingConnectivityAnalysisResult(propagatedContingency,
                             null, loadFlowContext.getNetwork())));
@@ -462,7 +486,7 @@ public final class ConnectivityBreakAnalysis {
         // compute the connectivity result for the contingency and the associated actions
         String contingencyId = contingency != null ? contingency.getContingency().getId() : "";
         return computeConnectivityAnalysisResult(lfNetwork, contingency, contingencyElementByBranch, operatorStrategy, actionElementsIndexByLfAction,
-                relocateSlackBus)
+                true, relocateSlackBus)
                 .map(postContingencyAndOperatorStrategyConnectivityAnalysisResult -> {
                     LOGGER.debug("After graph based connectivity analysis, the contingency '{}' and operator strategy '{}' break connectivity",
                             contingencyId, operatorStrategy.getIndexedOperatorStrategy().value().getId());
