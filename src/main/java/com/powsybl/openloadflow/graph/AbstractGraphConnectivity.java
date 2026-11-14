@@ -33,6 +33,12 @@ public abstract class AbstractGraphConnectivity<V, E, G extends GraphModel<V, E>
 
     protected abstract void resetConnectivity(Deque<GraphModification<V, E>> m);
 
+    /** The probe a temporary changes context compares the main component with, or null: a snapshot of the vertices
+     *  outside the main component is then taken when the context starts. */
+    protected MainComponentProbe<V, E> getMainComponentProbe() {
+        return null;
+    }
+
     protected abstract void updateComponents();
 
     protected AbstractGraphConnectivity(G graph) {
@@ -90,7 +96,8 @@ public abstract class AbstractGraphConnectivity<V, E, G extends GraphModel<V, E>
 
     @Override
     public void startTemporaryChanges() {
-        ModificationsContext<V, E> modificationsContext = new ModificationsContext<>(this::getVerticesNotInMainComponent, defaultMainComponentVertex);
+        ModificationsContext<V, E> modificationsContext = new ModificationsContext<>(this::getVerticesNotInMainComponent, defaultMainComponentVertex,
+                getMainComponentProbe());
         modificationsContexts.add(modificationsContext);
         modificationsContext.computeVerticesNotInMainComponentBefore();
     }
