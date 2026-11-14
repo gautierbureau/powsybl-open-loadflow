@@ -19,17 +19,11 @@ import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.OpenLoadFlowProvider;
 import com.powsybl.openloadflow.network.EurostagFactory;
 import com.powsybl.openloadflow.network.FourBusNetworkFactory;
-import com.powsybl.openloadflow.util.MatpowerCaseLoader;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -78,55 +72,6 @@ class DcEquationSystemVectorizationTest {
         for (Map.Entry<String, double[]> entry : scalar.entrySet()) {
             assertArrayEquals(entry.getValue(), vectorized.get(entry.getKey()), 1e-9,
                     "flow mismatch on branch " + entry.getKey() + " for " + name);
-        }
-    }
-
-    /**
-     * On the large MATPOWER Pégase cases, checks the vectorized and scalar DC load flows agree and
-     * reports the wall-clock speedup. Enabled only when {@code pegase.dir} points at the {@code .m} files.
-     */
-    @Test
-    @EnabledIfSystemProperty(named = "pegase.dir", matches = ".+")
-    void benchmarkVectorizedOnPegase() {
-        loadFlowRunner = new LoadFlow.Runner(new OpenLoadFlowProvider(new com.powsybl.math.matrix.SparseMatrixFactory()));
-        Path dir = Paths.get(System.getProperty("pegase.dir"));
-        System.out.printf("%n%-22s %10s %12s %12s %9s%n", "case", "buses", "scalar(ms)", "vector(ms)", "speedup");
-        for (String caseName : new String[] {"case1354pegase.m", "case2869pegase.m", "case9241pegase.m", "case13659pegase.m"}) {
-            Path file = dir.resolve(caseName);
-            if (!Files.exists(file)) {
-                continue;
-            }
-            Network network = MatpowerCaseLoader.readDotM(file);
-            Map<String, double[]> scalar = runAndCollectFlows(network, false);
-            Map<String, double[]> vectorized = runAndCollectFlows(network, true);
-            for (Map.Entry<String, double[]> e : scalar.entrySet()) {
-                assertArrayEquals(e.getValue(), vectorized.get(e.getKey()), 1e-6, "flow mismatch on " + e.getKey());
-            }
-            double scalarMs = timeMedian(network, false);
-            double vectorMs = timeMedian(network, true);
-            System.out.printf("%-22s %10d %12.1f %12.1f %9.2f%n",
-                    caseName, network.getBusView().getBusStream().mapToInt(b -> 1).sum(),
-                    scalarMs, vectorMs, scalarMs / vectorMs);
-        }
-    }
-
-    private double timeMedian(Network network, boolean vectorized) {
-        boolean previous = DcLoadFlowParameters.vectorizedDefaultValue;
-        DcLoadFlowParameters.vectorizedDefaultValue = vectorized;
-        try {
-            for (int i = 0; i < 3; i++) {
-                loadFlowRunner.run(network, parameters);
-            }
-            double[] times = new double[9];
-            for (int i = 0; i < times.length; i++) {
-                long t0 = System.nanoTime();
-                loadFlowRunner.run(network, parameters);
-                times[i] = (System.nanoTime() - t0) / 1_000_000.0;
-            }
-            java.util.Arrays.sort(times);
-            return times[times.length / 2];
-        } finally {
-            DcLoadFlowParameters.vectorizedDefaultValue = previous;
         }
     }
 

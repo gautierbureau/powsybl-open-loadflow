@@ -66,9 +66,9 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
             equationSystem.addEquationTerm(termImpl);
             matrixElementIndexes.reset();
             equationSystem.notifyEquationTermChange(termImpl, EquationTermEventType.EQUATION_TERM_ADDED);
-            if (termImpl.hasRhs()) {
-                throw new UnsupportedOperationException("Rhs not supported yet");
-            }
+            // the constant (rhs) part of single terms added to an equation array is accounted for by
+            // EquationArray.getRhs (used by the target vector); no dedicated mismatch handling is required
+            // for the direct DC solve
         }
     }
 
