@@ -170,58 +170,71 @@ public class AcNetworkVector extends AbstractLfNetworkListener
 
     public void updateClosedBranches(double[] state, boolean withDerivatives) {
         var w = new DoubleWrapper();
-
         for (int branchNum = 0; branchNum < branchVector.getSize(); branchNum++) {
+            updateClosedBranch(branchNum, state, withDerivatives, w);
+        }
+    }
 
-            if (!branchVector.disabled[branchNum]) {
+    /**
+     * Update the power flows of the given branches only (values, no derivatives): every other branch keeps what it
+     * had, so this is only for a caller that reads no other branch before the next full update.
+     */
+    public void updateClosedBranches(double[] state, int[] branchNums) {
+        var w = new DoubleWrapper();
+        for (int branchNum : branchNums) {
+            updateClosedBranch(branchNum, state, false, w);
+        }
+    }
 
-                branchVector.r1State[branchNum] = branchVector.r1Row[branchNum] != -1 ? state[branchVector.r1Row[branchNum]]
-                        : branchVector.r1[branchNum];
-                branchVector.a1State[branchNum] = branchVector.a1Row[branchNum] != -1 ? state[branchVector.a1Row[branchNum]]
-                        : branchVector.a1[branchNum];
+    private void updateClosedBranch(int branchNum, double[] state, boolean withDerivatives, DoubleWrapper w) {
+        if (!branchVector.disabled[branchNum]) {
 
-                if (isBranchConnectedSide1(branchNum) && isBranchConnectedSide2(branchNum)) {
-                    double ph1 = state[branchVector.ph1Row[branchNum]];
-                    double ph2 = state[branchVector.ph2Row[branchNum]];
-                    double a1 = branchVector.a1State[branchNum];
+            branchVector.r1State[branchNum] = branchVector.r1Row[branchNum] != -1 ? state[branchVector.r1Row[branchNum]]
+                    : branchVector.r1[branchNum];
+            branchVector.a1State[branchNum] = branchVector.a1Row[branchNum] != -1 ? state[branchVector.a1Row[branchNum]]
+                    : branchVector.a1[branchNum];
 
-                    double theta1 = theta1(
-                            branchVector.ksi[branchNum],
-                            ph1,
-                            a1,
-                            ph2);
-                    double theta2 = theta2(
-                            branchVector.ksi[branchNum],
-                            ph1,
-                            a1,
-                            ph2);
-                    double sinTheta1 = FastMath.sinAndCos(theta1, w);
-                    double cosTheta1 = w.value;
-                    double sinTheta2 = FastMath.sinAndCos(theta2, w);
-                    double cosTheta2 = w.value;
+            if (isBranchConnectedSide1(branchNum) && isBranchConnectedSide2(branchNum)) {
+                double ph1 = state[branchVector.ph1Row[branchNum]];
+                double ph2 = state[branchVector.ph2Row[branchNum]];
+                double a1 = branchVector.a1State[branchNum];
 
-                    double v1 = state[branchVector.v1Row[branchNum]];
-                    double v2 = state[branchVector.v2Row[branchNum]];
-                    double r1 = branchVector.r1State[branchNum];
+                double theta1 = theta1(
+                        branchVector.ksi[branchNum],
+                        ph1,
+                        a1,
+                        ph2);
+                double theta2 = theta2(
+                        branchVector.ksi[branchNum],
+                        ph1,
+                        a1,
+                        ph2);
+                double sinTheta1 = FastMath.sinAndCos(theta1, w);
+                double cosTheta1 = w.value;
+                double sinTheta2 = FastMath.sinAndCos(theta2, w);
+                double cosTheta2 = w.value;
 
-                    // p1
-                    updateP1AndDerivatives(branchNum, v1, r1, v2, sinTheta1, cosTheta1, withDerivatives);
+                double v1 = state[branchVector.v1Row[branchNum]];
+                double v2 = state[branchVector.v2Row[branchNum]];
+                double r1 = branchVector.r1State[branchNum];
 
-                    // q1
-                    updateQ1AndDerivatives(branchNum, v1, r1, v2, sinTheta1, cosTheta1, withDerivatives);
+                // p1
+                updateP1AndDerivatives(branchNum, v1, r1, v2, sinTheta1, cosTheta1, withDerivatives);
 
-                    // i1
-                    branchVector.i1[branchNum] = FastMath.hypot(branchVector.p1[branchNum], branchVector.q1[branchNum]) / v1;
+                // q1
+                updateQ1AndDerivatives(branchNum, v1, r1, v2, sinTheta1, cosTheta1, withDerivatives);
 
-                    // p2
-                    updateP2AndDerivatives(branchNum, v1, r1, v2, sinTheta2, cosTheta2, withDerivatives);
+                // i1
+                branchVector.i1[branchNum] = FastMath.hypot(branchVector.p1[branchNum], branchVector.q1[branchNum]) / v1;
 
-                    // q2
-                    updateQ2AndDerivatives(branchNum, v1, r1, v2, sinTheta2, cosTheta2, withDerivatives);
+                // p2
+                updateP2AndDerivatives(branchNum, v1, r1, v2, sinTheta2, cosTheta2, withDerivatives);
 
-                    // i2
-                    branchVector.i2[branchNum] = FastMath.hypot(branchVector.p2[branchNum], branchVector.q2[branchNum]) / v2;
-                }
+                // q2
+                updateQ2AndDerivatives(branchNum, v1, r1, v2, sinTheta2, cosTheta2, withDerivatives);
+
+                // i2
+                branchVector.i2[branchNum] = FastMath.hypot(branchVector.p2[branchNum], branchVector.q2[branchNum]) / v2;
             }
         }
     }
@@ -337,6 +350,14 @@ public class AcNetworkVector extends AbstractLfNetworkListener
     public void onStateUpdate(boolean valuesOnly) {
         updateVariables();
         updateNetworkState(!valuesOnly);
+    }
+
+    @Override
+    public void onStateUpdate(int[] closedBranchNums) {
+        updateVariables();
+        double[] state = equationSystem.getStateVector().get();
+        updateBuses(state);
+        updateClosedBranches(state, closedBranchNums);
     }
 
     private void updateP1AndDerivatives(int branchNum, double v1, double r1, double v2, double sinTheta1, double cosTheta1, boolean withDerivatives) {
