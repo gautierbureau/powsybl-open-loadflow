@@ -125,8 +125,10 @@ public class WoodburyEngine {
 
         if (!disabledNetwork.getBuses().isEmpty()) {
             // set buses injections and transformers to 0
+            // (the slack bus has no active P equation: it can be lost too, when the largest component is the main one)
             disabledNetwork.getBuses().stream()
                     .flatMap(lfBus -> loadFlowContext.getEquationSystem().getEquation(lfBus.getNum(), DcEquationType.BUS_TARGET_P).stream())
+                    .filter(Equation::isActive)
                     .map(Equation::getColumn)
                     .forEach(column -> targetVectorArray[column] = 0);
         }
