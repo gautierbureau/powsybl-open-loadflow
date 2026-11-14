@@ -759,6 +759,10 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
      * @param network the network
      * @param lfContingency the contingency just simulated
      */
+    protected void restoreBaseState(NetworkState networkState, LfNetwork network, LfContingency lfContingency) {
+        networkState.restore();
+    }
+
     /**
      * Puts the network back in its post-contingency state after an operator strategy's simulation, before the next
      * strategy of the same contingency. Overridable: a security analysis that knows what a strategy's simulation
@@ -767,10 +771,6 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
     protected void restorePostContingencyState(NetworkState postContingencyNetworkState, LfNetwork network,
                                                LfContingency lfContingency) {
         postContingencyNetworkState.restore();
-    }
-
-    protected void restoreBaseState(NetworkState networkState, LfNetwork network, LfContingency lfContingency) {
-        networkState.restore();
     }
 
     private void processContingency(LfNetwork lfNetwork, SecurityAnalysisParameters securityAnalysisParameters,
