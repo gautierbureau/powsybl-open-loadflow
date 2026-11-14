@@ -16,6 +16,7 @@ import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.PhaseTapChanger;
 import com.powsybl.iidm.network.VoltageLevel;
+import com.powsybl.iidm.network.extensions.SlackTerminal;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
@@ -28,6 +29,7 @@ import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.results.BranchResult;
+import com.powsybl.security.results.NetworkResult;
 import com.powsybl.security.results.OperatorStrategyResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -877,6 +879,51 @@ class WoodburyDcSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnal
             if (other != null && !Double.isNaN(branchResult.getP1())) {
                 assertEquals(branchResult.getP1(), other.getP1(), DELTA_POWER, branchResult.getBranchId());
             }
+        }
+    }
+
+    /**
+     * A contingency stranding the slack bus (B8, connected by L7-8-1 only): as the DC security analysis, the fast one keeps
+     * the largest component, for the contingency and for an operator strategy (a balanced redispatch and a line opened).
+     */
+    @Test
+    void testFastDcSaContingencyStrandingTheSlackBus() {
+        Network network = IeeeCdfNetworkFactory.create14();
+        List<Contingency> contingencies = List.of(new Contingency("L7-8-1", new BranchContingency("L7-8-1")));
+        List<Action> actions = List.of(
+                new GeneratorActionBuilder().withId("g2Down").withGeneratorId("B2-G").withActivePowerRelativeValue(true).withActivePowerValue(-20.0).build(),
+                new GeneratorActionBuilder().withId("g3Up").withGeneratorId("B3-G").withActivePowerRelativeValue(true).withActivePowerValue(20.0).build(),
+                new TerminalsConnectionAction("openL6-13", "L6-13-1", true));
+        List<OperatorStrategy> operatorStrategies = List.of(new OperatorStrategy("strategy", ContingencyContext.specificContingency("L7-8-1"),
+                new TrueCondition(), List.of("g2Down", "g3Up", "openL6-13")));
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+        // the slack bus on B8 (the network's slack terminal extension moved there from B1)
+        network.getVoltageLevel("VL1").removeExtension(SlackTerminal.class);
+        SlackTerminal.attach(network.getGenerator("B8-G").getTerminal().getBusBreakerView().getBus());
+
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(false);
+        SecurityAnalysisResult expected = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(true);
+        SecurityAnalysisResult fast = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+
+        NetworkResult expectedContingency = getPostContingencyResult(expected, "L7-8-1").getNetworkResult();
+        NetworkResult fastContingency = getPostContingencyResult(fast, "L7-8-1").getNetworkResult();
+        assertEquals(19, fastContingency.getBranchResults().size());   // every branch but the contingency's
+        assertSameBranchResults(expectedContingency, fastContingency);
+        assertSameBranchResults(getOperatorStrategyResult(expected, "strategy").getNetworkResult(),
+                getOperatorStrategyResult(fast, "strategy").getNetworkResult());
+    }
+
+    private static void assertSameBranchResults(NetworkResult expected, NetworkResult actual) {
+        for (BranchResult branchResult : expected.getBranchResults()) {
+            if (Double.isNaN(branchResult.getP1())) {
+                continue;
+            }
+            BranchResult other = actual.getBranchResult(branchResult.getBranchId());
+            assertNotNull(other, branchResult.getBranchId());
+            assertEquals(branchResult.getP1(), other.getP1(), DELTA_POWER, branchResult.getBranchId());
         }
     }
 }
