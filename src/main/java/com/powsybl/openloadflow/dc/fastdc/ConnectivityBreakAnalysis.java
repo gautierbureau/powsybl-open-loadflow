@@ -203,12 +203,9 @@ public final class ConnectivityBreakAnalysis {
 
     /**
      * Compute post contingency and operator strategy connectivity analysis result by analyzing network connectivity.
-     * Both contingency and actions can impact connectivity.
-     */
-    /**
-     * The connectivity analysis of a contingency, with an operator strategy or not, for a caller that selected the
-     * potentially breaking contingencies itself, with its own sensitivity criterion: confirms the breaking on the
-     * network connectivity, and gives the elements to reconnect and the disabled elements.
+     * Both contingency and actions can impact connectivity. Public for a caller that selected the potentially breaking
+     * contingencies itself, with its own sensitivity criterion: this confirms the breaking on the network connectivity,
+     * and gives the elements to reconnect and the disabled elements.
      *
      * @param withSlackConnectedComponent whether the result carries the slack bus's connected component. Building it
      *                                    copies every bus of the main component, per breaking contingency, and only the
