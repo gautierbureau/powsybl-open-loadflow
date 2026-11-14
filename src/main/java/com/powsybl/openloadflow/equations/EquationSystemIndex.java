@@ -401,6 +401,19 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
         throw new PowsyblException("Equation of column " + column + " not found");
     }
 
+    /**
+     * The sorted variables to find, bringing only the variable side of the index up to date (rows assigned). For a
+     * caller that writes a state and reads values through variable rows but never solves: the equation side is left
+     * as it is, and brought up to date by the next caller that needs equation columns, as it would have been after
+     * {@link #getSortedVariablesToFind()}. The two sides are independent.
+     */
+    public List<Variable<V>> getSortedVariablesToFindOnly() {
+        if (!variablesIndexValid) {
+            updateVariablesToFind();
+        }
+        return sortedVariablesToFind;
+    }
+
     public List<Variable<V>> getSortedVariablesToFind() {
         update();
         return sortedVariablesToFind;
