@@ -352,7 +352,11 @@ public class PropagatedContingency {
                 && loadIdsToLose.isEmpty() && shuntIdsToShift.isEmpty() && busIdsToLose.isEmpty();
     }
 
-    private static boolean isSlackBusIsolated(GraphConnectivity<LfBus, LfBranch> connectivity, LfBus slackBus) {
+    /**
+     * Whether the slack bus is out of the largest connected component (a component of the same size as the largest
+     * excepted): then the security analyses take the largest component as the main one.
+     */
+    public static boolean isSlackBusIsolated(GraphConnectivity<LfBus, LfBranch> connectivity, LfBus slackBus) {
         // check that slack bus belongs to the largest component.
         // Largest component has always the number 0.
         int number = connectivity.getComponentNumber(slackBus);
