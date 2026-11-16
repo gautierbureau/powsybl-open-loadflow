@@ -33,6 +33,32 @@ public class StateVector {
         notifyStateUpdate();
     }
 
+    /**
+     * Sets the state for a caller that will only read derived values from it: no Jacobian is built from it before the
+     * next {@link #set(double[])}. Listeners are notified through {@link StateVectorListener#onStateUpdate(boolean)},
+     * and may then skip what only a Jacobian needs, such as the partial derivatives. A caller that builds a Jacobian
+     * from the state must use {@link #set(double[])}.
+     */
+    public void setValuesOnly(double[] array) {
+        this.array = Objects.requireNonNull(array);
+        for (StateVectorListener listener : listeners) {
+            listener.onStateUpdate(true);
+        }
+    }
+
+    /**
+     * As {@link #setValuesOnly(double[])}, for a caller that then reads the derived values of the given closed branches
+     * only (and of the buses), before the next full update. Listeners are notified through
+     * {@link StateVectorListener#onStateUpdate(int[])}, and may leave every other branch's derived values stale.
+     */
+    public void setValuesOnly(double[] array, int[] closedBranchNums) {
+        this.array = Objects.requireNonNull(array);
+        Objects.requireNonNull(closedBranchNums);
+        for (StateVectorListener listener : listeners) {
+            listener.onStateUpdate(closedBranchNums);
+        }
+    }
+
     public double[] get() {
         return array;
     }
