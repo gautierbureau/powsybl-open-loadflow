@@ -409,4 +409,20 @@ class LfNetworkLoaderImplTest extends AbstractLoadFlowNetworkFactory {
         LfNetwork lfNetwork3 = Networks.load(network, networkParameters).getFirst();
         assertFalse(lfNetwork3.getVoltageSourceConverters().stream().map(LfVoltageSourceConverter::getId).anyMatch(id -> id.equals("conv23p")));
     }
+
+    @Test
+    void rawTargetQIsTheTargetBeforeForcingIntoReactiveLimits() {
+        Network fourBus = FourBusNetworkFactory.createBaseNetwork();
+        Generator g1 = fourBus.getGenerator("g1");
+        g1.newMinMaxReactiveLimits().setMinQ(-1).setMaxQ(1).add();
+        g1.setLocalTargetQ(2).setVoltageRegulatorOn(false);
+        for (boolean force : new boolean[] {true, false}) {
+            LfNetworkParameters lfNetworkParameters = new LfNetworkParameters().setSlackBusSelector(new FirstSlackBusSelector())
+                    .setReactiveLimits(true).setForceTargetQInReactiveLimits(force);
+            LfNetwork lfNetwork = LfNetwork.load(fourBus, new LfNetworkLoaderImpl(), lfNetworkParameters, ReportNode.NO_OP).get(0);
+            LfGenerator lfG1 = lfNetwork.getGeneratorById("g1");
+            assertEquals(2 / PerUnit.SB, lfG1.getRawTargetQ(), 1e-12);
+            assertEquals((force ? 1 : 2) / PerUnit.SB, lfG1.getTargetQ(), 1e-12);
+        }
+    }
 }
