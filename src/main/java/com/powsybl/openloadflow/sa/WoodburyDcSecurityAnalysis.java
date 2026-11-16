@@ -202,7 +202,7 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         lfContingency.apply(loadFlowContext.getParameters().getBalanceType());
 
         // update post contingency network result
-        var postContingencyNetworkResult = new PostContingencyNetworkResult(lfNetwork, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex),
+        var postContingencyNetworkResult = new PostContingencyNetworkResult(lfNetwork, stateMonitorIndexes(),
                 woodburyContext.createResultExtension, preContingencyNetworkResult, contingency,
                 LoadFlowModel.DC, woodburyContext.dcLoadFlowContext().getParameters().getEquationSystemCreationParameters().getDcPowerFactor(),
                 woodburyContext.modifiedMonitoredElementsParameters());
@@ -256,7 +256,7 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         LfActionUtils.applyListOfActions(operatorStrategyLfActions, lfNetwork, lfContingency, loadFlowContext.getParameters().getNetworkParameters());
 
         // update network result
-        var postActionsNetworkResult = new PostContingencyNetworkResult(lfNetwork, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex),
+        var postActionsNetworkResult = new PostContingencyNetworkResult(lfNetwork, stateMonitorIndexes(),
                 woodburyContext.createResultExtension, preContingencyNetworkResult, contingency, LoadFlowModel.DC,
                 loadFlowContext.getParameters().getEquationSystemCreationParameters().getDcPowerFactor(),
                 woodburyContext.modifiedMonitoredElementsParameters);
@@ -427,7 +427,7 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
             // update network result
             List<StateMonitor> zeroImpedanceStateMonitors = extractZeroImpedanceStateMonitors(lfNetwork);
             this.zeroImpedanceMonitoredIndex = new StateMonitorIndex(zeroImpedanceStateMonitors);
-            var preContingencyNetworkResult = new PreContingencyNetworkResult(lfNetwork, new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex),
+            var preContingencyNetworkResult = new PreContingencyNetworkResult(lfNetwork, stateMonitorIndexes(),
                 createResultExtension, LoadFlowModel.DC, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor());
             preContingencyNetworkResult.update();
 
