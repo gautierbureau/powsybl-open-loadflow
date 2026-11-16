@@ -397,7 +397,7 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
                 .map(n -> {
                     if (n.getValidity() == LfNetwork.Validity.VALID) {
                         try (AcLoadFlowContext context = new AcLoadFlowContext(n, parameters)) {
-                            return new AcloadFlowEngine(context)
+                            return parameters.getSolverFactory().createLoadFlowEngine(context)
                                     .run();
                         }
                     }
