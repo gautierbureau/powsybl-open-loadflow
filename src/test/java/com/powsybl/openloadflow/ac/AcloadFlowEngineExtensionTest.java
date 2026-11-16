@@ -13,6 +13,8 @@ import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.DenseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
+import com.powsybl.openloadflow.ac.solver.AcSolver;
+import com.powsybl.openloadflow.ac.solver.AcSolverFactory;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.network.EurostagFactory;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -22,6 +24,7 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -60,5 +63,21 @@ class AcloadFlowEngineExtensionTest {
             assertEquals(0, result.getOuterLoopIterations());
             assertEquals(0, result.getDistributedActivePower());
         }
+    }
+
+    @Test
+    void testEngineCreatesTheSolverItDrives() {
+        AtomicInteger solversCreated = new AtomicInteger();
+        try (AcLoadFlowContext context = createContext()) {
+            AcLoadFlowResult result = new AcloadFlowEngine(context) {
+                @Override
+                protected AcSolver createSolver(AcSolverFactory solverFactory, AcLoadFlowContext context) {
+                    solversCreated.incrementAndGet();
+                    return super.createSolver(solverFactory, context);
+                }
+            }.run();
+            assertTrue(result.isSuccess());
+        }
+        assertEquals(1, solversCreated.get());
     }
 }
