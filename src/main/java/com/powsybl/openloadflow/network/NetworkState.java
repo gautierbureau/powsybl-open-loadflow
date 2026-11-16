@@ -10,7 +10,10 @@ package com.powsybl.openloadflow.network;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -34,6 +37,13 @@ public class NetworkState {
 
     private final List<AreaState> areaStates;
 
+    // per-element indexes, used to restore only the elements impacted by a contingency (see restore with arguments)
+    private final Map<LfBus, BusState> busStateByBus;
+
+    private final Map<LfBranch, BranchState> branchStateByBranch;
+
+    private final Map<LfHvdc, HvdcState> hvdcStateByHvdc;
+
     protected NetworkState(LfNetwork network, List<BusState> busStates, List<BranchState> branchStates, List<HvdcState> hvdcStates,
                            Set<LfBus> excludedSlackBuses, List<AreaState> areaStates) {
         this.network = Objects.requireNonNull(network);
@@ -42,6 +52,17 @@ public class NetworkState {
         this.hvdcStates = Objects.requireNonNull(hvdcStates);
         this.excludedSlackBuses = Objects.requireNonNull(excludedSlackBuses);
         this.areaStates = Objects.requireNonNull(areaStates);
+        this.busStateByBus = indexByElement(busStates);
+        this.branchStateByBranch = indexByElement(branchStates);
+        this.hvdcStateByHvdc = indexByElement(hvdcStates);
+    }
+
+    private static <T extends LfElement, U extends ElementState<T>> Map<T, U> indexByElement(List<U> states) {
+        Map<T, U> index = new HashMap<>(states.size());
+        for (U state : states) {
+            index.put(state.getElement(), state);
+        }
+        return index;
     }
 
     public static NetworkState save(LfNetwork network) {
@@ -64,7 +85,40 @@ public class NetworkState {
         ElementState.restore(branchStates);
         ElementState.restore(hvdcStates);
         ElementState.restore(areaStates);
-        // Set excluded slack buses of each synchronous network
-        network.getSynchronousNetworks().forEach(scLfNetwork -> scLfNetwork.setExcludedSlackBuses(excludedSlackBuses));
+        restoreExcludedSlackBuses();
+    }
+
+    /**
+     * Reset the excluded slack buses of each synchronous network to the saved value. A contingency only changes them
+     * when it isolates the slack bus, which is rare, so the value is compared first: {@code setExcludedSlackBuses}
+     * scans the synchronous network buses on each call, which is not worth doing when nothing changed.
+     */
+    private void restoreExcludedSlackBuses() {
+        network.getSynchronousNetworks().forEach(scLfNetwork -> {
+            if (!scLfNetwork.getExcludedSlackBuses().equals(excludedSlackBuses)) {
+                scLfNetwork.setExcludedSlackBuses(excludedSlackBuses);
+            }
+        });
+    }
+
+    /**
+     * Restore the saved state of the given buses, branches and HVDC links only, instead of the whole network. This is
+     * used by security analyses that touch only a bounded set of elements per contingency: restoring just those
+     * elements avoids the network-wide cost of {@link #restore()} after each contingency. Areas and excluded slack
+     * buses are always restored as their number is negligible.
+     */
+    public void restore(Collection<LfBus> buses, Collection<LfBranch> branches, Collection<LfHvdc> hvdcs) {
+        LOGGER.trace("Restoring network state of {} buses, {} branches and {} hvdcs", buses.size(), branches.size(), hvdcs.size());
+        for (LfBus bus : buses) {
+            busStateByBus.get(bus).restore();
+        }
+        for (LfBranch branch : branches) {
+            branchStateByBranch.get(branch).restore();
+        }
+        for (LfHvdc hvdc : hvdcs) {
+            hvdcStateByHvdc.get(hvdc).restore();
+        }
+        ElementState.restore(areaStates);
+        restoreExcludedSlackBuses();
     }
 }
