@@ -27,12 +27,28 @@ public class ContingencyTripping {
                 VoltageLevel.NodeBreakerView nodeBreakerView);
     }
 
+    /**
+     * Post-processing of the switches found by a traversal: it may replace the opening of a switch by the
+     * disconnection of the terminals located behind it, when both are equivalent for the load flow.
+     */
+    @FunctionalInterface
+    private interface SwitchesToOpenReducer {
+        void reduce(Set<Switch> switchesToOpen, Set<Terminal> traversedTerminals);
+    }
+
     private final List<? extends Terminal> terminals;
     private final NodeBreakerTraverserFactory nodeBreakerTraverserFactory;
+    private final SwitchesToOpenReducer switchesToOpenReducer;
 
     public ContingencyTripping(List<? extends Terminal> terminals, NodeBreakerTraverserFactory nodeBreakerTraverserFactory) {
+        this(terminals, nodeBreakerTraverserFactory, null);
+    }
+
+    private ContingencyTripping(List<? extends Terminal> terminals, NodeBreakerTraverserFactory nodeBreakerTraverserFactory,
+                                SwitchesToOpenReducer switchesToOpenReducer) {
         this.terminals = terminals;
         this.nodeBreakerTraverserFactory = nodeBreakerTraverserFactory;
+        this.switchesToOpenReducer = switchesToOpenReducer;
     }
 
     public ContingencyTripping(Terminal terminal, NodeBreakerTraverserFactory nodeBreakerTraverserFactory) {
@@ -95,7 +111,131 @@ public class ContingencyTripping {
                     return TraverseResult.CONTINUE;
                 }
             };
-        return new ContingencyTripping(bbs.getTerminal(), minimalTraverserFactory);
+        return new ContingencyTripping(List.of(bbs.getTerminal()), minimalTraverserFactory,
+            (switchesToOpen, traversedTerminals) -> reduceBusbarSectionMinimalTripping(bbs, switchesToOpen, traversedTerminals));
+    }
+
+    private static int find(int[] parent, int node) {
+        int root = node;
+        while (parent[root] != root) {
+            root = parent[root];
+        }
+        int current = node;
+        while (parent[current] != root) {
+            int next = parent[current];
+            parent[current] = root;
+            current = next;
+        }
+        return root;
+    }
+
+    private static void union(int[] parent, int node1, int node2) {
+        int root1 = find(parent, node1);
+        int root2 = find(parent, node2);
+        if (root1 != root2) {
+            parent[root1] = root2;
+        }
+    }
+
+    private static boolean isBranchLike(IdentifiableType type) {
+        return type == IdentifiableType.LINE
+                || type == IdentifiableType.TWO_WINDINGS_TRANSFORMER
+                || type == IdentifiableType.THREE_WINDINGS_TRANSFORMER
+                || type == IdentifiableType.BOUNDARY_LINE;
+    }
+
+    private static boolean isSupportedByTerminalDisconnection(Terminal terminal) {
+        Connectable<?> connectable = terminal.getConnectable();
+        return switch (connectable.getType()) {
+            case LINE, TWO_WINDINGS_TRANSFORMER, THREE_WINDINGS_TRANSFORMER, BOUNDARY_LINE,
+                 GENERATOR, STATIC_VAR_COMPENSATOR, BATTERY, LOAD, HVDC_CONVERTER_STATION, BUSBAR_SECTION -> true;
+            case SHUNT_COMPENSATOR -> !((ShuntCompensator) connectable).isRegulating(); // regulating shunt loss is not supported
+            default -> false;
+        };
+    }
+
+    private record FarComponent(List<Terminal> terminals, boolean alive, boolean supported) {
+    }
+
+    private static FarComponent createFarComponent(List<Terminal> terminals) {
+        boolean hasBusbarSection = terminals.stream().anyMatch(t -> t.getConnectable().getType() == IdentifiableType.BUSBAR_SECTION);
+        long branchCount = terminals.stream().filter(t -> isBranchLike(t.getConnectable().getType())).count();
+        boolean alive = hasBusbarSection || branchCount >= 2 || branchCount == 1 && terminals.size() >= 2;
+        boolean supported = terminals.stream().allMatch(ContingencyTripping::isSupportedByTerminalDisconnection);
+        return new FarComponent(terminals, alive, supported);
+    }
+
+    /**
+     * Once the busbar section is lost, each part of the voltage level located behind a stopping switch is either:
+     * <ul>
+     *     <li>a dead end bay holding a single branch terminal: the branch is just open at that side,</li>
+     *     <li>a dead end bay holding only injections: they are lost,</li>
+     *     <li>a part still alive (another busbar section, several branches, or a branch feeding injections).</li>
+     * </ul>
+     * For the two first cases, the load flow result is the same if, instead of retaining and opening the switch, we
+     * directly disconnect the terminals located behind it. If at most one part is still alive, it is just the
+     * remaining of the bus the busbar section belonged to, so there is no need to retain the switch leading to it
+     * either. Switches are only retained when at least two parts remain alive, as they have to become separate buses.
+     * This avoids creating one additional bus (and one zero impedance branch) per feeder bay in the load flow network.
+     */
+    private static void reduceBusbarSectionMinimalTripping(BusbarSection bbs, Set<Switch> switchesToOpen, Set<Terminal> traversedTerminals) {
+        if (switchesToOpen.isEmpty()) {
+            return;
+        }
+        VoltageLevel.NodeBreakerView nbv = bbs.getTerminal().getVoltageLevel().getNodeBreakerView();
+
+        // connected components of the voltage level once the stopping switches are open
+        int[] parent = new int[nbv.getMaximumNodeIndex() + 1];
+        for (int i = 0; i < parent.length; i++) {
+            parent[i] = i;
+        }
+        for (VoltageLevel.NodeBreakerView.InternalConnection ic : nbv.getInternalConnections()) {
+            union(parent, ic.getNode1(), ic.getNode2());
+        }
+        for (Switch sw : nbv.getSwitches()) {
+            if (!sw.isOpen() && !switchesToOpen.contains(sw)) {
+                union(parent, nbv.getNode1(sw.getId()), nbv.getNode2(sw.getId()));
+            }
+        }
+        Map<Integer, List<Terminal>> terminalsByComponent = new HashMap<>();
+        for (int node : nbv.getNodes()) {
+            nbv.getOptionalTerminal(node)
+                    .ifPresent(t -> terminalsByComponent.computeIfAbsent(find(parent, node), k -> new ArrayList<>()).add(t));
+        }
+
+        int bbsComponent = find(parent, bbs.getTerminal().getNodeBreakerView().getNode());
+        Map<Switch, Integer> farComponentBySwitch = new LinkedHashMap<>();
+        Map<Integer, FarComponent> farComponents = new HashMap<>();
+        for (Switch sw : switchesToOpen) {
+            int component1 = find(parent, nbv.getNode1(sw.getId()));
+            int component2 = find(parent, nbv.getNode2(sw.getId()));
+            int farComponent;
+            if (component1 == bbsComponent && component2 != bbsComponent) {
+                farComponent = component2;
+            } else if (component2 == bbsComponent && component1 != bbsComponent) {
+                farComponent = component1;
+            } else {
+                continue; // not a cut between the busbar section and something else: keep the switch
+            }
+            farComponentBySwitch.put(sw, farComponent);
+            farComponents.computeIfAbsent(farComponent, k -> createFarComponent(terminalsByComponent.getOrDefault(k, Collections.emptyList())));
+        }
+        long aliveCount = farComponents.values().stream().filter(c -> c.alive() || !c.supported()).count();
+        for (var e : farComponentBySwitch.entrySet()) {
+            FarComponent farComponent = farComponents.get(e.getValue());
+            if (!farComponent.supported()) {
+                continue; // keep the switch: what is behind cannot be disconnected by terminal
+            }
+            if (farComponent.alive()) {
+                if (aliveCount <= 1) {
+                    switchesToOpen.remove(e.getKey()); // this part is just what remains of the bus: nothing to split
+                }
+            } else {
+                // opening the switch is equivalent to disconnecting what is behind it
+                switchesToOpen.remove(e.getKey());
+                traversedTerminals.addAll(farComponent.terminals());
+            }
+        }
     }
 
     public static ContingencyTripping createContingencyTripping(Network network, Identifiable<?> identifiable) {
@@ -124,7 +264,14 @@ public class ContingencyTripping {
 
     public void traverse(Set<Switch> switchesToOpen, Set<Terminal> terminalsToDisconnect) {
         Set<Terminal> traversedTerminals = new HashSet<>();
-        terminals.forEach(t -> traverseFromTerminal(t, switchesToOpen, traversedTerminals));
+        if (switchesToOpenReducer == null) {
+            terminals.forEach(t -> traverseFromTerminal(t, switchesToOpen, traversedTerminals));
+        } else {
+            Set<Switch> localSwitchesToOpen = new LinkedHashSet<>();
+            terminals.forEach(t -> traverseFromTerminal(t, localSwitchesToOpen, traversedTerminals));
+            switchesToOpenReducer.reduce(localSwitchesToOpen, traversedTerminals);
+            switchesToOpen.addAll(localSwitchesToOpen);
+        }
         terminalsToDisconnect.addAll(traversedTerminals);
     }
 
