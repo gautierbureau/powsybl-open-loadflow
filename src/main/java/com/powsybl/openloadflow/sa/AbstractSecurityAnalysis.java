@@ -751,6 +751,29 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
     }
 
     /**
+     * Put the network back in its base (pre-contingency) state after a contingency, before the next one is applied.
+     * The default restores every saved bus, branch, HVDC and area state; an implementation that knows what a
+     * contingency's simulation changed may restore less, provided the network ends up identical.
+     *
+     * @param networkState the base state, saved once after the pre-contingency simulation
+     * @param network the network
+     * @param lfContingency the contingency just simulated
+     */
+    protected void restoreBaseState(NetworkState networkState, LfNetwork network, LfContingency lfContingency) {
+        networkState.restore();
+    }
+
+    /**
+     * Puts the network back in its post-contingency state after an operator strategy's simulation, before the next
+     * strategy of the same contingency. Overridable: a security analysis that knows what a strategy's simulation
+     * changed may restore only that.
+     */
+    protected void restorePostContingencyState(NetworkState postContingencyNetworkState, LfNetwork network,
+                                               LfContingency lfContingency) {
+        postContingencyNetworkState.restore();
+    }
+
+    /**
      * The post-contingency result of a contingency without operator strategies, answered without changing the network,
      * or empty to run the contingency as usual (apply, loss distribution, simulation, restore). A subclass that answers
      * reports what the usual path would report on {@code reportNode}, and puts back whatever
@@ -844,14 +867,14 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                         p.getNetworkParameters(), limitScalings)
                         .ifPresent(result -> {
                             operatorStrategyResults.add(result);
-                            postContingencyNetworkState.restore();
+                            restorePostContingencyState(postContingencyNetworkState, lfNetwork, lfContingency);
                         });
                 }
             }
         }
         if (contingencyIt.hasNext()) {
             // restore base state
-            networkState.restore();
+            restoreBaseState(networkState, lfNetwork, lfContingency);
             if (contingencyLoadFlowParameters != null &&
                 Objects.equals(ContingencyLoadFlowParameters.Scope.CONTINGENCY_AND_OPERATOR_STRATEGY, contingencyLoadFlowParameters.getScope())) {
                 // reset parameters
