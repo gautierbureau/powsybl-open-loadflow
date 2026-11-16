@@ -11,7 +11,9 @@ import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.util.ServiceLoaderCache;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
+import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
+import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -53,4 +55,12 @@ public interface AcSolverFactory {
                     JacobianMatrix<AcVariableType, AcEquationType> j,
                     TargetVector<AcVariableType, AcEquationType> targetVector,
                     EquationVector<AcVariableType, AcEquationType> equationVector);
+
+    /**
+     * The engine that runs a load flow with this solver: OLF's own by default. A solver that drives the
+     * outer loops itself provides its own engine.
+     */
+    default AcloadFlowEngine createLoadFlowEngine(AcLoadFlowContext context) {
+        return new AcloadFlowEngine(context);
+    }
 }
