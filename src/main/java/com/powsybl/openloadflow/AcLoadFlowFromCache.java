@@ -13,7 +13,6 @@ import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowResult;
-import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopResult;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -63,7 +62,8 @@ public class AcLoadFlowFromCache extends AbstractLoadFlowFromCache<AcLoadFlowPar
             return AcLoadFlowResult.createNoCalculationResult(value.getNetwork());
         }
         if (value.isNetworkUpdated()) {
-            AcLoadFlowResult result = new AcloadFlowEngine(value.getContext())
+            AcLoadFlowResult result = value.getContext().getParameters().getSolverFactory()
+                    .createLoadFlowEngine(value.getContext())
                     .run();
             value.setNetworkUpdated(false);
             if (value.isTopologyUpdated()) {
