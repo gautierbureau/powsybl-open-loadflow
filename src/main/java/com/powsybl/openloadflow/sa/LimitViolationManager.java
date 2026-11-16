@@ -82,7 +82,15 @@ public class LimitViolationManager {
         // Detect violation limits on buses
         network.getBuses().stream().filter(b -> !b.isDisabled()).forEach(this::detectBusViolations);
 
-        // Detect voltage angle limits
+        detectVoltageAngleViolations(network);
+    }
+
+    /**
+     * Detect the voltage angle limit violations: a detector of its own for the branches and the buses can leave these to
+     * this manager.
+     * @param network network on which the voltage angle limits are checked
+     */
+    public void detectVoltageAngleViolations(LfNetwork network) {
         network.getVoltageAngleLimits().stream()
                 .filter(limit -> !limit.getFrom().isDisabled() && !limit.getTo().isDisabled())
                 .forEach(this::detectVoltageAngleLimitViolations);
@@ -103,11 +111,18 @@ public class LimitViolationManager {
         }
     }
 
-    private void addBranchLimitViolation(LimitViolation limitViolation) {
+    /**
+     * Add a branch violation detected elsewhere, under the same key and with the same filtering against the reference
+     * manager as the violations {@link #detectViolations} finds: a detector of its own reports through this manager.
+     */
+    public void addBranchLimitViolation(LimitViolation limitViolation) {
         addLimitViolation(limitViolation, Pair.of(getSubjectIdSide(limitViolation), limitViolation.getOperationalLimitsGroupId()));
     }
 
-    private void addBusLimitViolation(LimitViolation limitViolation, LfBus bus) {
+    /**
+     * Add a bus violation detected elsewhere. See {@link #addBranchLimitViolation}.
+     */
+    public void addBusLimitViolation(LimitViolation limitViolation, LfBus bus) {
         addLimitViolation(limitViolation, Pair.of(bus.getId(), limitViolation.getOperationalLimitsGroupId()));
     }
 
@@ -192,9 +207,13 @@ public class LimitViolationManager {
         }
     }
 
-    private static LimitViolation createLimitViolation(LfBranch branch, String operationalLimitsGroupId, LfBranch.LfLimit temporaryLimit,
-                                                       LimitViolationType type, double scale, double value,
-                                                       TwoSides side) {
+    /**
+     * The violation of an exceeded branch limit. Every field but the value comes from the branch and the limit, so that a
+     * detector of its own needs only the limit and the value to report it.
+     */
+    public static LimitViolation createLimitViolation(LfBranch branch, String operationalLimitsGroupId, LfBranch.LfLimit temporaryLimit,
+                                                      LimitViolationType type, double scale, double value,
+                                                      TwoSides side) {
         return new LimitViolationBuilder()
                 .subject(branch.getMainOriginalId())
                 .operationalLimitsGroupId(operationalLimitsGroupId)
@@ -217,25 +236,25 @@ public class LimitViolationManager {
         double scale = bus.getNominalV();
         double busV = bus.getV();
         if (!Double.isNaN(bus.getHighVoltageLimit()) && busV > bus.getHighVoltageLimit()) {
-            LimitViolation limitViolationHigh = new LimitViolationBuilder()
-                    .subject(bus.getVoltageLevelId())
-                    .type(LimitViolationType.HIGH_VOLTAGE)
-                    .limit(bus.getHighVoltageLimit() * scale)
-                    .value(busV * scale)
-                    .violationLocation(bus.getViolationLocation())
-                    .build();
-            addBusLimitViolation(limitViolationHigh, bus);
+            addBusLimitViolation(createBusLimitViolation(bus, LimitViolationType.HIGH_VOLTAGE, bus.getHighVoltageLimit() * scale, busV * scale), bus);
         }
         if (!Double.isNaN(bus.getLowVoltageLimit()) && busV < bus.getLowVoltageLimit()) {
-            LimitViolation limitViolationLow = new LimitViolationBuilder()
-                    .subject(bus.getVoltageLevelId())
-                    .type(LimitViolationType.LOW_VOLTAGE)
-                    .limit(bus.getLowVoltageLimit() * scale)
-                    .value(busV * scale)
-                    .violationLocation(bus.getViolationLocation())
-                    .build();
-            addBusLimitViolation(limitViolationLow, bus);
+            addBusLimitViolation(createBusLimitViolation(bus, LimitViolationType.LOW_VOLTAGE, bus.getLowVoltageLimit() * scale, busV * scale), bus);
         }
+    }
+
+    /**
+     * The violation of an exceeded bus voltage limit, the limit and the value already scaled to kV: the bus counterpart
+     * of {@link #createLimitViolation}.
+     */
+    public static LimitViolation createBusLimitViolation(LfBus bus, LimitViolationType type, double limit, double value) {
+        return new LimitViolationBuilder()
+                .subject(bus.getVoltageLevelId())
+                .type(type)
+                .limit(limit)
+                .value(value)
+                .violationLocation(bus.getViolationLocation())
+                .build();
     }
 
     /**
