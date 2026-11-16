@@ -234,25 +234,9 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
             return buildAcLoadFlowResult(runningContext, OuterLoopResult.stable(), distributedActivePowerPerSc);
         }
 
-        AcSolver solver = solverFactory.create(context.getNetwork(),
-                                               context.getParameters(),
-                                               context.getEquationSystem(),
-                                               context.getJacobianMatrix(),
-                                               context.getTargetVector(),
-                                               context.getEquationVector());
+        AcSolver solver = createSolver(solverFactory, context);
 
-        List<AcOuterLoop> outerLoops = context.getParameters().getOuterLoops().stream().filter(o -> o.isNeeded(context)).toList();
-        List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = outerLoops.stream()
-                .map(outerLoop -> Pair.of(outerLoop, new AcOuterLoopContext(context.getNetwork())))
-                .toList();
-
-        // outer loops initialization
-        for (var outerLoopAndContext : outerLoopsAndContexts) {
-            var outerLoop = outerLoopAndContext.getLeft();
-            var outerLoopContext = outerLoopAndContext.getRight();
-            outerLoopContext.setLoadFlowContext(context);
-            outerLoop.initialize(outerLoopContext);
-        }
+        List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = engineOuterLoopsAndContexts(context);
 
         if (context.getParameters().isDetailedReport()) {
             if (context.getNetwork().getSynchronousNetworks().size() == 1) {
@@ -350,6 +334,40 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         return buildAcLoadFlowResult(runningContext, outerLoopFinalResult, distributedActivePowerPerSc);
     }
 
+    /**
+     * The solver a run drives, created by the engine's solver factory. Overridable so that an engine coordinating its
+     * outer loops with its solver can keep the solver it created.
+     */
+    protected AcSolver createSolver(AcSolverFactory solverFactory, AcLoadFlowContext context) {
+        return solverFactory.create(context.getNetwork(),
+                                    context.getParameters(),
+                                    context.getEquationSystem(),
+                                    context.getJacobianMatrix(),
+                                    context.getTargetVector(),
+                                    context.getEquationVector());
+    }
+
+    /**
+     * The outer loops this engine drives, each with its own initialized context. Overridable so that an engine whose
+     * solver already runs some of these loops itself can leave them out: running them in both places would apply them
+     * twice.
+     */
+    protected List<Pair<AcOuterLoop, AcOuterLoopContext>> engineOuterLoopsAndContexts(AcLoadFlowContext context) {
+        List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = context.getParameters().getOuterLoops().stream()
+                .filter(o -> o.isNeeded(context))
+                .map(outerLoop -> Pair.of(outerLoop, new AcOuterLoopContext(context.getNetwork())))
+                .toList();
+
+        // outer loops initialization
+        for (var outerLoopAndContext : outerLoopsAndContexts) {
+            var outerLoop = outerLoopAndContext.getLeft();
+            var outerLoopContext = outerLoopAndContext.getRight();
+            outerLoopContext.setLoadFlowContext(context);
+            outerLoop.initialize(outerLoopContext);
+        }
+        return outerLoopsAndContexts;
+    }
+
     private AcLoadFlowResult buildAcLoadFlowResult(RunningContext runningContext, OuterLoopResult outerLoopFinalResult, Map<Integer, Double> distributedActivePower) {
         AcLoadFlowResult result = new AcLoadFlowResult(context.getNetwork(),
                                                        runningContext.outerLoopTotalIterations,
@@ -379,7 +397,7 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
                 .map(n -> {
                     if (n.getValidity() == LfNetwork.Validity.VALID) {
                         try (AcLoadFlowContext context = new AcLoadFlowContext(n, parameters)) {
-                            return new AcloadFlowEngine(context)
+                            return parameters.getSolverFactory().createLoadFlowEngine(context)
                                     .run();
                         }
                     }

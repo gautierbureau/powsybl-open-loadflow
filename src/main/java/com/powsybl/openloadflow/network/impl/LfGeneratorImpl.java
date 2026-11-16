@@ -190,8 +190,13 @@ public final class LfGeneratorImpl extends AbstractLfGenerator {
     }
 
     @Override
+    public double getRawTargetQ() {
+        return Networks.zeroIfNan(getGenerator().getLocalTargetQ()) / PerUnit.SB;
+    }
+
+    @Override
     public double getTargetQ() {
-        double targetQ = Networks.zeroIfNan(getGenerator().getLocalTargetQ()) / PerUnit.SB;
+        double targetQ = getRawTargetQ();
         if (forceTargetQInReactiveLimits) {
             double computedTargetQ = targetQ;
             double minQ = getMinQ();
@@ -232,7 +237,7 @@ public final class LfGeneratorImpl extends AbstractLfGenerator {
     }
 
     @Override
-    protected Optional<ReactiveLimits> getReactiveLimits() {
+    public Optional<ReactiveLimits> getReactiveLimits() {
         return Optional.of(getGenerator().getReactiveLimits());
     }
 
