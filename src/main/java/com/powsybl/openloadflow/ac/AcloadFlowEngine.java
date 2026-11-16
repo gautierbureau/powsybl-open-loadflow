@@ -241,18 +241,7 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
                                                context.getTargetVector(),
                                                context.getEquationVector());
 
-        List<AcOuterLoop> outerLoops = context.getParameters().getOuterLoops().stream().filter(o -> o.isNeeded(context)).toList();
-        List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = outerLoops.stream()
-                .map(outerLoop -> Pair.of(outerLoop, new AcOuterLoopContext(context.getNetwork())))
-                .toList();
-
-        // outer loops initialization
-        for (var outerLoopAndContext : outerLoopsAndContexts) {
-            var outerLoop = outerLoopAndContext.getLeft();
-            var outerLoopContext = outerLoopAndContext.getRight();
-            outerLoopContext.setLoadFlowContext(context);
-            outerLoop.initialize(outerLoopContext);
-        }
+        List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = engineOuterLoopsAndContexts(context);
 
         if (context.getParameters().isDetailedReport()) {
             if (context.getNetwork().getSynchronousNetworks().size() == 1) {
@@ -348,6 +337,27 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         }
 
         return buildAcLoadFlowResult(runningContext, outerLoopFinalResult, distributedActivePowerPerSc);
+    }
+
+    /**
+     * The outer loops this engine drives, each with its own initialized context. Overridable so that an engine whose
+     * solver already runs some of these loops itself can leave them out: running them in both places would apply them
+     * twice.
+     */
+    protected List<Pair<AcOuterLoop, AcOuterLoopContext>> engineOuterLoopsAndContexts(AcLoadFlowContext context) {
+        List<Pair<AcOuterLoop, AcOuterLoopContext>> outerLoopsAndContexts = context.getParameters().getOuterLoops().stream()
+                .filter(o -> o.isNeeded(context))
+                .map(outerLoop -> Pair.of(outerLoop, new AcOuterLoopContext(context.getNetwork())))
+                .toList();
+
+        // outer loops initialization
+        for (var outerLoopAndContext : outerLoopsAndContexts) {
+            var outerLoop = outerLoopAndContext.getLeft();
+            var outerLoopContext = outerLoopAndContext.getRight();
+            outerLoopContext.setLoadFlowContext(context);
+            outerLoop.initialize(outerLoopContext);
+        }
+        return outerLoopsAndContexts;
     }
 
     private AcLoadFlowResult buildAcLoadFlowResult(RunningContext runningContext, OuterLoopResult outerLoopFinalResult, Map<Integer, Double> distributedActivePower) {
