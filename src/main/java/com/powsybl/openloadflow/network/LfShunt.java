@@ -21,6 +21,14 @@ import java.util.Optional;
  */
 public interface LfShunt extends LfElement, LfCopyable<LfShunt, LfBus> {
 
+    /**
+     * True when the given shunt compensator of this shunt was disconnected in the network and is only here because an
+     * action may connect it (see {@link LfTopoConfig#getShuntIdsToClose()}): it is at section 0 until then.
+     */
+    default boolean isCompensatorInitiallyDisconnected(String shuntCompensatorId) {
+        return false;
+    }
+
     Logger LOGGER = LoggerFactory.getLogger(LfShunt.class);
 
     class Controller {
