@@ -212,9 +212,11 @@ public class OpenLoadFlowProvider implements LoadFlowProvider {
 
     /**
      * The DC engine run on every component of the network (no network cache): the seam an
-     * alternative DC engine (another linear solver, a device) plugs into.
+     * alternative DC engine (another linear solver, a device) plugs into. {@code parameters} are the
+     * run's, for the settings an alternative engine reads from its own extension.
      */
-    protected List<DcLoadFlowResult> runDcEngine(Network network, DcLoadFlowParameters dcParameters, ReportNode reportNode) {
+    protected List<DcLoadFlowResult> runDcEngine(Network network, LoadFlowParameters parameters, DcLoadFlowParameters dcParameters,
+                                                 ReportNode reportNode) {
         return DcLoadFlowEngine.run(network, new LfNetworkLoaderImpl(), dcParameters, reportNode);
     }
 
@@ -232,7 +234,7 @@ public class OpenLoadFlowProvider implements LoadFlowProvider {
                     .run();
             NetworkCache.DC_LF_INSTANCE.findEntry(network, parametersExt.getNetworkCacheScope()).orElseThrow().setPause(true);
         } else {
-            results = runDcEngine(network, dcParameters, reportNode);
+            results = runDcEngine(network, parameters, dcParameters, reportNode);
             Networks.resetState(network);
         }
 
