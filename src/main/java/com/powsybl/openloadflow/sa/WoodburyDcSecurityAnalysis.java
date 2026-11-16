@@ -59,7 +59,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
     private record WoodburyContext(DcLoadFlowContext dcLoadFlowContext, Map<String, List<Indexed<OperatorStrategy>>> operatorStrategiesByContingencyId, Map<String, LfAction> lfActionById,
                                    boolean createResultExtension, SecurityAnalysisParameters.IncreasedViolationsParameters violationsParameters,
-                                   List<LimitScaling> limitScalings, SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modifiedMonitoredElementsParameters) {
+                                   List<LimitScaling> limitScalings, SecurityAnalysisParameters.ModifiedMonitoredElementsParameters modifiedMonitoredElementsParameters,
+                                   ReportNode networkReportNode) {
     }
 
     private record ToFastDcResults(Function<ConnectivityAnalysisResult, double[]> toPostContingencyStates,
@@ -305,7 +306,9 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         LfNetwork lfNetwork = dcLoadFlowContext.getNetwork();
 
         Contingency contingency = connectivityAnalysisResult.getPropagatedContingency().getContingency();
-        ReportNode postContSimReportNode = LfReports.createPostContingencySimulation(lfNetwork.getReportNode(), contingency.getId());
+        // a child of the network's report node, as the pre-contingency simulation: the network's current report node is
+        // the previous contingency's (or one of its operator strategies')
+        ReportNode postContSimReportNode = LfReports.createPostContingencySimulation(woodburyContext.networkReportNode(), contingency.getId());
         lfNetwork.setReportNode(postContSimReportNode);
 
         // predicate to determine if a branch is disabled or not due to the contingency
@@ -436,7 +439,7 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
             preContingencyLimitViolationManager.detectViolations(lfNetwork);
             WoodburyContext woodburyContext = new WoodburyContext(context, operatorStrategiesByContingencyId, lfActionById, createResultExtension,
                     securityAnalysisParameters.getIncreasedViolationsParameters(), limitScalings,
-                    securityAnalysisParameters.getModifiedMonitoredElementsParameters());
+                    securityAnalysisParameters.getModifiedMonitoredElementsParameters(), networkReportNode);
 
             // compute states with +1 -1 to model the contingencies and run connectivity analysis
             ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivityBreakAnalysisResults = ConnectivityBreakAnalysis.run(context, propagatedContingencies);
