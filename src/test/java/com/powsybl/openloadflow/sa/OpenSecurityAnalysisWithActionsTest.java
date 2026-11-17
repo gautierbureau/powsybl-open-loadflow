@@ -48,6 +48,7 @@ import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.SecurityAnalysisRunParameters;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.results.BranchResult;
+import com.powsybl.security.results.NetworkResult;
 import com.powsybl.security.results.OperatorStrategyResult;
 import com.powsybl.security.results.PostContingencyResult;
 import com.powsybl.security.results.PreContingencyResult;
@@ -1664,6 +1665,124 @@ class OpenSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnalysisTe
         network.getTwoWindingsTransformer("PS1").getPhaseTapChanger().setRegulating(true);
         saParameters.getLoadFlowParameters().setPhaseShifterRegulationOn(true);
         runSecurityAnalysis(network, contingencies, monitors, saParameters, operatorStrategies, actions, ReportNode.NO_OP);
+    }
+
+    private static Network createPhaseShifterNetworkWithL3() {
+        Network network = PhaseControlFactory.createNetworkWithT2wt();
+        network.newLine()
+                .setId("L3")
+                .setVoltageLevel1("VL1")
+                .setBus1("B1")
+                .setVoltageLevel2("VL2")
+                .setBus2("B2")
+                .setR(4.0)
+                .setX(200.0)
+                .add();
+        network.getTwoWindingsTransformer("PS1").getPhaseTapChanger()
+                .setRegulationMode(PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL)
+                .setRegulationValue(83.0)
+                .setTargetDeadband(0.0);
+        return network;
+    }
+
+    private static LoadFlowParameters createPhaseShifterLoadFlowParameters() {
+        LoadFlowParameters lfParameters = new LoadFlowParameters().setPhaseShifterRegulationOn(true);
+        OpenLoadFlowParameters.create(lfParameters).setNewtonRaphsonConvEpsPerEq(1e-8);
+        return lfParameters;
+    }
+
+    private void assertBranchFlowsEqual(Network network, NetworkResult networkResult, String... branchIds) {
+        for (String branchId : branchIds) {
+            Branch<?> branch = network.getBranch(branchId);
+            assertEquals(branch.getTerminal1().getP(), networkResult.getBranchResult(branchId).getP1(), LoadFlowAssert.DELTA_POWER);
+            assertEquals(branch.getTerminal2().getP(), networkResult.getBranchResult(branchId).getP2(), LoadFlowAssert.DELTA_POWER);
+        }
+    }
+
+    @Test
+    void testPhaseTapChangerRegulationActivationAction() {
+        Network network = createPhaseShifterNetworkWithL3();
+        TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
+        ps1.getPhaseTapChanger().setRegulating(false);
+
+        SecurityAnalysisParameters saParameters = new SecurityAnalysisParameters();
+        saParameters.setLoadFlowParameters(createPhaseShifterLoadFlowParameters());
+        List<Contingency> contingencies = List.of(new Contingency("CL3", new BranchContingency("L3")));
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+        List<Action> actions = List.of(
+                PhaseTapChangerRegulationAction.activateRegulation("activate", "PS1"),
+                PhaseTapChangerRegulationAction.activateAndChangeRegulationMode("activateWithValue", "PS1",
+                        PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL, 60.0));
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("strategyActivate", ContingencyContext.specificContingency("CL3"), new TrueCondition(), List.of("activate")),
+                new OperatorStrategy("strategyActivateWithValue", ContingencyContext.specificContingency("CL3"), new TrueCondition(), List.of("activateWithValue")));
+        SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, monitors, saParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+
+        // post contingency state: no regulation
+        LoadFlowParameters lfParameters = createPhaseShifterLoadFlowParameters();
+        network.getLine("L3").disconnect();
+        loadFlowRunner.run(network, lfParameters);
+        assertBranchFlowsEqual(network, getPostContingencyResult(result, "CL3").getNetworkResult(), "L1", "L2", "PS1");
+
+        // regulation activated with network regulation value
+        ps1.getPhaseTapChanger().setRegulating(true);
+        loadFlowRunner.run(network, lfParameters);
+        assertBranchFlowsEqual(network, getOperatorStrategyResult(result, "strategyActivate").getNetworkResult(), "L1", "L2", "PS1");
+
+        // regulation activated with a new regulation value (state must have been restored between strategies)
+        ps1.getPhaseTapChanger().setTapPosition(1).setRegulationValue(60.0);
+        loadFlowRunner.run(network, lfParameters);
+        assertBranchFlowsEqual(network, getOperatorStrategyResult(result, "strategyActivateWithValue").getNetworkResult(), "L1", "L2", "PS1");
+    }
+
+    @Test
+    void testPhaseTapChangerRegulationDeactivationAction() {
+        Network network = createPhaseShifterNetworkWithL3();
+        TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
+        ps1.getPhaseTapChanger().setRegulating(true);
+
+        SecurityAnalysisParameters saParameters = new SecurityAnalysisParameters();
+        saParameters.setLoadFlowParameters(createPhaseShifterLoadFlowParameters());
+        List<Contingency> contingencies = List.of(new Contingency("CL3", new BranchContingency("L3")));
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+        List<Action> actions = List.of(PhaseTapChangerRegulationAction.deactivateRegulation("deactivate", "PS1"));
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("strategyDeactivate", ContingencyContext.specificContingency("CL3"), new TrueCondition(), List.of("deactivate")));
+        SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, monitors, saParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+
+        // pre contingency state with regulation, tap position is updated in the network
+        LoadFlowParameters lfParameters = createPhaseShifterLoadFlowParameters();
+        loadFlowRunner.run(network, lfParameters);
+        int preContingencyTapPosition = ps1.getPhaseTapChanger().getSolvedTapPosition();
+
+        // post contingency state with regulation
+        network.getLine("L3").disconnect();
+        loadFlowRunner.run(network, lfParameters);
+        assertBranchFlowsEqual(network, getPostContingencyResult(result, "CL3").getNetworkResult(), "L1", "L2", "PS1");
+
+        // regulation deactivated: phase shift kept at pre contingency tap
+        ps1.getPhaseTapChanger().setTapPosition(preContingencyTapPosition).setRegulating(false);
+        loadFlowRunner.run(network, lfParameters);
+        assertBranchFlowsEqual(network, getOperatorStrategyResult(result, "strategyDeactivate").getNetworkResult(), "L1", "L2", "PS1");
+    }
+
+    @Test
+    void testPhaseTapChangerRegulationActionModeChangeNotSupported() {
+        Network network = createPhaseShifterNetworkWithL3();
+        SecurityAnalysisParameters saParameters = new SecurityAnalysisParameters();
+        saParameters.getLoadFlowParameters().setPhaseShifterRegulationOn(true);
+        List<Contingency> contingencies = List.of(new Contingency("CL3", new BranchContingency("L3")));
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+        List<Action> actions = List.of(PhaseTapChangerRegulationAction.activateAndChangeRegulationMode("activate", "PS1",
+                PhaseTapChanger.RegulationMode.CURRENT_LIMITER, 200.0));
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("strategy", ContingencyContext.specificContingency("CL3"), new TrueCondition(), List.of("activate")));
+        CompletionException exception = assertThrows(CompletionException.class, () -> runSecurityAnalysis(network, contingencies, monitors, saParameters,
+                operatorStrategies, actions, ReportNode.NO_OP));
+        assertEquals("Phase tap changer regulation action 'activate': change of regulation mode to CURRENT_LIMITER is not supported on branch PS1",
+                exception.getCause().getMessage());
     }
 
     @Test

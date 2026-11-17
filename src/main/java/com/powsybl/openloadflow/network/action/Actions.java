@@ -64,9 +64,9 @@ public final class Actions {
                 }
 
                 case PhaseTapChangerTapPositionAction.NAME,
-                     RatioTapChangerTapPositionAction.NAME: {
-                    String transformerId = action.getType().equals(PhaseTapChangerTapPositionAction.NAME) ?
-                            ((PhaseTapChangerTapPositionAction) action).getTransformerId() : ((RatioTapChangerTapPositionAction) action).getTransformerId();
+                     RatioTapChangerTapPositionAction.NAME,
+                     PhaseTapChangerRegulationAction.NAME: {
+                    String transformerId = ((AbstractTapChangerAction) action).getTransformerId();
                     if (network.getTwoWindingsTransformer(transformerId) == null
                             && network.getThreeWindingsTransformer(transformerId) == null) {
                         throw new PowsyblException("Transformer '" + transformerId + NOT_FOUND);
@@ -147,12 +147,16 @@ public final class Actions {
 
     public static void addAllPtcToOperate(LfTopoConfig topoConfig, List<Action> actions) {
         for (Action action : actions) {
-            if (PhaseTapChangerTapPositionAction.NAME.equals(action.getType())) {
-                PhaseTapChangerTapPositionAction ptcAction = (PhaseTapChangerTapPositionAction) action;
-                ptcAction.getSide().ifPresentOrElse(
-                        side -> topoConfig.addBranchIdWithPtcToRetain(LfLegBranch.getId(side, ptcAction.getTransformerId())), // T3WT
-                        () -> topoConfig.addBranchIdWithPtcToRetain(ptcAction.getTransformerId()) // T2WT
-                );
+            if (PhaseTapChangerTapPositionAction.NAME.equals(action.getType())
+                    || PhaseTapChangerRegulationAction.NAME.equals(action.getType())) {
+                AbstractTapChangerAction ptcAction = (AbstractTapChangerAction) action;
+                String branchId = ptcAction.getSide()
+                        .map(side -> LfLegBranch.getId(side, ptcAction.getTransformerId())) // T3WT
+                        .orElseGet(ptcAction::getTransformerId); // T2WT
+                topoConfig.addBranchIdWithPtcToRetain(branchId);
+                if (PhaseTapChangerRegulationAction.NAME.equals(action.getType())) {
+                    topoConfig.addBranchIdWithPtcRegulationToOperate(branchId);
+                }
             }
         }
     }

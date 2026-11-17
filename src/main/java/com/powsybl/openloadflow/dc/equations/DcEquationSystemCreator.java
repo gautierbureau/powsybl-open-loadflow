@@ -127,7 +127,7 @@ public class DcEquationSystemCreator {
     }
 
     protected static boolean isDeriveA1(LfBranch branch, DcEquationSystemCreationParameters creationParameters) {
-        return branch.isPhaseController()
+        return branch.isPhaseControllerOrOperable()
                 || creationParameters.isForcePhaseControlOffAndAddAngle1Var() && branch.hasPhaseControllerCapability() && branch.isConnectedAtBothSides();
     }
 

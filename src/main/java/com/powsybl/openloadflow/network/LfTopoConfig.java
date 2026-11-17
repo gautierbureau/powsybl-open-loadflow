@@ -28,6 +28,8 @@ public class LfTopoConfig {
 
     private final Set<String> branchIdsWithRtcToRetain;
 
+    private final Set<String> branchIdsWithPtcRegulationToOperate;
+
     private final Set<String> shuntIdsToOperate;
 
     private final Set<String> branchIdsOpenableSide1;
@@ -42,6 +44,7 @@ public class LfTopoConfig {
         busIdsToLose = new HashSet<>();
         branchIdsWithPtcToRetain = new HashSet<>();
         branchIdsWithRtcToRetain = new HashSet<>();
+        branchIdsWithPtcRegulationToOperate = new HashSet<>();
         shuntIdsToOperate = new HashSet<>();
         branchIdsOpenableSide1 = new HashSet<>();
         branchIdsOpenableSide2 = new HashSet<>();
@@ -55,6 +58,7 @@ public class LfTopoConfig {
         this.busIdsToLose = new HashSet<>(other.busIdsToLose);
         this.branchIdsWithPtcToRetain = new HashSet<>(other.branchIdsWithPtcToRetain);
         this.branchIdsWithRtcToRetain = new HashSet<>(other.branchIdsWithRtcToRetain);
+        this.branchIdsWithPtcRegulationToOperate = new HashSet<>(other.branchIdsWithPtcRegulationToOperate);
         this.shuntIdsToOperate = new HashSet<>(other.shuntIdsToOperate);
         this.branchIdsOpenableSide1 = new HashSet<>(other.branchIdsOpenableSide1);
         this.branchIdsOpenableSide2 = new HashSet<>(other.branchIdsOpenableSide2);
@@ -81,6 +85,10 @@ public class LfTopoConfig {
         branchIdsWithRtcToRetain.add(branchId);
     }
 
+    public void addBranchIdWithPtcRegulationToOperate(String branchId) {
+        branchIdsWithPtcRegulationToOperate.add(branchId);
+    }
+
     public void addShuntIdToOperate(String shuntId) {
         shuntIdsToOperate.add(shuntId);
     }
@@ -95,6 +103,10 @@ public class LfTopoConfig {
 
     public boolean isRetainedRtc(String branchId) {
         return branchIdsWithRtcToRetain.contains(branchId);
+    }
+
+    public boolean isOperatedPtcRegulation(String branchId) {
+        return branchIdsWithPtcRegulationToOperate.contains(branchId);
     }
 
     public boolean isOperatedShunt(String shuntId) {
@@ -124,6 +136,7 @@ public class LfTopoConfig {
         busIdsToLose.forEach(busId -> keys.add("busToLose:" + busId));
         branchIdsWithPtcToRetain.forEach(branchId -> keys.add("ptcToRetain:" + branchId));
         branchIdsWithRtcToRetain.forEach(branchId -> keys.add("rtcToRetain:" + branchId));
+        branchIdsWithPtcRegulationToOperate.forEach(branchId -> keys.add("ptcRegulationToOperate:" + branchId));
         shuntIdsToOperate.forEach(shuntId -> keys.add("shuntToOperate:" + shuntId));
         branchIdsOpenableSide1.forEach(branchId -> keys.add("branchOpenableSide1:" + branchId));
         branchIdsOpenableSide2.forEach(branchId -> keys.add("branchOpenableSide2:" + branchId));

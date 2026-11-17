@@ -46,10 +46,18 @@ public class TransformerPhaseControl extends Control implements LfCopyable<Trans
 
     @Override
     public TransformerPhaseControl copy(LfNetwork copyNetwork) {
-        LfBranch copiedController = copyNetwork.getBranchById(controlledBranch.getId());
+        LfBranch copiedController = copyNetwork.getBranchById(controllerBranch.getId());
         LfBranch copiedControlled = copyNetwork.getBranchById(controlledBranch.getId());
         return new TransformerPhaseControl(copiedController, copiedControlled,
                 controlledSide, mode, targetValue, targetDeadband, unit);
+    }
+
+    @Override
+    public void setTargetValue(double targetValue) {
+        if (Double.compare(targetValue, this.targetValue) != 0) {
+            this.targetValue = targetValue;
+            controllerBranch.getNetwork().getListeners().forEach(l -> l.onTransformerPhaseControlTargetChange(this, targetValue));
+        }
     }
 
     public TwoSides getControlledSide() {

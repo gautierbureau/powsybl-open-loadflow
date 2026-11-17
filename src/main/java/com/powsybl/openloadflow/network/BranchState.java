@@ -14,6 +14,8 @@ public class BranchState extends ElementState<LfBranch> {
 
     private final double a1;
     private final double r1;
+    private final TransformerPhaseControl phaseControl;
+    private Double operablePhaseControlTargetValue;
     private final boolean phaseControlEnabled;
     private final boolean voltageControlEnabled;
     private Integer tapPosition;
@@ -33,6 +35,10 @@ public class BranchState extends ElementState<LfBranch> {
             a1 = piModel.getA1();
             r1 = piModel.getR1();
         }
+        phaseControl = branch.getPhaseControl().orElse(null);
+        branch.getOperablePhaseControl()
+                .filter(pc -> pc.getControllerBranch() == branch)
+                .ifPresent(pc -> operablePhaseControlTargetValue = pc.getTargetValue());
         phaseControlEnabled = branch.isPhaseControlEnabled();
         voltageControlEnabled = branch.isVoltageControlEnabled();
         if (branch.isDisconnectionAllowedSide1()) {
@@ -52,6 +58,11 @@ public class BranchState extends ElementState<LfBranch> {
         }
         piModel.setA1(a1);
         piModel.setR1(r1);
+        // phase control might have been attached or detached by an action, restore it before enabling flag
+        element.setPhaseControl(phaseControl);
+        if (operablePhaseControlTargetValue != null) {
+            element.getOperablePhaseControl().orElseThrow().setTargetValue(operablePhaseControlTargetValue);
+        }
         element.setPhaseControlEnabled(phaseControlEnabled);
         element.setVoltageControlEnabled(voltageControlEnabled);
         if (connectedSide1 != null) {

@@ -24,6 +24,8 @@ public interface LfNetworkListener {
 
     void onTransformerPhaseControlChange(LfBranch controllerBranch, boolean newPhaseControlEnabled);
 
+    void onTransformerPhaseControlTargetChange(TransformerPhaseControl phaseControl, double newTargetValue);
+
     void onTransformerVoltageControlChange(LfBranch controllerBranch, boolean newVoltageControllerEnabled);
 
     void onTransformerVoltageControlTargetChange(TransformerVoltageControl transformerVoltageControl, double newTargetVoltage);

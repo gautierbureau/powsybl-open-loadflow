@@ -533,8 +533,12 @@ public class AcEquationSystemCreator {
                     .addTerm(a1);
         }
 
-        if (branch.isPhaseControlled()) {
-            TransformerPhaseControl phaseControl = branch.getPhaseControl().orElseThrow();
+        if (branch.isPhaseControlledOrOperable()) {
+            // phase control may be operable only (not active but could be activated by an action)
+            TransformerPhaseControl phaseControl = branch.getPhaseControl()
+                    .filter(pc -> pc.getControlledBranch() == branch)
+                    .or(branch::getOperablePhaseControl)
+                    .orElseThrow();
             if (phaseControl.getMode() == Mode.CONTROLLER) {
                 if (phaseControl.getUnit() == TransformerPhaseControl.Unit.A) {
                     throw new PowsyblException("Phase control in A is not yet supported");
@@ -692,7 +696,7 @@ public class AcEquationSystemCreator {
     }
 
     public static boolean isDeriveA1(LfBranch branch, AcEquationSystemCreationParameters creationParameters) {
-        return branch.isPhaseController()
+        return branch.isPhaseControllerOrOperable()
                 || creationParameters.isForceA1Var() && branch.hasPhaseControllerCapability() && branch.isConnectedAtBothSides();
     }
 

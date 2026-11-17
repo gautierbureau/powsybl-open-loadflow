@@ -153,10 +153,19 @@ public final class LfNetworkCopier {
     }
 
     private static void copyBranchControls(LfBranch branch, LfNetwork copyNetwork) {
+        // operable phase control may be the same instance as the active one: copy it once
+        TransformerPhaseControl operablePc = branch.getOperablePhaseControl().filter(pc -> pc.getControllerBranch() == branch).orElse(null);
+        TransformerPhaseControl copiedOperablePc = null;
+        if (operablePc != null) {
+            copiedOperablePc = operablePc.copy(copyNetwork);
+            copyNetwork.getBranchById(operablePc.getControllerBranch().getId()).setOperablePhaseControl(copiedOperablePc);
+            copyNetwork.getBranchById(operablePc.getControlledBranch().getId()).setOperablePhaseControl(copiedOperablePc);
+        }
+        TransformerPhaseControl finalCopiedOperablePc = copiedOperablePc;
         branch.getPhaseControl().filter(pc -> pc.getControllerBranch() == branch).ifPresent(pc -> {
             LfBranch copiedController = copyNetwork.getBranchById(pc.getControllerBranch().getId());
             LfBranch copiedControlled = copyNetwork.getBranchById(pc.getControlledBranch().getId());
-            TransformerPhaseControl copiedPc = pc.copy(copyNetwork);
+            TransformerPhaseControl copiedPc = pc == operablePc ? finalCopiedOperablePc : pc.copy(copyNetwork);
             copiedController.setPhaseControl(copiedPc);
             copiedControlled.setPhaseControl(copiedPc);
         });

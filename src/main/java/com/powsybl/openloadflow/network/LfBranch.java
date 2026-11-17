@@ -302,6 +302,31 @@ public interface LfBranch extends LfElement, LfCopyable<LfBranch, LfNetwork> {
 
     boolean isPhaseControlled();
 
+    /**
+     * Phase control that can be activated or deactivated by an action, whatever it is currently active or not
+     * (i.e. attached with {@link #setPhaseControl(TransformerPhaseControl)}). Only set for transformers whose phase
+     * tap changer regulation has been retained in the topological configuration.
+     */
+    Optional<TransformerPhaseControl> getOperablePhaseControl();
+
+    void setOperablePhaseControl(TransformerPhaseControl operablePhaseControl);
+
+    /**
+     * Phase controller or a branch that can be made phase controller by an action: equations needed by phase control
+     * have to be created.
+     */
+    default boolean isPhaseControllerOrOperable() {
+        return isPhaseController() || getOperablePhaseControl().filter(pc -> pc.getControllerBranch() == this).isPresent();
+    }
+
+    /**
+     * Phase controlled or a branch that can be made phase controlled by an action: equations needed by phase control
+     * have to be created.
+     */
+    default boolean isPhaseControlledOrOperable() {
+        return isPhaseControlled() || getOperablePhaseControl().filter(pc -> pc.getControlledBranch() == this).isPresent();
+    }
+
     boolean isPhaseControlEnabled();
 
     void setPhaseControlEnabled(boolean phaseControlEnabled);

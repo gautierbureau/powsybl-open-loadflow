@@ -46,6 +46,8 @@ public abstract class AbstractLfBranch extends AbstractElement implements LfBran
 
     protected boolean phaseControlEnabled = false;
 
+    protected TransformerPhaseControl operablePhaseControl;
+
     protected TransformerVoltageControl voltageControl;
 
     protected boolean voltageControlEnabled = false;
@@ -216,6 +218,16 @@ public abstract class AbstractLfBranch extends AbstractElement implements LfBran
     @Override
     public void setPhaseControl(TransformerPhaseControl phaseControl) {
         this.phaseControl = phaseControl;
+    }
+
+    @Override
+    public Optional<TransformerPhaseControl> getOperablePhaseControl() {
+        return Optional.ofNullable(operablePhaseControl);
+    }
+
+    @Override
+    public void setOperablePhaseControl(TransformerPhaseControl operablePhaseControl) {
+        this.operablePhaseControl = operablePhaseControl;
     }
 
     @Override

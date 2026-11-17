@@ -600,14 +600,15 @@ public class LfNetworkLoaderImpl implements LfNetworkLoader<Network> {
                 if (branch instanceof TwoWindingsTransformer t2wt) {
                     // Create phase controls which link controller -> controlled
                     PhaseTapChanger ptc = t2wt.getPhaseTapChanger();
-                    createPhaseControl(lfNetwork, ptc, t2wt.getId(), parameters);
+                    createPhaseControl(lfNetwork, ptc, t2wt.getId(), topoConfig.isOperatedPtcRegulation(t2wt.getId()), parameters);
                 }
             }
             for (ThreeWindingsTransformer t3wt : loadingContext.t3wtSet) {
                 // Create phase controls which link controller -> controlled
                 for (ThreeSides side : ThreeSides.values()) {
                     PhaseTapChanger ptc = t3wt.getLeg(side).getPhaseTapChanger();
-                    createPhaseControl(lfNetwork, ptc, LfLegBranch.getId(side, t3wt.getId()), parameters);
+                    String legId = LfLegBranch.getId(side, t3wt.getId());
+                    createPhaseControl(lfNetwork, ptc, legId, topoConfig.isOperatedPtcRegulation(legId), parameters);
                 }
             }
         }
@@ -846,9 +847,18 @@ public class LfNetworkLoaderImpl implements LfNetworkLoader<Network> {
         }
     }
 
+    /**
+     * Create the phase control of a phase tap changer. If the regulation is operable (activable or deactivable by an
+     * action), the phase control is also created when the phase tap changer is not regulating, and is kept as operable
+     * phase control on controller and controlled branches, so that equations needed for regulation are created.
+     */
     private static void createPhaseControl(LfNetwork lfNetwork, PhaseTapChanger ptc, String controllerBranchId,
-                                           LfNetworkParameters parameters) {
-        if (ptc != null && ptc.isRegulating()) {
+                                           boolean operable, LfNetworkParameters parameters) {
+        if (ptc != null && (ptc.isRegulating() || operable)) {
+            if (ptc.getRegulationTerminal() == null || ptc.getRegulationMode() == null) {
+                LOGGER.warn("Phase tap changer of branch '{}' has no regulation terminal or no regulation mode: phase control discarded", controllerBranchId);
+                return;
+            }
             String controlledBranchId = ptc.getRegulationTerminal().getConnectable().getId();
             if (ptc.getRegulationTerminal().getConnectable() instanceof ThreeWindingsTransformer twt) {
                 controlledBranchId = LfLegBranch.getId(twt.getSide(ptc.getRegulationTerminal()), controlledBranchId);
@@ -882,7 +892,7 @@ public class LfNetworkLoaderImpl implements LfNetworkLoader<Network> {
             if (ptc.getRegulationMode() == PhaseTapChanger.RegulationMode.CURRENT_LIMITER) {
                 if (controlledBranch == controllerBranch && controlledBus != null) {
                     targetValue = ptc.getRegulationValue() / PerUnit.ib(controlledBus.getNominalV());
-                    targetDeadband = ptc.getTargetDeadband() / PerUnit.ib(controlledBus.getNominalV());
+                    targetDeadband = getTargetDeadband(ptc) / PerUnit.ib(controlledBus.getNominalV());
                     phaseControl = new TransformerPhaseControl(controllerBranch, controlledBranch, controlledSide,
                             TransformerPhaseControl.Mode.LIMITER, targetValue, targetDeadband, TransformerPhaseControl.Unit.A);
                 } else {
@@ -890,13 +900,25 @@ public class LfNetworkLoaderImpl implements LfNetworkLoader<Network> {
                 }
             } else if (ptc.getRegulationMode() == PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL) {
                 targetValue = ptc.getRegulationValue() / PerUnit.SB;
-                targetDeadband = ptc.getTargetDeadband() / PerUnit.SB;
+                targetDeadband = getTargetDeadband(ptc) / PerUnit.SB;
                 phaseControl = new TransformerPhaseControl(controllerBranch, controlledBranch, controlledSide,
                         TransformerPhaseControl.Mode.CONTROLLER, targetValue, targetDeadband, TransformerPhaseControl.Unit.MW);
             }
-            controllerBranch.setPhaseControl(phaseControl);
-            controlledBranch.setPhaseControl(phaseControl);
+            if (ptc.isRegulating()) {
+                controllerBranch.setPhaseControl(phaseControl);
+                controlledBranch.setPhaseControl(phaseControl);
+            }
+            if (operable && phaseControl != null) {
+                controllerBranch.setOperablePhaseControl(phaseControl);
+                controlledBranch.setOperablePhaseControl(phaseControl);
+            }
         }
+    }
+
+    private static double getTargetDeadband(PhaseTapChanger ptc) {
+        // target deadband is optional for a non regulating phase tap changer
+        double targetDeadband = ptc.getTargetDeadband();
+        return Double.isNaN(targetDeadband) ? 0 : targetDeadband;
     }
 
     private static void createTransformerVoltageControl(LfNetwork lfNetwork, RatioTapChanger rtc, String controllerBranchId,

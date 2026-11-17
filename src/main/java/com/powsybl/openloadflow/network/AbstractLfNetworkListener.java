@@ -37,6 +37,11 @@ public abstract class AbstractLfNetworkListener implements LfNetworkListener {
     }
 
     @Override
+    public void onTransformerPhaseControlTargetChange(TransformerPhaseControl phaseControl, double newTargetValue) {
+        // empty
+    }
+
+    @Override
     public void onTransformerVoltageControlTargetChange(TransformerVoltageControl transformerVoltageControl, double newTargetVoltage) {
         // empty
     }

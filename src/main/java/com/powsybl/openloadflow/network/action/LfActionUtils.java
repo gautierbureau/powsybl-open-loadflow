@@ -38,6 +38,8 @@ public final class LfActionUtils {
                 new LfTerminalsConnectionAction((TerminalsConnectionAction) action, lfNetwork);
             case PhaseTapChangerTapPositionAction.NAME ->
                 new LfPhaseTapChangerAction((PhaseTapChangerTapPositionAction) action, lfNetwork);
+            case PhaseTapChangerRegulationAction.NAME ->
+                new LfPhaseTapChangerRegulationAction((PhaseTapChangerRegulationAction) action, lfNetwork);
             case RatioTapChangerTapPositionAction.NAME ->
                 new LfRatioTapChangerAction((RatioTapChangerTapPositionAction) action, lfNetwork);
             case LoadAction.NAME ->

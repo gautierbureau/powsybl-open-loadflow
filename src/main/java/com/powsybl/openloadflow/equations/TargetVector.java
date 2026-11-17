@@ -36,6 +36,11 @@ public class TargetVector<V extends Enum<V> & Quantity, E extends Enum<E> & Quan
         }
 
         @Override
+        public void onTransformerPhaseControlTargetChange(TransformerPhaseControl phaseControl, double newTargetValue) {
+            invalidateValues();
+        }
+
+        @Override
         public void onTransformerVoltageControlTargetChange(TransformerVoltageControl transformerVoltageControl, double newTargetVoltage) {
             invalidateValues();
         }
