@@ -413,7 +413,10 @@ class FixedEquationSystemTest {
             referenceStep[i] -= targets[i];
         }
         double[] mismatch = referenceStep.clone();
-        context.getJacobianMatrix().solveTransposed(referenceStep);
+        // OLF's step on the matrix in the numbering of the index: the Jacobian of the context itself solves on a fixed matrix
+        try (LUDecomposition lu = context.getJacobianMatrix().getMatrix().decomposeLU()) {
+            lu.solveTransposed(referenceStep);
+        }
 
         FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
         int slotCount = structure.getSlotCount();
