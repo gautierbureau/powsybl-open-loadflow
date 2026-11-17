@@ -74,7 +74,7 @@ class LfNetworkCopyFieldGuardTest {
         expected.put(LfBoundaryLineBranch.class, Set.of("boundaryLineRef"));
         expected.put(LfBoundaryLineBus.class, Set.of("boundaryLineRef", "nominalV"));
         expected.put(LfBoundaryLineGenerator.class, Set.of("boundaryLineRef"));
-        expected.put(LfBranchImpl.class, Set.of("branchRef"));
+        expected.put(LfBranchImpl.class, Set.of("phaseControllerCapability", "branchRef"));
         expected.put(LfBusImpl.class, Set.of("busRef", "nominalV", "lowVoltageLimit", "highVoltageLimit", "participating", "breakers", "country", "bbsIds", "fictitiousInjectionTargetP",
                 "fictitiousInjectionTargetQ", "violationLocation"));
         expected.put(LfDcBusImpl.class, Set.of("dcBusRef", "isGrounded"));
