@@ -18,7 +18,9 @@ import com.powsybl.openloadflow.equations.Quantity;
 import com.powsybl.openloadflow.equations.SingleEquation;
 import com.powsybl.openloadflow.equations.SingleEquationTerm;
 import com.powsybl.openloadflow.equations.Variable;
+import gnu.trove.iterator.TIntIterator;
 import gnu.trove.list.array.TIntArrayList;
+import gnu.trove.set.hash.TIntHashSet;
 
 import java.io.IOException;
 import java.io.Writer;
@@ -72,6 +74,8 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     private final Set<Long> placed = new HashSet<>();
     private boolean patternValid;
     private boolean placementValid;
+    /** The single equations that have other terms than when their rows were computed. */
+    private final TIntHashSet changedTerms = new TIntHashSet();
 
     private int[] slotOfEquation;
     private int[] equationOfSlot;
@@ -98,6 +102,10 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     }
 
     private void update() {
+        if (structure != null && !changedTerms.isEmpty() && !addRows()) {
+            structure = null;
+        }
+        changedTerms.clear();
         if (structure == null) {
             structure = new FixedStructure<>(equationSystem, placement);
             structureBuildCount++;
@@ -130,6 +138,24 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             patternBuildCount++;
             patternValid = true;
         }
+    }
+
+    /**
+     * The equations whose terms changed take the rows of their new terms; the pattern stands when the columns they
+     * are placed in already hold them. Returns false when a new term depends on a variable that has no slot.
+     */
+    private boolean addRows() {
+        for (TIntIterator it = changedTerms.iterator(); it.hasNext();) {
+            if (!structure.addRows(it.next())) {
+                return false;
+            }
+        }
+        for (int i = 0; i < placedEquations.size() && patternValid; i++) {
+            if (changedTerms.contains(placedEquations.getQuick(i))) {
+                patternValid = structure.holds(placedSlots.getQuick(i), placedEquations.getQuick(i));
+            }
+        }
+        return true;
     }
 
     private void addToPattern(int equation, int slot) {
@@ -331,9 +357,19 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
         jacobianValues[index] += value;
     }
 
+    /**
+     * An equation that is removed and then created again, with other terms, is the same equation for the structure:
+     * it keeps its number and its slot. OLF does so with the distribution equations of a voltage control when a zero
+     * impedance network splits or merges.
+     */
     @Override
     public void onEquationChange(SingleEquation<V, E> equation, EquationEventType eventType) {
-        invalidate(eventType == EquationEventType.EQUATION_CREATED || eventType == EquationEventType.EQUATION_REMOVED);
+        boolean kept = switch (eventType) {
+            case EQUATION_REMOVED -> structure != null && structure.unbind(equation);
+            case EQUATION_CREATED -> structure != null && termsChanged(structure.bind(equation));
+            default -> true;
+        };
+        invalidate(!kept);
     }
 
     @Override
@@ -343,7 +379,16 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
 
     @Override
     public void onEquationTermChange(SingleEquationTerm<V, E> term, EquationTermEventType eventType) {
-        invalidate(eventType == EquationTermEventType.EQUATION_TERM_ADDED);
+        invalidate(eventType == EquationTermEventType.EQUATION_TERM_ADDED
+                && !(structure != null && termsChanged(structure.getNumber(term.getEquation()))));
+    }
+
+    /** Notes that a single equation of the structure has other terms than when its rows were computed. */
+    private boolean termsChanged(int equation) {
+        if (equation >= 0) {
+            changedTerms.add(equation);
+        }
+        return equation >= 0;
     }
 
     @Override
@@ -356,7 +401,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
         // values only
     }
 
-    /** An activation moves equations between slots; a new or removed equation or term changes the compiled arrays. */
+    /** An activation moves equations between slots; an equation or a term the structure cannot keep changes the compiled arrays. */
     private void invalidate(boolean compiledArrays) {
         placementValid = false;
         if (compiledArrays) {
