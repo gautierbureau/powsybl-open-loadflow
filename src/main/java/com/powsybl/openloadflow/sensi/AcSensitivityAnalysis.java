@@ -757,8 +757,9 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                     lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses().getFirst(), -1d);
         }
 
-        // cotangent per factor, from the caller's (functionType, functionId)
-        Map<LfSensitivityFactor<AcVariableType, AcEquationType>, Double> cotangents = new HashMap<>();
+        // cotangent per factor, from the caller's (functionType, functionId), in factor order: they are summed
+        // in this order, and a factor's identity hash would change the sum's last bits from one run to the next
+        Map<LfSensitivityFactor<AcVariableType, AcEquationType>, Double> cotangents = new LinkedHashMap<>();
         for (var factor : validLfFactors) {
             SensitivityFactor declared = factors.get(factor.getIndex());
             Double yBar = cotangentsByFunction.get(new FunctionRef(declared.getFunctionType(), declared.getFunctionId()));
