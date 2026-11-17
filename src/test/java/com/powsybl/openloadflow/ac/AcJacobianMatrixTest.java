@@ -13,6 +13,7 @@ import com.powsybl.contingency.BranchContingency;
 import com.powsybl.contingency.Contingency;
 import com.powsybl.contingency.violations.LimitViolationFilter;
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
+import com.powsybl.iidm.network.Line;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.DenseMatrix;
@@ -28,6 +29,7 @@ import com.powsybl.openloadflow.equations.JacobianMatrix;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.ZeroImpedanceNetworkFactory;
 import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisProvider;
 import com.powsybl.security.PostContingencyComputationStatus;
@@ -143,17 +145,16 @@ class AcJacobianMatrixTest {
         });
     }
 
-    @Test
-    void securityAnalysisOnOneMatrix() {
-        Network network = IeeeCdfNetworkFactory.create118();
-        List<Contingency> contingencies = network.getLineStream()
-                .map(line -> new Contingency(line.getId(), new BranchContingency(line.getId())))
+    /** Runs a security analysis on the loss of each given line, and returns how many matrices it created. */
+    private static int countMatrices(Network network, LoadFlowParameters parameters, List<String> lineIds) {
+        List<Contingency> contingencies = lineIds.stream()
+                .map(lineId -> new Contingency(lineId, new BranchContingency(lineId)))
                 .toList();
         CountingMatrixFactory matrixFactory = new CountingMatrixFactory();
         SecurityAnalysisRunParameters runParameters = new SecurityAnalysisRunParameters()
                 .setFilter(new LimitViolationFilter())
                 .setComputationManager(LocalComputationManager.getDefault())
-                .setSecurityAnalysisParameters(new SecurityAnalysisParameters())
+                .setSecurityAnalysisParameters(new SecurityAnalysisParameters().setLoadFlowParameters(parameters))
                 .setReportNode(ReportNode.NO_OP);
         SecurityAnalysisResult result = new OpenSecurityAnalysisProvider(matrixFactory, new EvenShiloachGraphDecrementalConnectivityFactory<>())
                 .run(network, network.getVariantManager().getWorkingVariantId(), n -> contingencies, runParameters)
@@ -161,6 +162,24 @@ class AcJacobianMatrixTest {
         assertEquals(contingencies.size(), result.getPostContingencyResults().size());
         assertTrue(result.getPostContingencyResults().stream()
                 .allMatch(postContingencyResult -> postContingencyResult.getStatus() == PostContingencyComputationStatus.CONVERGED));
-        assertEquals(1, matrixFactory.matrixCount);
+        return matrixFactory.matrixCount;
+    }
+
+    @Test
+    void securityAnalysisOnOneMatrix() {
+        Network network = IeeeCdfNetworkFactory.create118();
+        assertEquals(1, countMatrices(network, new LoadFlowParameters(), network.getLineStream().map(Line::getId).toList()));
+    }
+
+    /**
+     * The loss of a zero impedance line, l12 or l23, splits the zero impedance network: OLF removes the distribution
+     * equations of the voltage controls it holds and creates them again, with other terms. They keep their slots, and
+     * the matrix its pattern.
+     */
+    @Test
+    void securityAnalysisOnOneMatrixWhenAZeroImpedanceNetworkSplits() {
+        Network network = ZeroImpedanceNetworkFactory.createWithVoltageControl();
+        LoadFlowParameters parameters = new LoadFlowParameters().setDistributedSlack(false);
+        assertEquals(1, countMatrices(network, parameters, List.of("l01", "l23", "l12")));
     }
 }

@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.equations.fixed;
 
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.openloadflow.equations.Derivative;
+import com.powsybl.openloadflow.equations.Equation;
 import com.powsybl.openloadflow.equations.EquationArray;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationTermArray;
@@ -34,7 +35,8 @@ import java.util.function.Consumer;
  * <li><b>Slots.</b> One per variable that a term of the system can depend on, in the order of the variables. A slot is
  *     a row (the variable) and a column (the equation that determines it).</li>
  * <li><b>Equations.</b> Numbered once: the single equations, then the elements of each equation array. Each knows the
- *     slots of the variables it depends on, and its own slot: the one its {@link Placement} pairs it with.</li>
+ *     slots of the variables it depends on, and its own slot: the one its {@link Placement} pairs it with. A single
+ *     equation that is removed and created again keeps its number: it is the same one, with other terms.</li>
  * <li><b>Pattern.</b> The transposed Jacobian by columns, which is the Jacobian by rows: for each slot, the sorted rows
  *     of every equation placed there, plus the diagonal. It is built from a list of placements and only ever
  *     grows.</li>
@@ -75,6 +77,9 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private final Map<Variable<V>, Integer> slots = new HashMap<>();
 
     private final List<SingleEquation<V, E>> singleEquations;
+    private final Map<Long, Integer> singleEquationNumbers = new HashMap<>();
+    /** False for a single equation that was removed from the system and not created again since: it holds nothing. */
+    private final boolean[] bound;
     private final List<EquationArray<V, E>> arrays;
     private final int[] arrayFirstEquation;
     private final int equationCount;
@@ -90,7 +95,12 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private int[] diagonal;
 
     FixedStructure(EquationSystem<V, E> equationSystem, Placement<V, E> placement) {
-        singleEquations = List.copyOf(equationSystem.getEquations());
+        singleEquations = new ArrayList<>(equationSystem.getEquations());
+        bound = new boolean[singleEquations.size()];
+        Arrays.fill(bound, true);
+        for (int equation = 0; equation < singleEquations.size(); equation++) {
+            singleEquationNumbers.put(key(singleEquations.get(equation).getType(), singleEquations.get(equation).getElementNum()), equation);
+        }
         arrays = List.copyOf(equationSystem.getEquationArrays());
         arrayFirstEquation = new int[arrays.size()];
         int count = singleEquations.size();
@@ -223,6 +233,57 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         }
     }
 
+    /**
+     * The number of a single equation of this structure. It is -1 for any other equation: one created since the
+     * compilation and not bound, or the element of an equation array.
+     */
+    int getNumber(Equation<V, E> equation) {
+        Integer number = singleEquationNumbers.get(key(equation.getType(), equation.getElementNum()));
+        return number != null && bound[number] && singleEquations.get(number) == equation ? number : -1;
+    }
+
+    /** A single equation was removed from the system: it keeps its number and its rows, and holds nothing. */
+    boolean unbind(SingleEquation<V, E> equation) {
+        int number = getNumber(equation);
+        if (number >= 0) {
+            bound[number] = false;
+        }
+        return number >= 0;
+    }
+
+    /**
+     * A single equation was created in the system: it takes the number of the removed one of the same type and
+     * element, and so the same slot. Returns that number, or -1 when there is none.
+     */
+    int bind(SingleEquation<V, E> equation) {
+        Integer number = singleEquationNumbers.get(key(equation.getType(), equation.getElementNum()));
+        if (number == null || bound[number]) {
+            return -1;
+        }
+        singleEquations.set(number, equation);
+        bound[number] = true;
+        return number;
+    }
+
+    /**
+     * Adds the variables of the terms a single equation has now to its rows, which only grow, like the pattern.
+     * Returns false when one of these variables has no slot.
+     */
+    boolean addRows(int equation) {
+        TIntArrayList all = new TIntArrayList(rows[equation]);
+        for (SingleEquationTerm<V, E> term : getSingleTerms(equation)) {
+            for (Variable<V> variable : term.getVariables()) {
+                Integer slot = slots.get(variable);
+                if (slot == null) {
+                    return false;
+                }
+                all.add(slot);
+            }
+        }
+        rows[equation] = sortedDistinct(all);
+        return true;
+    }
+
     /** The index of the value at (row, column), or -1 when the pattern does not hold it. */
     public int index(int column, int row) {
         int index = Arrays.binarySearch(rowIndices, columnStart[column], columnStart[column + 1], row);
@@ -319,20 +380,24 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     }
 
     public boolean isActive(int equation) {
-        return equation < singleEquations.size() ? singleEquations.get(equation).isActive()
+        return equation < singleEquations.size() ? bound[equation] && singleEquations.get(equation).isActive()
                 : getArray(equation).isElementActive(getElementNum(equation));
     }
 
     /** The column of the equation in OLF's own index: -1 when it is not active. */
     public int getColumnInEquationSystem(int equation) {
-        return equation < singleEquations.size() ? singleEquations.get(equation).getColumn()
-                : getArray(equation).getElementNumToColumn(getElementNum(equation));
+        if (equation < singleEquations.size()) {
+            return bound[equation] ? singleEquations.get(equation).getColumn() : -1;
+        }
+        return getArray(equation).getElementNumToColumn(getElementNum(equation));
     }
 
     /** The terms held as objects: all the terms of a single equation, the additional terms of an array element. */
     public List<SingleEquationTerm<V, E>> getSingleTerms(int equation) {
-        return equation < singleEquations.size() ? singleEquations.get(equation).getTerms()
-                : getArray(equation).getSingleEquationTerms(getElementNum(equation));
+        if (equation < singleEquations.size()) {
+            return bound[equation] ? singleEquations.get(equation).getTerms() : List.of();
+        }
+        return getArray(equation).getSingleEquationTerms(getElementNum(equation));
     }
 
     /** The slot the equation is paired with, or -1 when it has none of its own. */
