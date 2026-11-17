@@ -95,9 +95,7 @@ class FixedEquationSystemTest {
         /** Built once: no activation changes it. */
         NEVER_CHANGES,
         /** Grows when a reactive balance moves to the slot of a tap or of a shunt it had not taken yet. */
-        GROWS,
-        /** OLF creates and removes equations as it runs: the arrays are compiled again. */
-        RECOMPILED
+        GROWS
     }
 
     private static Network transformerVoltageControl() {
@@ -147,8 +145,7 @@ class FixedEquationSystemTest {
                 new Case("generator remote reactive power control", ReactivePowerControlNetworkFactory::createWithGeneratorRemoteControl,
                         parameters -> OpenLoadFlowParameters.create(parameters).setGeneratorReactivePowerRemoteControl(true)),
                 new Case("hvdc in ac emulation", HvdcNetworkFactory::createWithHvdcInAcEmulation),
-                new Case("zero impedance branches", ZeroImpedanceNetworkFactory::createWithVoltageControl,
-                        parameters -> { }, false, Pattern.RECOMPILED),
+                new Case("zero impedance branches", ZeroImpedanceNetworkFactory::createWithVoltageControl),
                 new Case("node breaker", NodeBreakerNetworkFactory::create, parameters -> { }, true, Pattern.NEVER_CHANGES));
     }
 
@@ -192,11 +189,10 @@ class FixedEquationSystemTest {
                 }
             }
             assertTrue(checked > STEPS / 2, "Only " + checked + " states checked");
-            if (c.pattern() != Pattern.RECOMPILED) {
-                assertEquals(1, fixed.getStructureBuildCount());
-                if (scope == FixedEquationSystem.Scope.ALL && c.pattern() == Pattern.NEVER_CHANGES) {
-                    assertEquals(1, fixed.getPatternBuildCount());
-                }
+            // compiled once, even where OLF removes equations and creates them again: on the zero impedance network
+            assertEquals(1, fixed.getStructureBuildCount());
+            if (scope == FixedEquationSystem.Scope.ALL && c.pattern() == Pattern.NEVER_CHANGES) {
+                assertEquals(1, fixed.getPatternBuildCount());
             }
         }
     }
