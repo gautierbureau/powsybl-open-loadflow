@@ -31,6 +31,7 @@ import com.powsybl.openloadflow.network.HvdcNetworkFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.network.NodeBreakerNetworkFactory;
 import com.powsybl.openloadflow.network.PhaseControlFactory;
 import com.powsybl.openloadflow.network.ReactivePowerControlNetworkFactory;
@@ -158,16 +159,19 @@ class FixedEquationSystemTest {
                 Arguments.of(c, true, FixedEquationSystem.Scope.ACTIVE)));
     }
 
+    private static AcLoadFlowParameters acParameters(Network network, LoadFlowParameters parameters, boolean breakers, boolean vectorized) {
+        return OpenLoadFlowParameters.createAcParameters(network, parameters, OpenLoadFlowParameters.create(parameters),
+                        new DenseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>(), breakers, false)
+                .setVectorized(vectorized);
+    }
+
     @ParameterizedTest(name = "{0}, vectorized = {1}, scope = {2}")
     @MethodSource("arguments")
     void matchesTheEquationSystem(Case c, boolean vectorized, FixedEquationSystem.Scope scope) {
         Network network = c.network().get();
         LoadFlowParameters parameters = new LoadFlowParameters();
-        OpenLoadFlowParameters parametersExt = OpenLoadFlowParameters.create(parameters);
         c.configuration().accept(parameters);
-        AcLoadFlowParameters acParameters = OpenLoadFlowParameters.createAcParameters(network, parameters, parametersExt,
-                        new DenseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>(), c.breakers(), false)
-                .setVectorized(vectorized);
+        AcLoadFlowParameters acParameters = acParameters(network, parameters, c.breakers(), vectorized);
         LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
         try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
              FixedEquationSystem<AcVariableType, AcEquationType> fixed =
@@ -205,11 +209,7 @@ class FixedEquationSystemTest {
     @Test
     void writesItsStructure() throws IOException {
         Network network = EurostagTutorialExample1Factory.create();
-        LoadFlowParameters parameters = new LoadFlowParameters();
-        AcLoadFlowParameters acParameters = OpenLoadFlowParameters.createAcParameters(network, parameters,
-                        OpenLoadFlowParameters.create(parameters), new DenseMatrixFactory(),
-                        new EvenShiloachGraphDecrementalConnectivityFactory<>(), false, false)
-                .setVectorized(true);
+        AcLoadFlowParameters acParameters = acParameters(network, new LoadFlowParameters(), false, true);
         LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
         try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
              FixedEquationSystem<AcVariableType, AcEquationType> fixed =
@@ -231,6 +231,37 @@ class FixedEquationSystemTest {
             lost.getBranches().forEach(branch -> branch.setDisabled(true));
             assertEquals(firstSlots + "BUS_V:3 <- none" + pattern23 + "BUS_PHI:3 <- none" + pattern23, write(fixed));
             assertEquals(1, fixed.getPatternBuildCount());
+        }
+    }
+
+    /**
+     * A bus at an end of a zero impedance branch is off before the equation system is created, like the far side of an
+     * open switch that is kept for an action. Its slots hold nothing, and those of the branch hold the two equations
+     * that fix its flows to zero. The two equations that tie the buses together are off, and they cannot be evaluated:
+     * one of their variables is not in the system. The slots they are paired with have no balance.
+     */
+    @Test
+    void noBalanceWhereAVariableIsNotInTheSystem() {
+        Network network = ZeroImpedanceNetworkFactory.createWithVoltageControl();
+        AcLoadFlowParameters acParameters = acParameters(network, new LoadFlowParameters(), false, true);
+        LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
+        LfBranch branch = lfNetwork.getBranches().stream().filter(b -> b.isZeroImpedance(LoadFlowModel.AC)).findFirst().orElseThrow();
+        LfBus off = branch.getBus1().isSlack() || branch.getBus1().isReference() ? branch.getBus2() : branch.getBus1();
+        off.setDisabled(true);
+        off.getBranches().forEach(b -> b.setDisabled(true));
+        try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
+             FixedEquationSystem<AcVariableType, AcEquationType> fixed =
+                     new FixedEquationSystem<>(context.getEquationSystem(), AcPlacement.INSTANCE, FixedEquationSystem.Scope.ALL)) {
+            check(lfNetwork, context, fixed, "bus off");
+            FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
+            for (AcVariableType flow : List.of(AcVariableType.DUMMY_P, AcVariableType.DUMMY_Q)) {
+                int slot = structure.getSlot(context.getEquationSystem().getVariable(branch.getNum(), flow));
+                assertTrue(AcPlacement.INSTANCE.fixesVariable(structure.getType(fixed.getEquationOfSlot(slot))));
+                assertTrue(Double.isNaN(fixed.getBalance()[slot]));
+            }
+            for (AcVariableType voltage : List.of(AcVariableType.BUS_PHI, AcVariableType.BUS_V)) {
+                assertEquals(-1, fixed.getEquationOfSlot(structure.getSlot(context.getEquationSystem().getVariable(off.getNum(), voltage))));
+            }
         }
     }
 

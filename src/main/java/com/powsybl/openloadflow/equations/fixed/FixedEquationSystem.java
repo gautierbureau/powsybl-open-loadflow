@@ -41,7 +41,8 @@ import java.util.Set;
  * <li>the value of the equation each slot holds, 0 for a slot that holds none;</li>
  * <li>the <b>balance</b> of each slot: the value of the equation paired with it that does not fix its variable (a
  *     bus's active or reactive balance), whether or not that equation is active. The reactive balance of a bus that
- *     holds its voltage and the active balance of the slack bus are entries of it: what the outer loops read.</li>
+ *     holds its voltage and the active balance of the slack bus are entries of it: what the outer loops read. It is
+ *     NaN where the equation cannot be evaluated: a disabled bus's.</li>
  * </ul>
  *
  * <p>The pattern only grows, and only when an active equation needs entries it does not hold: with
@@ -226,15 +227,15 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     }
 
     /**
-     * The same, with the Jacobian values written in the given array: the value array of a sparse matrix built on the
-     * pattern of {@link #getStructure()}, so that a solver fills its matrix in place.
+     * The same, with the Jacobian values written at the start of the given array: the value array of a sparse matrix
+     * built on the pattern of {@link #getStructure()}, so that a solver fills its matrix in place.
      */
     public void fill(double[] jacobianValues) {
         update();
-        if (jacobianValues.length != structure.getValueCount()) {
+        if (jacobianValues.length < structure.getValueCount()) {
             throw new IllegalArgumentException("The pattern has " + structure.getValueCount() + " values, the array " + jacobianValues.length);
         }
-        Arrays.fill(jacobianValues, 0);
+        Arrays.fill(jacobianValues, 0, structure.getValueCount(), 0);
         Arrays.fill(balance, 0);
         for (FixedStructure.ArrayTerms<V, E> terms : structure.getArrayTerms()) {
             double[] termValues = terms.termArray.eval();
@@ -290,11 +291,18 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
         }
     }
 
-    /** Adds the derivatives of the active object terms of an equation in a column (none when negative); returns their value. */
+    /**
+     * Adds the derivatives of the active object terms of an equation in a column (none when negative) and returns their
+     * value. An equation that holds no slot can have an active term on a variable that left the system, a disabled
+     * bus's: it then has no value, and the result is NaN.
+     */
     private double addSingleTerms(double[] jacobianValues, int equation, int column) {
         double value = 0;
         for (SingleEquationTerm<V, E> term : structure.getSingleTerms(equation)) {
             if (term.isActive()) {
+                if (column < 0 && !isInSystem(term)) {
+                    return Double.NaN;
+                }
                 value += term.eval();
                 if (column >= 0) {
                     for (Variable<V> variable : term.getVariables()) {
@@ -304,6 +312,15 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             }
         }
         return value;
+    }
+
+    private boolean isInSystem(SingleEquationTerm<V, E> term) {
+        for (Variable<V> variable : term.getVariables()) {
+            if (variable.getRow() < 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void add(double[] jacobianValues, int column, int row, double value) {
