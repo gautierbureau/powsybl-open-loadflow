@@ -221,16 +221,26 @@ public class AcEquationSystemCreator {
         }
     }
 
-    private static void createShuntEquation(LfShunt shunt, LfBus bus, EquationSystem<AcVariableType, AcEquationType> equationSystem, boolean deriveB) {
-        ShuntCompensatorReactiveFlowEquationTerm q = new ShuntCompensatorReactiveFlowEquationTerm(shunt, bus, equationSystem.getVariableSet(), deriveB);
+    private void createShuntEquation(LfShunt shunt, LfBus bus, EquationSystem<AcVariableType, AcEquationType> equationSystem, boolean deriveB) {
+        EquationTerm<AcVariableType, AcEquationType> q = createShuntCompensatorReactiveFlowEquationTerm(shunt, bus, deriveB, equationSystem);
         equationSystem.createEquation(bus, AcEquationType.BUS_TARGET_Q).addTerm(q);
         shunt.setQ(q);
-        ShuntCompensatorActiveFlowEquationTerm p = new ShuntCompensatorActiveFlowEquationTerm(shunt, bus, equationSystem.getVariableSet());
+        EquationTerm<AcVariableType, AcEquationType> p = createShuntCompensatorActiveFlowEquationTerm(shunt, bus, equationSystem);
         equationSystem.createEquation(bus, AcEquationType.BUS_TARGET_P).addTerm(p);
         shunt.setP(p);
     }
 
-    private static void createShuntEquations(LfBus bus, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+    protected EquationTerm<AcVariableType, AcEquationType> createShuntCompensatorReactiveFlowEquationTerm(LfShunt shunt, LfBus bus, boolean deriveB,
+                                                                                                          EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        return new ShuntCompensatorReactiveFlowEquationTerm(shunt, bus, equationSystem.getVariableSet(), deriveB);
+    }
+
+    protected EquationTerm<AcVariableType, AcEquationType> createShuntCompensatorActiveFlowEquationTerm(LfShunt shunt, LfBus bus,
+                                                                                                        EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        return new ShuntCompensatorActiveFlowEquationTerm(shunt, bus, equationSystem.getVariableSet());
+    }
+
+    private void createShuntEquations(LfBus bus, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
         bus.getShunt().ifPresent(shunt -> createShuntEquation(shunt, bus, equationSystem, false));
         bus.getControllerShunt().ifPresent(shunt -> createShuntEquation(shunt, bus, equationSystem, shunt.hasVoltageControlCapability()));
         bus.getSvcShunt().ifPresent(shunt -> createShuntEquation(shunt, bus, equationSystem, false));
