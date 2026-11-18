@@ -456,8 +456,10 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             throw new PowsyblException("Adjoint slack distribution: no element left to distribute the slack over");
         }
         ParticipatingElement.normalizeParticipationFactors(participatingElements);
+        // in the elements' order: the buses are summed in this order, and a bus's identity hash would make the
+        // sum's last bits depend on the network instance
         return participatingElements.stream().collect(Collectors.toMap(
-                ParticipatingElement::getLfBus, e -> -e.getFactor(), Double::sum));
+                ParticipatingElement::getLfBus, e -> -e.getFactor(), Double::sum, LinkedHashMap::new));
     }
 
     // the bounds of GenerationActivePowerDistributionStep, the generation sign included
