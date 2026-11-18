@@ -569,11 +569,25 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
     }
 
     private double getLimitQ(ToDoubleFunction<LfGenerator> limitQ) {
-        return generators.stream()
-                .filter(g -> !g.isDisabled())
-                .mapToDouble(generator -> (generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE ||
-                        generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER) ?
-                        limitQ.applyAsDouble(generator) : generator.getTargetQ()).sum();
+        // the compensated sum of DoubleStream.sum, term for term, without the stream
+        double sum = 0;
+        double compensation = 0;
+        double simpleSum = 0;
+        for (LfGenerator generator : generators) {
+            if (generator.isDisabled()) {
+                continue;
+            }
+            double value = generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE
+                    || generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER
+                    ? limitQ.applyAsDouble(generator) : generator.getTargetQ();
+            double tmp = value - compensation;
+            double velvel = sum + tmp;
+            compensation = (velvel - sum) - tmp;
+            sum = velvel;
+            simpleSum += value;
+        }
+        double tmp = sum - compensation;
+        return Double.isNaN(tmp) && Double.isInfinite(simpleSum) ? simpleSum : tmp;
     }
 
     @Override

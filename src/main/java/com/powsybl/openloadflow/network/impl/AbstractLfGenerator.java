@@ -62,6 +62,17 @@ public abstract class AbstractLfGenerator extends AbstractLfInjection implements
 
     private final boolean extrapolateReactiveLimits;
 
+    /*
+     * The limits last read on a reactive capability curve, with the curve and the active power they were read for.
+     * A curve is a lookup in a sorted map that depends on the active power only, and the reactive limits loop reads
+     * the limits of every controller at each check while most active powers do not move. Other limits are read each
+     * time: those of a static var compensator follow the voltage of its bus.
+     */
+    private ReactiveCapabilityCurve curveOfReadQ;
+    private long activePowerBitsOfReadQ;
+    private double readMinQ;
+    private double readMaxQ;
+
     protected AbstractLfGenerator(LfNetwork network, double targetP, LfNetworkParameters parameters) {
         super(targetP, targetP);
         this.network = Objects.requireNonNull(network);
@@ -84,6 +95,10 @@ public abstract class AbstractLfGenerator extends AbstractLfInjection implements
         this.referencePriority = other.referencePriority;
         this.reference = other.reference;
         this.extrapolateReactiveLimits = other.extrapolateReactiveLimits;
+        this.curveOfReadQ = other.curveOfReadQ;
+        this.activePowerBitsOfReadQ = other.activePowerBitsOfReadQ;
+        this.readMinQ = other.readMinQ;
+        this.readMaxQ = other.readMaxQ;
     }
 
     protected record ActivePowerControlHelper(boolean participating, double participationFactor, double droop, double minTargetP, double maxTargetP) {
@@ -187,13 +202,25 @@ public abstract class AbstractLfGenerator extends AbstractLfInjection implements
 
     protected abstract Optional<ReactiveLimits> getReactiveLimits();
 
+    /** The limits of a curve at an active power, read again only when the curve or the active power changed. */
+    private void readCurveLimits(ReactiveCapabilityCurve curve, double activePower) {
+        long activePowerBits = Double.doubleToRawLongBits(activePower);
+        if (curve != curveOfReadQ || activePowerBits != activePowerBitsOfReadQ) {
+            readMinQ = curve.getMinQ(activePower * PerUnit.SB, extrapolateReactiveLimits) / PerUnit.SB;
+            readMaxQ = curve.getMaxQ(activePower * PerUnit.SB, extrapolateReactiveLimits) / PerUnit.SB;
+            curveOfReadQ = curve;
+            activePowerBitsOfReadQ = activePowerBits;
+        }
+    }
+
     protected double getMinQ(double activePower) {
         if (getReactiveLimits().isEmpty()) {
             return -Double.MAX_VALUE;
         }
         ReactiveLimits reactiveLimits = getReactiveLimits().orElseThrow();
         if (reactiveLimits.getKind() == ReactiveLimitsKind.CURVE) {
-            return ((ReactiveCapabilityCurve) reactiveLimits).getMinQ(activePower * PerUnit.SB, extrapolateReactiveLimits) / PerUnit.SB;
+            readCurveLimits((ReactiveCapabilityCurve) reactiveLimits, activePower);
+            return readMinQ;
         } else {
             return reactiveLimits.getMinQ(activePower * PerUnit.SB) / PerUnit.SB;
         }
@@ -205,7 +232,8 @@ public abstract class AbstractLfGenerator extends AbstractLfInjection implements
         }
         ReactiveLimits reactiveLimits = getReactiveLimits().orElseThrow();
         if (reactiveLimits.getKind() == ReactiveLimitsKind.CURVE) {
-            return ((ReactiveCapabilityCurve) reactiveLimits).getMaxQ(activePower * PerUnit.SB, extrapolateReactiveLimits) / PerUnit.SB;
+            readCurveLimits((ReactiveCapabilityCurve) reactiveLimits, activePower);
+            return readMaxQ;
         } else {
             return reactiveLimits.getMaxQ(activePower * PerUnit.SB) / PerUnit.SB;
         }
