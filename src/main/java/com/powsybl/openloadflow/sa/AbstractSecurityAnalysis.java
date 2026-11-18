@@ -837,6 +837,23 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         return connectivity.supportTemporaryChangesNesting() ? connectivity : null;
     }
 
+    /**
+     * The post-contingency result of a contingency without operator strategies, answered without changing the network,
+     * or empty to run the contingency as usual (apply, loss distribution, simulation, restore). A subclass that answers
+     * reports what the usual path would report on {@code reportNode}, and puts back whatever
+     * {@link PropagatedContingency#toLfContingency} changed in the network (the excluded slack buses of a relocated slack
+     * bus, which {@code networkState} holds); it reads the contingency's topology from its disabled network.
+     */
+    protected Optional<PostContingencyResult> resultWithoutNetwork(LfNetwork network, C context, PropagatedContingency propagatedContingency,
+                                                                   LfContingency lfContingency, NetworkState networkState,
+                                                                   LimitViolationManager preContingencyLimitViolationManager,
+                                                                   SecurityAnalysisParameters securityAnalysisParameters,
+                                                                   PreContingencyNetworkResult preContingencyNetworkResult,
+                                                                   boolean createResultExtension, List<LimitScaling> limitScalings,
+                                                                   ReportNode reportNode) {
+        return Optional.empty();
+    }
+
     private void processContingency(LfNetwork lfNetwork, SecurityAnalysisParameters securityAnalysisParameters,
                                     List<LimitScaling> limitScalings, ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution,
                                     ReportNode networkReportNode, LfContingency lfContingency, P p, NetworkState networkState,
