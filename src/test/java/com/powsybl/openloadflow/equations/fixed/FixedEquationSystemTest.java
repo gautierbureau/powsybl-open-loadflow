@@ -31,6 +31,7 @@ import com.powsybl.openloadflow.network.HvdcNetworkFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.LfSynchronousNetwork;
 import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.network.NodeBreakerNetworkFactory;
 import com.powsybl.openloadflow.network.PhaseControlFactory;
@@ -50,11 +51,14 @@ import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -70,32 +74,21 @@ class FixedEquationSystemTest {
 
     private static final int STEPS = 60;
 
-    /**
-     * A network, the parameters that switch its controls on, whether its switches are kept as branches, and what is
-     * expected of the pattern when every equation is in it from the start.
-     */
-    private record Case(String name, Supplier<Network> network, Consumer<LoadFlowParameters> configuration, boolean breakers,
-                        Pattern pattern) {
+    /** A network, the parameters that switch its controls on, and whether its switches are kept as branches. */
+    private record Case(String name, Supplier<Network> network, Consumer<LoadFlowParameters> configuration, boolean breakers) {
 
         Case(String name, Supplier<Network> network) {
-            this(name, network, parameters -> { }, false, Pattern.NEVER_CHANGES);
+            this(name, network, parameters -> { }, false);
         }
 
         Case(String name, Supplier<Network> network, Consumer<LoadFlowParameters> configuration) {
-            this(name, network, configuration, false, Pattern.NEVER_CHANGES);
+            this(name, network, configuration, false);
         }
 
         @Override
         public String toString() {
             return name;
         }
-    }
-
-    private enum Pattern {
-        /** Built once: no activation changes it. */
-        NEVER_CHANGES,
-        /** Grows when a reactive balance moves to the slot of a tap or of a shunt it had not taken yet. */
-        GROWS
     }
 
     private static Network transformerVoltageControl() {
@@ -133,20 +126,20 @@ class FixedEquationSystemTest {
                 new Case("generator remote voltage control", VoltageControlNetworkFactory::createWithGeneratorRemoteControl),
                 new Case("static var compensator", VoltageControlNetworkFactory::createWithStaticVarCompensator),
                 new Case("transformer voltage control", FixedEquationSystemTest::transformerVoltageControl,
-                        parameters -> parameters.setTransformerVoltageControlOn(true), false, Pattern.GROWS),
+                        parameters -> parameters.setTransformerVoltageControlOn(true)),
                 new Case("shared transformer voltage control", VoltageControlNetworkFactory::createWithTransformerSharedRemoteControl,
-                        parameters -> parameters.setTransformerVoltageControlOn(true), false, Pattern.GROWS),
+                        parameters -> parameters.setTransformerVoltageControlOn(true)),
                 new Case("shared shunt voltage control", VoltageControlNetworkFactory::createWithShuntSharedRemoteControl,
-                        parameters -> parameters.setShuntCompensatorVoltageControlOn(true), false, Pattern.GROWS),
+                        parameters -> parameters.setShuntCompensatorVoltageControlOn(true)),
                 new Case("shunt", ShuntNetworkFactory::create,
-                        parameters -> parameters.setShuntCompensatorVoltageControlOn(true), false, Pattern.GROWS),
+                        parameters -> parameters.setShuntCompensatorVoltageControlOn(true)),
                 new Case("phase control", FixedEquationSystemTest::phaseControl,
                         parameters -> parameters.setPhaseShifterRegulationOn(true)),
                 new Case("generator remote reactive power control", ReactivePowerControlNetworkFactory::createWithGeneratorRemoteControl,
                         parameters -> OpenLoadFlowParameters.create(parameters).setGeneratorReactivePowerRemoteControl(true)),
                 new Case("hvdc in ac emulation", HvdcNetworkFactory::createWithHvdcInAcEmulation),
                 new Case("zero impedance branches", ZeroImpedanceNetworkFactory::createWithVoltageControl),
-                new Case("node breaker", NodeBreakerNetworkFactory::create, parameters -> { }, true, Pattern.NEVER_CHANGES));
+                new Case("node breaker", NodeBreakerNetworkFactory::create, parameters -> { }, true));
     }
 
     private static Stream<Arguments> arguments() {
@@ -172,7 +165,7 @@ class FixedEquationSystemTest {
         LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
         try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
              FixedEquationSystem<AcVariableType, AcEquationType> fixed =
-                     new FixedEquationSystem<>(context.getEquationSystem(), AcPlacement.INSTANCE, scope)) {
+                     new FixedEquationSystem<>(context.getEquationSystem(), new AcPlacement(lfNetwork), scope)) {
             check(lfNetwork, context, fixed, "base state");
             checkNewtonStep(context, fixed);
 
@@ -191,7 +184,9 @@ class FixedEquationSystemTest {
             assertTrue(checked > STEPS / 2, "Only " + checked + " states checked");
             // compiled once, even where OLF removes equations and creates them again: on the zero impedance network
             assertEquals(1, fixed.getStructureBuildCount());
-            if (scope == FixedEquationSystem.Scope.ALL && c.pattern() == Pattern.NEVER_CHANGES) {
+            // and with every equation and every candidate in it from the start, the pattern is built once: also when
+            // a reactive balance first takes the slot of a tap, of a susceptance or of a remote generator bus
+            if (scope == FixedEquationSystem.Scope.ALL) {
                 assertEquals(1, fixed.getPatternBuildCount());
             }
         }
@@ -258,6 +253,33 @@ class FixedEquationSystemTest {
             for (AcVariableType voltage : List.of(AcVariableType.BUS_PHI, AcVariableType.BUS_V)) {
                 assertEquals(-1, fixed.getEquationOfSlot(structure.getSlot(context.getEquationSystem().getVariable(off.getNum(), voltage))));
             }
+        }
+    }
+
+    /**
+     * The slack bus is excluded, as when a contingency takes it out: OLF picks another reference bus and creates its
+     * angle equation, one the structure has not seen. The arrays are compiled again, and the pattern is kept: the new
+     * equation fits in the column of its slot.
+     */
+    @Test
+    void keepsThePatternWhenAnEquationIsCreated() {
+        Network network = IeeeCdfNetworkFactory.create14();
+        AcLoadFlowParameters acParameters = acParameters(network, new LoadFlowParameters(), false, true);
+        LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
+        try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
+             FixedEquationSystem<AcVariableType, AcEquationType> fixed =
+                     new FixedEquationSystem<>(context.getEquationSystem(), new AcPlacement(lfNetwork), FixedEquationSystem.Scope.ALL)) {
+            check(lfNetwork, context, fixed, "base state");
+            int[] rowIndices = fixed.getStructure().getRowIndices();
+
+            LfSynchronousNetwork synchronousNetwork = lfNetwork.getSynchronousNetworks().get(0);
+            LfBus reference = synchronousNetwork.getReferenceBus();
+            synchronousNetwork.setExcludedSlackBuses(Set.of(reference));
+            assertNotSame(reference, synchronousNetwork.getReferenceBus());
+            check(lfNetwork, context, fixed, "another reference bus");
+            assertEquals(2, fixed.getStructureBuildCount());
+            assertEquals(1, fixed.getPatternBuildCount());
+            assertSame(rowIndices, fixed.getStructure().getRowIndices());
         }
     }
 

@@ -60,7 +60,7 @@ public class AcJacobianMatrix extends JacobianMatrix<AcVariableType, AcEquationT
                             LfNetwork network) {
         super(equationSystem, matrixFactory);
         this.network = Objects.requireNonNull(network);
-        fixedJacobian = new FixedJacobian<>(equationSystem, AcPlacement.INSTANCE, matrixFactory);
+        fixedJacobian = new FixedJacobian<>(equationSystem, new AcPlacement(network), matrixFactory);
         network.addListener(networkListener);
     }
 
