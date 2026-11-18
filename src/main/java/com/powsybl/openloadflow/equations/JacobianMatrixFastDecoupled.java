@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.ac.equations.vector.ClosedBranchSide1ActiveFlowE
 import com.powsybl.openloadflow.ac.equations.vector.ClosedBranchSide1ReactiveFlowEquationTermArrayEvaluator;
 import com.powsybl.openloadflow.ac.equations.vector.ClosedBranchSide2ActiveFlowEquationTermArrayEvaluator;
 import com.powsybl.openloadflow.ac.equations.vector.ClosedBranchSide2ReactiveFlowEquationTermArrayEvaluator;
+import com.powsybl.openloadflow.ac.equations.vector.ShuntCompensatorReactiveFlowEquationTermArrayEvaluator;
 
 import java.util.*;
 import java.util.concurrent.TimeUnit;
@@ -80,7 +81,8 @@ public class JacobianMatrixFastDecoupled
             ClosedBranchSide1ActiveFlowEquationTermArrayEvaluator.class.getName(),
             ClosedBranchSide1ReactiveFlowEquationTermArrayEvaluator.class.getName(),
             ClosedBranchSide2ActiveFlowEquationTermArrayEvaluator.class.getName(),
-            ClosedBranchSide2ReactiveFlowEquationTermArrayEvaluator.class.getName()
+            ClosedBranchSide2ReactiveFlowEquationTermArrayEvaluator.class.getName(),
+            ShuntCompensatorReactiveFlowEquationTermArrayEvaluator.class.getName()
     );
 
     // Checks if the term provided has a dedicated derivative
@@ -107,6 +109,8 @@ public class JacobianMatrixFastDecoupled
                     new ClosedBranchSide1ReactiveFlowFastDecoupledEquationTerm(closedQ1Evaluator, termArrayElement.termElementNum);
                 case ClosedBranchSide2ReactiveFlowEquationTermArrayEvaluator closedQ2Evaluator ->
                     new ClosedBranchSide2ReactiveFlowFastDecoupledEquationTerm(closedQ2Evaluator, termArrayElement.termElementNum);
+                case ShuntCompensatorReactiveFlowEquationTermArrayEvaluator shuntQEvaluator ->
+                    new ShuntCompensatorReactiveFlowFastDecoupledEquationTerm(shuntQEvaluator, termArrayElement.termElementNum);
                 case null, default -> throw new IllegalStateException("Unexpected term array class: " + term.getClass());
             };
         }

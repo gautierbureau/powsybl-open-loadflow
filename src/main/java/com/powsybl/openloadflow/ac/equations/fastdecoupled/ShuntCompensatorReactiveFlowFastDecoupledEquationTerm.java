@@ -9,8 +9,10 @@ package com.powsybl.openloadflow.ac.equations.fastdecoupled;
 
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.ShuntCompensatorReactiveFlowEquationTerm;
+import com.powsybl.openloadflow.ac.equations.vector.ShuntCompensatorReactiveFlowEquationTermArrayEvaluator;
 import com.powsybl.openloadflow.equations.Variable;
 import java.util.Objects;
+import java.util.function.DoubleSupplier;
 
 import static com.powsybl.openloadflow.ac.equations.ShuntCompensatorReactiveFlowEquationTerm.dqdv;
 
@@ -19,10 +21,22 @@ import static com.powsybl.openloadflow.ac.equations.ShuntCompensatorReactiveFlow
  */
 public class ShuntCompensatorReactiveFlowFastDecoupledEquationTerm implements FastDecoupledEquationTerm {
 
-    private final ShuntCompensatorReactiveFlowEquationTerm term;
+    private final Variable<AcVariableType> vVar;
+
+    private final Variable<AcVariableType> bVar;
+
+    private final DoubleSupplier b;
 
     public ShuntCompensatorReactiveFlowFastDecoupledEquationTerm(ShuntCompensatorReactiveFlowEquationTerm shuntCompensatorReactiveFlowEquationTerm) {
-        this.term = shuntCompensatorReactiveFlowEquationTerm;
+        vVar = shuntCompensatorReactiveFlowEquationTerm.getVVar();
+        bVar = shuntCompensatorReactiveFlowEquationTerm.getbVar();
+        b = shuntCompensatorReactiveFlowEquationTerm::b;
+    }
+
+    public ShuntCompensatorReactiveFlowFastDecoupledEquationTerm(ShuntCompensatorReactiveFlowEquationTermArrayEvaluator shuntCompensatorReactiveFlowEvaluator, int shuntNum) {
+        vVar = shuntCompensatorReactiveFlowEvaluator.getVVar(shuntNum);
+        bVar = shuntCompensatorReactiveFlowEvaluator.getBVar(shuntNum);
+        b = () -> shuntCompensatorReactiveFlowEvaluator.b(shuntNum);
     }
 
     private static double dqdbFastDecoupled(double v) {
@@ -31,9 +45,9 @@ public class ShuntCompensatorReactiveFlowFastDecoupledEquationTerm implements Fa
 
     public double derFastDecoupled(Variable<AcVariableType> variable) {
         Objects.requireNonNull(variable);
-        if (variable.equals(term.getVVar())) {
-            return dqdv(1, term.b());
-        } else if (variable.equals(term.getbVar())) {
+        if (variable.equals(vVar)) {
+            return dqdv(1, b.getAsDouble());
+        } else if (variable.equals(bVar)) {
             return dqdbFastDecoupled(1);
         } else {
             throw new IllegalStateException("Unknown variable: " + variable);
