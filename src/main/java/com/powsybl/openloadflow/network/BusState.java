@@ -7,8 +7,7 @@
  */
 package com.powsybl.openloadflow.network;
 
-import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.List;
 
 /**
  * @author Florian Dupuy {@literal <florian.dupuy at rte-france.com>}
@@ -27,7 +26,7 @@ public class BusState extends BusDcState {
     private final double controllerShuntB;
     private final double controllerShuntG;
     private final double svcShuntB;
-    private final Map<String, LfGenerator.GeneratorControlType> generatorsControlType;
+    private final LfGenerator.GeneratorControlType[] generatorsControlType;
     private final LfBus.QLimitType qLimitType;
     private final double remoteControlReactivePercent;
 
@@ -66,7 +65,7 @@ public class BusState extends BusDcState {
         shuntG = shunt != null ? shunt.getG() : Double.NaN;
         LfShunt svcShunt = bus.getSvcShunt().orElse(null);
         svcShuntB = svcShunt != null ? svcShunt.getB() : Double.NaN;
-        this.generatorsControlType = bus.getGenerators().stream().collect(Collectors.toMap(LfGenerator::getId, LfGenerator::getGeneratorControlType));
+        this.generatorsControlType = bus.getGenerators().stream().map(LfGenerator::getGeneratorControlType).toArray(LfGenerator.GeneratorControlType[]::new);
         qLimitType = bus.getQLimitType().orElse(null);
         // the reactive key of this bus in a shared remote voltage control: renormalized over the remaining
         // generators when a contingency loses one (LfContingency.processLostGenerators)
@@ -113,7 +112,10 @@ public class BusState extends BusDcState {
         if (!Double.isNaN(svcShuntB)) {
             element.getSvcShunt().orElseThrow().setB(svcShuntB);
         }
-        element.getGenerators().forEach(g -> g.setGeneratorControlType(generatorsControlType.get(g.getId())));
+        List<LfGenerator> generators = element.getGenerators();
+        for (int i = 0; i < generators.size(); i++) {
+            generators.get(i).setGeneratorControlType(generatorsControlType[i]);
+        }
         element.setQLimitType(qLimitType);
         element.setRemoteControlReactivePercent(remoteControlReactivePercent);
     }
