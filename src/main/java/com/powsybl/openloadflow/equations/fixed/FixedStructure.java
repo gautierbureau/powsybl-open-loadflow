@@ -21,6 +21,7 @@ import gnu.trove.list.array.TIntArrayList;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -105,6 +106,10 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private final int equationCount;
     private final int[][] rows;
     private final int[] ownSlot;
+    /** True for an equation with a term that depends on the variable it is paired with. */
+    private final boolean[] dependsOnOwnSlot;
+    /** True for an equation that takes part in a chain of moves: what it depends on is then asked of its active terms. */
+    private final boolean[] movesInChain;
     private final boolean[] fixesVariable;
     /** For each equation, the slots it may take besides its own, sorted: empty for most. */
     private final int[][] candidates;
@@ -112,6 +117,8 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private final List<ObjectTerms<V, E>> objectTerms;
 
     private final List<ArrayTerms<V, E>> arrayTerms = new ArrayList<>();
+    /** For each equation array, the terms of its term arrays. */
+    private final List<List<ArrayTerms<V, E>>> arrayTermsOfArray = new ArrayList<>();
     private final int[] arrayElementsWithSingleTerms;
 
     private int[] columnStart;
@@ -148,6 +155,8 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
 
         rows = new int[equationCount][];
         ownSlot = new int[equationCount];
+        dependsOnOwnSlot = new boolean[equationCount];
+        movesInChain = new boolean[equationCount];
         fixesVariable = new boolean[equationCount];
         TIntArrayList withSingleTerms = new TIntArrayList();
         TIntArrayList buffer = new TIntArrayList();
@@ -159,6 +168,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             V variableType = placement.variableType(type);
             ownSlot[equation] = variableType == null ? -1
                     : slotByTypeAndElement.getOrDefault(key(variableType, getElementNum(equation)), -1);
+            dependsOnOwnSlot[equation] = ownSlot[equation] >= 0 && Arrays.binarySearch(rows[equation], ownSlot[equation]) >= 0;
             fixesVariable[equation] = placement.fixesVariable(type);
             if (equation >= singleEquations.size() && !getSingleTerms(equation).isEmpty()) {
                 withSingleTerms.add(equation);
@@ -180,13 +190,197 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
                 candidateSlots.computeIfAbsent(equation, e -> new TIntArrayList()).add(slot);
             }
         });
+        addCandidatesAgainstZeroDiagonals(candidateSlots, placement);
         candidateSlots.forEach((equation, slotList) -> candidates[equation] = sortedDistinct(slotList));
 
         for (int a = 0; a < arrays.size(); a++) {
+            List<ArrayTerms<V, E>> termsOfArray = new ArrayList<>();
             for (EquationTermArray<V, E> termArray : arrays.get(a).getTermArrays()) {
-                arrayTerms.add(compile(termArray, a));
+                termsOfArray.add(compile(termArray, a));
+            }
+            arrayTerms.addAll(termsOfArray);
+            arrayTermsOfArray.add(termsOfArray);
+        }
+    }
+
+    /**
+     * An equation on a slot whose variable it does not depend on leaves a zero on the diagonal, around which a
+     * factorisation has to pivot. Two kinds of equations would:
+     * <ul>
+     * <li>one that does not depend on the variable it is paired with: the two equations that tie the buses of a zero
+     * impedance branch together, paired with the flows of the branch, or the balance of a bus that only such
+     * branches connect;</li>
+     * <li>one that a control sends to the slot of a variable it does not depend on: the reactive balance of a bus
+     * whose voltage is held by a shunt of another bus, sent to the susceptance of that shunt.</li>
+     * </ul>
+     * Such an equation takes the slot of a variable it depends on instead, and the equation paired with that slot the
+     * slot the first one leaves: the equation of the branch goes to the angle of a bus and the balance of that bus to
+     * the flow of the branch; the balance of the controlled bus goes to the voltage of the bus of the shunt, and the
+     * balance of that bus to the susceptance. An equation only moves to a variable of the kind of its own. These moves
+     * are added to the candidates, so that the pattern holds them from the start. The placement then finds, in each
+     * state, which ones to make.
+     */
+    private void addCandidatesAgainstZeroDiagonals(Map<Integer, TIntArrayList> candidateSlots, Placement<V, E> placement) {
+        ChainSearch search = new ChainSearch(candidateSlots, placement);
+        List<int[]> independent = new ArrayList<>();
+        candidateSlots.forEach((equation, slotList) -> {
+            for (int i = 0; i < slotList.size(); i++) {
+                if (Arrays.binarySearch(rows[equation], slotList.getQuick(i)) < 0) {
+                    independent.add(new int[] {equation, slotList.getQuick(i)});
+                }
+            }
+        });
+        independent.sort(Comparator.<int[]>comparingInt(pair -> pair[0]).thenComparingInt(pair -> pair[1]));
+        for (int[] pair : independent) {
+            search.addChains(pair[0], pair[1]);
+        }
+        for (int equation = 0; equation < equationCount; equation++) {
+            if (ownSlot[equation] >= 0 && rows[equation].length > 0 && !dependsOnOwnSlot[equation]) {
+                search.addChains(equation, ownSlot[equation]);
             }
         }
+    }
+
+    /**
+     * The search of the moves that bring to a slot an equation which depends on its variable, when the equation that
+     * should take the slot does not: this one takes the slot of a variable it depends on, the equation paired with
+     * that slot the slot of a variable it depends on in turn, and so on until one depends on the variable of the first
+     * slot. Most often the first equation paired with a slot is enough: a chain of one move each way, an exchange.
+     */
+    private final class ChainSearch {
+
+        /** How many equations a search visits at most: it gives up on a slot that nothing close depends on. */
+        private static final int MAX_VISITED_COUNT = 256;
+
+        private final Map<Integer, TIntArrayList> candidateSlots;
+        private final int[] kind = new int[variables.size()];
+        private final TIntArrayList[] pairedWith;
+        private final int[] visited = new int[equationCount];
+        private final int[] previous = new int[equationCount];
+        private final int[] slotTaken = new int[equationCount];
+        private final TIntArrayList queue = new TIntArrayList();
+        private int stamp;
+
+        private ChainSearch(Map<Integer, TIntArrayList> candidateSlots, Placement<V, E> placement) {
+            this.candidateSlots = candidateSlots;
+            for (int slot = 0; slot < kind.length; slot++) {
+                kind[slot] = placement.kind(variables.get(slot).getType());
+            }
+            pairedWith = new TIntArrayList[variables.size()];
+            for (int equation = 0; equation < equationCount; equation++) {
+                int own = ownSlot[equation];
+                if (own >= 0) {
+                    if (pairedWith[own] == null) {
+                        pairedWith[own] = new TIntArrayList(2);
+                    }
+                    pairedWith[own].add(equation);
+                }
+            }
+        }
+
+        /** Adds to the candidates the moves of the shortest chains from the equation to the slot. */
+        private void addChains(int first, int target) {
+            stamp++;
+            queue.resetQuick();
+            queue.add(first);
+            visited[first] = stamp;
+            previous[first] = -1;
+            boolean found = false;
+            int levelEnd = 1;
+            for (int head = 0; head < queue.size() && queue.size() <= MAX_VISITED_COUNT; head++) {
+                if (head == levelEnd) {
+                    if (found) {
+                        return;
+                    }
+                    levelEnd = queue.size();
+                }
+                found |= visit(queue.getQuick(head), target);
+            }
+        }
+
+        /**
+         * Looks at the equations paired with the variables an equation depends on, among the variables of the kind of
+         * its own. True when one of these equations ends a chain.
+         */
+        private boolean visit(int equation, int target) {
+            boolean found = false;
+            int ownKind = kind[ownSlot[equation] >= 0 ? ownSlot[equation] : target];
+            for (int slot : rows[equation]) {
+                if (slot == target || slot == ownSlot[equation] || kind[slot] != ownKind || pairedWith[slot] == null) {
+                    continue;
+                }
+                for (int i = 0; i < pairedWith[slot].size(); i++) {
+                    int other = pairedWith[slot].getQuick(i);
+                    if (kind[target] == kind[slot] && Arrays.binarySearch(rows[other], target) >= 0) {
+                        found = true;
+                        addCandidate(other, target);
+                        addCandidate(equation, slot);
+                        for (int e = equation; previous[e] >= 0; e = previous[e]) {
+                            addCandidate(previous[e], slotTaken[e]);
+                        }
+                    } else if (visited[other] != stamp) {
+                        visited[other] = stamp;
+                        previous[other] = equation;
+                        slotTaken[other] = slot;
+                        queue.add(other);
+                    }
+                }
+            }
+            return found;
+        }
+
+        private void addCandidate(int equation, int slot) {
+            movesInChain[equation] = true;
+            if (slot != ownSlot[equation]) {
+                candidateSlots.computeIfAbsent(equation, e -> new TIntArrayList()).add(slot);
+            }
+        }
+    }
+
+    /**
+     * True when the equation depends on the variable of the slot. For an equation that takes part in a chain of moves
+     * this is asked of its active terms: around zero impedance branches the answer changes with the state.
+     */
+    boolean dependsOn(int equation, int slot) {
+        if (movesInChain[equation]) {
+            return dependsOnNow(equation, slot);
+        }
+        return slot == ownSlot[equation] ? dependsOnOwnSlot[equation] : Arrays.binarySearch(rows[equation], slot) >= 0;
+    }
+
+    /** True when a term of the equation that is active now depends on the variable of the slot. */
+    boolean dependsOnNow(int equation, int slot) {
+        ObjectTerms<V, E> compiled = objectTerms.get(equation);
+        if (compiled != null) {
+            for (int t = 0; t < compiled.row.length; t++) {
+                if (contains(compiled.row[t], slot) && compiled.terms.get(t).isActive()) {
+                    return true;
+                }
+            }
+        }
+        if (equation >= singleEquations.size()) {
+            int a = getArrayIndex(equation);
+            int element = equation - arrayFirstEquation[a];
+            for (ArrayTerms<V, E> terms : arrayTermsOfArray.get(a)) {
+                TIntArrayList termNums = terms.termArray.getTermNumsForEquationElementNum(element);
+                for (int i = 0; i < termNums.size(); i++) {
+                    int term = termNums.getQuick(i);
+                    if (contains(terms.row[term], slot) && terms.termArray.isTermActive(term)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean contains(int[] values, int value) {
+        for (int v : values) {
+            if (v == value) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** The object terms of an equation with the slots of their variables; null when it has none or when a variable has no slot. */
@@ -389,6 +583,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             }
         }
         rows[equation] = sortedDistinct(all);
+        dependsOnOwnSlot[equation] = ownSlot[equation] >= 0 && Arrays.binarySearch(rows[equation], ownSlot[equation]) >= 0;
         objectTerms.set(equation, compileObjectTerms(equation));
         return true;
     }
@@ -523,7 +718,10 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         return objectTerms.get(equation);
     }
 
-    /** The slots the equation may take besides its own, as its {@link Placement} gives them. */
+    /**
+     * The slots the equation may take besides its own: those its {@link Placement} gives, and those of the moves that
+     * keep zeros off the diagonal.
+     */
     int[] getCandidates(int equation) {
         return candidates[equation];
     }

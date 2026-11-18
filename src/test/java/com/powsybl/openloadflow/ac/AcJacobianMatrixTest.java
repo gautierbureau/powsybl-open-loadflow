@@ -26,7 +26,9 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
 import com.powsybl.openloadflow.equations.JacobianMatrix;
+import com.powsybl.openloadflow.equations.fixed.FixedJacobian;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
+import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.ZeroImpedanceNetworkFactory;
@@ -183,6 +185,37 @@ class AcJacobianMatrixTest {
         Network network = ZeroImpedanceNetworkFactory.createWithVoltageControl();
         LoadFlowParameters parameters = new LoadFlowParameters().setDistributedSlack(false);
         assertEquals(1, countMatrices(network, parameters, List.of("l01", "l23", "l12")));
+    }
+
+    /**
+     * The equation that ties the angles of the two buses of a zero impedance line is paired with the flow of the line,
+     * which it does not depend on: on its own slot it would leave a zero on the diagonal, and the decomposition would
+     * pivot around it. It exchanges its slot with the balance of one of the two buses instead. So when the line is
+     * lost, or comes back, the pivots of the first factorisation still stand: no new ones are chosen.
+     */
+    @Test
+    void noZeroOnTheDiagonalAroundZeroImpedanceLines() {
+        Network network = ZeroImpedanceNetworkFactory.createWithVoltageControl();
+        LoadFlowParameters parameters = new LoadFlowParameters().setDistributedSlack(false);
+        AcLoadFlowParameters acParameters = OpenLoadFlowParameters.createAcParameters(network, parameters,
+                OpenLoadFlowParameters.create(parameters), new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>(), false, false);
+        LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
+        try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters)) {
+            FixedJacobian<AcVariableType, AcEquationType> jacobian = ((AcJacobianMatrix) context.getJacobianMatrix()).getFixedJacobian();
+            assertEquals(AcSolverStatus.CONVERGED, new AcloadFlowEngine(context).run().getSolverStatus());
+            assertEquals(0, jacobian.getZeroDiagonalCount());
+            for (String lineId : List.of("l12", "l23")) {
+                LfBranch line = lfNetwork.getBranchById(lineId);
+                line.setDisabled(true);
+                assertEquals(AcSolverStatus.CONVERGED, new AcloadFlowEngine(context).run().getSolverStatus());
+                assertEquals(0, jacobian.getZeroDiagonalCount());
+                line.setDisabled(false);
+                assertEquals(AcSolverStatus.CONVERGED, new AcloadFlowEngine(context).run().getSolverStatus());
+                assertEquals(0, jacobian.getZeroDiagonalCount());
+            }
+            assertEquals(1, jacobian.getAnalysisCount());
+            assertEquals(0, jacobian.getPivotingCount());
+        }
     }
 
     /**
