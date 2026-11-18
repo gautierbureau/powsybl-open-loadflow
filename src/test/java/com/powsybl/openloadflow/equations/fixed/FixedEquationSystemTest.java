@@ -367,6 +367,28 @@ class FixedEquationSystemTest {
         }
     }
 
+    /**
+     * OLF holds its single equations in a hash map whose order changes from one run to the next. The structure numbers
+     * them by type and element: where several placements are possible the choice follows the numbers, and two runs
+     * must make the same one.
+     */
+    @Test
+    void numbersTheSingleEquationsByTypeAndElement() {
+        Network network = ZeroImpedanceNetworkFactory.createWithVoltageControl();
+        AcLoadFlowParameters acParameters = acParameters(network, new LoadFlowParameters(), false, true);
+        LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
+        try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
+             FixedEquationSystem<AcVariableType, AcEquationType> fixed =
+                     new FixedEquationSystem<>(context.getEquationSystem(), new AcPlacement(lfNetwork), FixedEquationSystem.Scope.ALL)) {
+            FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
+            assertTrue(structure.getSingleEquationCount() > 10);
+            for (int equation = 1; equation < structure.getSingleEquationCount(); equation++) {
+                int types = structure.getType(equation - 1).compareTo(structure.getType(equation));
+                assertTrue(types < 0 || types == 0 && structure.getElementNum(equation - 1) < structure.getElementNum(equation));
+            }
+        }
+    }
+
     private static String equationOn(AcLoadFlowContext context, FixedEquationSystem<AcVariableType, AcEquationType> fixed,
                                      AcVariableType variableType, int elementNum) {
         FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
