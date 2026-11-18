@@ -41,6 +41,16 @@ public class BusDcState extends ElementState<LfBus> {
             load.setAbsVariableTargetP(absVariableLoadTargetP);
             load.setOriginalLoadsDisablingStatus(new HashMap<>(loadsDisablingStatus));
         }
+
+        protected String findDifference(LfLoad load) {
+            if (!same(load.getTargetP(), loadTargetP)) {
+                return "target P of load " + load.getId();
+            }
+            if (!same(load.getAbsVariableTargetP(), absVariableLoadTargetP)) {
+                return "variable target P of load " + load.getId();
+            }
+            return load.getOriginalLoadsDisablingStatus().equals(loadsDisablingStatus) ? null : "disabled loads of load " + load.getId();
+        }
     }
 
     public BusDcState(LfBus bus) {
@@ -67,6 +77,34 @@ public class BusDcState extends ElementState<LfBus> {
             LfLoad load = element.getLoads().get(i);
             loadStates.get(i).restore(load);
         }
+    }
+
+    @Override
+    String findDifference() {
+        String difference = super.findDifference();
+        for (LfGenerator generator : element.getGenerators()) {
+            if (difference == null) {
+                difference = findDifference(generator);
+            }
+        }
+        for (int i = 0; i < loadStates.size() && difference == null; i++) {
+            difference = loadStates.get(i).findDifference(element.getLoads().get(i));
+        }
+        return difference;
+    }
+
+    private String findDifference(LfGenerator generator) {
+        String id = generator.getId();
+        if (!same(generator.getTargetP(), generatorsTargetP.get(id))) {
+            return "target P of generator " + id;
+        }
+        if (!same(generator.getInitialTargetP(), generatorsInitialTargetP.get(id))) {
+            return "initial target P of generator " + id;
+        }
+        if (generator.isParticipating() != participatingGenerators.get(id)) {
+            return "participation of generator " + id;
+        }
+        return generator.isDisabled() == disablingStatusGenerators.get(id) ? null : "disabling of generator " + id;
     }
 
     public static BusDcState save(LfBus bus) {

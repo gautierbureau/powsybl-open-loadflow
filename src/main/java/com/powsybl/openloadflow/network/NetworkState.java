@@ -70,8 +70,20 @@ public class NetworkState {
         ElementState.restore(hvdcStates);
         ElementState.restore(acDcConverterStates);
         ElementState.restore(areaStates);
-        // Set excluded slack buses of each synchronous network
-        network.getSynchronousNetworks().forEach(scLfNetwork -> scLfNetwork.setExcludedSlackBuses(excludedSlackBuses));
+        restoreExcludedSlackBuses();
+    }
+
+    /**
+     * Sets the excluded slack buses of each synchronous network back. A contingency changes them only when it takes
+     * the slack bus out, and the setter goes through the buses of the synchronous network before it compares: so the
+     * comparison is made here first.
+     */
+    private void restoreExcludedSlackBuses() {
+        for (LfSynchronousNetwork synchronousNetwork : network.getSynchronousNetworks()) {
+            if (!synchronousNetwork.getExcludedSlackBuses().equals(excludedSlackBuses)) {
+                synchronousNetwork.setExcludedSlackBuses(excludedSlackBuses);
+            }
+        }
     }
 
     /**
@@ -120,7 +132,7 @@ public class NetworkState {
         ElementState.restore(hvdcStates);
         ElementState.restore(acDcConverterStates);
         ElementState.restore(areaStates);
-        network.getSynchronousNetworks().forEach(scLfNetwork -> scLfNetwork.setExcludedSlackBuses(excludedSlackBuses));
+        restoreExcludedSlackBuses();
     }
 
     private static <T extends LfElement> void checkSaved(List<? extends ElementState<T>> states, T element) {
@@ -128,6 +140,27 @@ public class NetworkState {
         if (num < 0 || num >= states.size() || states.get(num).element != element) {
             throw new IllegalArgumentException("Element " + element.getId() + " is not part of the saved network state");
         }
+    }
+
+    /**
+     * What differs between a bus or a branch of the network and its saved state, or null when all of them are as they
+     * were saved. A partial restore leaves no difference when it was given every element that changed: this is what
+     * the assertion that follows it checks. HVDC lines and areas are not looked at: a partial restore writes them all.
+     */
+    public String findDifference() {
+        for (BusState state : busStates) {
+            String difference = state.findDifference();
+            if (difference != null) {
+                return "bus " + state.element.getId() + ": " + difference;
+            }
+        }
+        for (BranchState state : branchStates) {
+            String difference = state.findDifference();
+            if (difference != null) {
+                return "branch " + state.element.getId() + ": " + difference;
+            }
+        }
+        return null;
     }
 
     /** Restores the saved voltage magnitude and angle of every bus, and nothing else. */
