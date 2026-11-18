@@ -26,8 +26,10 @@ import com.powsybl.openloadflow.ac.equations.AcPlacement;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.equations.EquationTermArray;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.network.DistributedSlackNetworkFactory;
+import com.powsybl.openloadflow.network.ElementType;
 import com.powsybl.openloadflow.network.HvdcNetworkFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -59,6 +61,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -407,9 +410,9 @@ class FixedEquationSystemTest {
     /**
      * Around a zero impedance line every term held as an object is a coefficient times one variable: the two angles in
      * the equation of the line, its flow in the balances of its two buses. The structure holds them in one table, with
-     * their slot and their coefficient, and evaluates them from it. The equation that shares the reactive power
-     * between the generators that hold one voltage holds terms that are not of this kind, the reactive flows of the
-     * branches of these generators: its object terms are evaluated one by one.
+     * their slot and their coefficient, and evaluates them from it. In a system that is not vectorized, the equation
+     * that shares the reactive power between the generators that hold one voltage holds terms that are not of this
+     * kind, the reactive flows of the branches of these generators: its object terms are evaluated one by one.
      */
     @Test
     void linearTermsAreHeldInATable() {
@@ -453,21 +456,103 @@ class FixedEquationSystemTest {
         }
 
         Network remoteControlNetwork = VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
-        AcLoadFlowParameters remoteControlParameters = acParameters(remoteControlNetwork, new LoadFlowParameters(), false, true);
+        AcLoadFlowParameters remoteControlParameters = acParameters(remoteControlNetwork, new LoadFlowParameters(), false, false);
         LfNetwork remoteControlLfNetwork = Networks.load(remoteControlNetwork, remoteControlParameters.getNetworkParameters()).get(0);
         try (AcLoadFlowContext context = new AcLoadFlowContext(remoteControlLfNetwork, remoteControlParameters);
              FixedEquationSystem<AcVariableType, AcEquationType> fixed =
                      new FixedEquationSystem<>(context.getEquationSystem(), new AcPlacement(remoteControlLfNetwork), FixedEquationSystem.Scope.ALL)) {
             FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
-            int distribution = -1;
-            for (int equation = 0; equation < structure.getSingleEquationCount() && distribution < 0; equation++) {
-                if (structure.getType(equation) == AcEquationType.DISTR_Q) {
-                    distribution = equation;
-                }
-            }
+            int distribution = structure.getNumber(AcEquationType.DISTR_Q, remoteControlLfNetwork.getGeneratorById("g1").getBus().getNum());
             assertTrue(distribution >= 0);
             assertTrue(structure.isMixed(distribution));
             assertTrue(coefficients(structure.getLinearTerms(), distribution, true).isEmpty());
+            assertEquals(0, structure.getElementTerms().terms.size());
+        }
+    }
+
+    /**
+     * The equation that shares the reactive power between the generators that hold one voltage sums the reactive flows
+     * of the branches of these generators, each one times the share of the generator of the equation. In a vectorized
+     * system these flows are elements of the term arrays of the reactive balances, and the equation refers to them. The
+     * structure holds these terms in one table: for each one its array, its element and where its derivatives go, and
+     * evaluates them from the arrays.
+     */
+    @Test
+    void termsThatReferToATermArrayAreHeldInATable() {
+        Network network = VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        AcLoadFlowParameters acParameters = acParameters(network, new LoadFlowParameters(), false, true);
+        LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
+        try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
+             FixedEquationSystem<AcVariableType, AcEquationType> fixed =
+                     new FixedEquationSystem<>(context.getEquationSystem(), new AcPlacement(lfNetwork), FixedEquationSystem.Scope.ALL)) {
+            EquationSystem<AcVariableType, AcEquationType> equationSystem = context.getEquationSystem();
+            FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
+            FixedStructure.ElementTerms<AcVariableType, AcEquationType> elementTerms = structure.getElementTerms();
+            // the three generators are behind three transformers: each equation holds the flow of each transformer
+            assertEquals(9, elementTerms.terms.size());
+            LfBranch transformer = lfNetwork.getBranchById("tr2");
+            LfBus generatorBus = lfNetwork.getGeneratorById("g2").getBus();
+            LfBus controlledBus = transformer.getBus1() == generatorBus ? transformer.getBus2() : transformer.getBus1();
+            LfBus thirdGeneratorBus = lfNetwork.getGeneratorById("g3").getBus();
+            int transformerTerm = -1;
+            for (String generatorId : List.of("g1", "g2", "g3")) {
+                LfBus bus = lfNetwork.getGeneratorById(generatorId).getBus();
+                int distribution = structure.getNumber(AcEquationType.DISTR_Q, bus.getNum());
+                assertFalse(structure.isMixed(distribution));
+                assertEquals(0, structure.getLinearTerms().start[distribution + 1] - structure.getLinearTerms().start[distribution]);
+                assertEquals(3, elementTerms.start[distribution + 1] - elementTerms.start[distribution]);
+                for (int i = elementTerms.start[distribution]; i < elementTerms.start[distribution + 1]; i++) {
+                    assertTrue(elementTerms.active[i]);
+                    // the share of a generator is asked of the bus at each evaluation
+                    assertTrue(Double.isNaN(elementTerms.coefficient[i]));
+                    // the flow depends on the voltage and on the angle of the two buses of the transformer
+                    assertEquals(4, elementTerms.slot[i].length);
+                    assertEquals(ElementType.BRANCH, elementTerms.termArrays.get(elementTerms.termArray[i]).getElementType());
+                    if (bus == thirdGeneratorBus && elementTerms.element[i] == transformer.getNum()) {
+                        transformerTerm = i;
+                    }
+                }
+            }
+            // the flow of the second transformer in the equation of the third generator: at the side of its generator
+            assertTrue(transformerTerm >= 0);
+            assertEquals(Set.of(structure.getSlot(equationSystem.getVariable(generatorBus.getNum(), AcVariableType.BUS_V)),
+                                structure.getSlot(equationSystem.getVariable(generatorBus.getNum(), AcVariableType.BUS_PHI)),
+                                structure.getSlot(equationSystem.getVariable(controlledBus.getNum(), AcVariableType.BUS_V)),
+                                structure.getSlot(equationSystem.getVariable(controlledBus.getNum(), AcVariableType.BUS_PHI))),
+                    Arrays.stream(elementTerms.slot[transformerTerm]).boxed().collect(Collectors.toSet()));
+            check(lfNetwork, context, fixed, "base");
+
+            // its value is the one of the array, and its derivatives those of the array times the share of the third generator
+            fixed.fill();
+            double share = elementTerms.computeCoefficient(transformerTerm);
+            assertEquals(thirdGeneratorBus.getRemoteControlReactivePercent(), share);
+            EquationTermArray<AcVariableType, AcEquationType> flows = elementTerms.termArrays.get(elementTerms.termArray[transformerTerm]);
+            assertEquals((transformer.getBus1() == generatorBus ? transformer.getQ1() : transformer.getQ2()).eval(), flows.eval()[transformer.getNum()]);
+            int distribution = structure.getNumber(AcEquationType.DISTR_Q, thirdGeneratorBus.getNum());
+            assertTrue(fixed.getSlotOfEquation(distribution) >= 0);
+            int checked = 0;
+            for (int k = 0; k < 4; k++) {
+                // of the terms of the equation, only this one depends on the bus of the second generator
+                int slot = elementTerms.slot[transformerTerm][k];
+                if (structure.getVariable(slot).getElementNum() == generatorBus.getNum()) {
+                    double derivative = flows.evalDer()[elementTerms.localIndex[transformerTerm][k]][transformer.getNum()];
+                    assertTrue(derivative != 0);
+                    assertEquals(share * derivative, fixed.getValues()[elementTerms.destination[transformerTerm][k]]);
+                    checked++;
+                }
+            }
+            assertEquals(2, checked);
+
+            // the second transformer is lost: OLF turns its terms off, and the table follows when the equations are placed again
+            transformer.setDisabled(true);
+            generatorBus.setDisabled(true);
+            check(lfNetwork, context, fixed, "second generator lost");
+            assertSame(elementTerms, fixed.getStructure().getElementTerms());
+            assertFalse(elementTerms.active[transformerTerm]);
+            transformer.setDisabled(false);
+            generatorBus.setDisabled(false);
+            check(lfNetwork, context, fixed, "second generator back");
+            assertTrue(elementTerms.active[transformerTerm]);
         }
     }
 
