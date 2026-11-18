@@ -99,13 +99,11 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
                 targets[column] = network.getShunt(elementNum).getB();
                 break;
 
-            case BRANCH_TARGET_P1:
-            case BRANCH_TARGET_P2:
+            case BRANCH_TARGET_P:
                 targets[column] = LfBranch.getDiscretePhaseControlTarget(network.getBranch(elementNum), TransformerPhaseControl.Unit.MW);
                 break;
 
-            case BRANCH_TARGET_Q1:
-            case BRANCH_TARGET_Q2:
+            case BRANCH_TARGET_Q:
                 targets[column] = getReactivePowerControlTarget(network.getBranch(elementNum));
                 break;
 
