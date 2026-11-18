@@ -25,7 +25,9 @@ import gnu.trove.set.hash.TIntHashSet;
 import java.io.IOException;
 import java.io.Writer;
 import java.util.Arrays;
+import java.util.BitSet;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -77,6 +79,8 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     private FixedStructure<V, E> discarded;
     private final TIntArrayList placedEquations = new TIntArrayList();
     private final TIntArrayList placedSlots = new TIntArrayList();
+    /** The placements the pattern holds: the equations on their own slot as a bit set, the others as pairs. */
+    private final BitSet placedOnOwnSlot = new BitSet();
     private final Set<Long> placed = new HashSet<>();
     private boolean patternValid;
     private boolean placementValid;
@@ -122,6 +126,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             balance = new double[structure.getSlotCount()];
             equationValues = new double[structure.getSlotCount()];
             placed.clear();
+            placedOnOwnSlot.clear();
             placedEquations.resetQuick();
             placedSlots.resetQuick();
             patternValid = discarded != null && structure.adoptPattern(discarded);
@@ -169,12 +174,18 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     }
 
     private void addToPattern(int equation, int slot) {
-        if (placed.add(((long) equation << 32) | slot)) {
-            placedEquations.add(equation);
-            placedSlots.add(slot);
-            // the pattern stands when the column already holds the rows of the equation
-            patternValid = patternValid && structure.holds(slot, equation);
+        if (slot == structure.getOwnSlot(equation)) {
+            if (placedOnOwnSlot.get(equation)) {
+                return;
+            }
+            placedOnOwnSlot.set(equation);
+        } else if (!placed.add(((long) equation << 32) | slot)) {
+            return;
         }
+        placedEquations.add(equation);
+        placedSlots.add(slot);
+        // the pattern stands when the column already holds the rows of the equation
+        patternValid = patternValid && structure.holds(slot, equation);
     }
 
     /**
@@ -344,16 +355,29 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
      * bus's: it then has no value, and the result is NaN.
      */
     private double addSingleTerms(double[] jacobianValues, int equation, int column) {
+        FixedStructure.ObjectTerms<V, E> compiled = structure.getObjectTerms(equation);
+        if (compiled == null) {
+            return 0;
+        }
+        boolean own = column == structure.getOwnSlot(equation);
         double value = 0;
-        for (SingleEquationTerm<V, E> term : structure.getSingleTerms(equation)) {
+        for (int t = 0; t < compiled.row.length; t++) {
+            SingleEquationTerm<V, E> term = compiled.terms.get(t);
             if (term.isActive()) {
-                if (column < 0 && !isInSystem(term)) {
+                List<Variable<V>> variables = compiled.variables.get(t);
+                if (column < 0 && !isInSystem(variables)) {
                     return Double.NaN;
                 }
                 value += term.eval();
                 if (column >= 0) {
-                    for (Variable<V> variable : term.getVariables()) {
-                        add(jacobianValues, column, structure.getSlot(variable), term.der(variable));
+                    for (int k = 0; k < compiled.row[t].length; k++) {
+                        double derivative = term.der(variables.get(k));
+                        if (own) {
+                            jacobianValues[compiled.destination[t][k]] += derivative;
+                        } else {
+                            // an equation that took another slot: rare, so its entries are searched
+                            add(jacobianValues, column, compiled.row[t][k], derivative);
+                        }
                     }
                 }
             }
@@ -361,9 +385,9 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
         return value;
     }
 
-    private boolean isInSystem(SingleEquationTerm<V, E> term) {
-        for (Variable<V> variable : term.getVariables()) {
-            if (variable.getRow() < 0) {
+    private boolean isInSystem(List<Variable<V>> variables) {
+        for (int k = 0; k < variables.size(); k++) {
+            if (variables.get(k).getRow() < 0) {
                 return false;
             }
         }
