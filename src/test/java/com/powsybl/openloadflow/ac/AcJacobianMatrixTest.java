@@ -37,6 +37,8 @@ import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.SecurityAnalysisRunParameters;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.List;
 import java.util.Random;
@@ -181,5 +183,18 @@ class AcJacobianMatrixTest {
         Network network = ZeroImpedanceNetworkFactory.createWithVoltageControl();
         LoadFlowParameters parameters = new LoadFlowParameters().setDistributedSlack(false);
         assertEquals(1, countMatrices(network, parameters, List.of("l01", "l23", "l12")));
+    }
+
+    /**
+     * A transformer holds the voltage of a bus, from the first load flow or once the generators have settled. The
+     * reactive balance of that bus then goes to the slot of the tap: a candidate, in the pattern from the start.
+     */
+    @ParameterizedTest
+    @EnumSource(value = OpenLoadFlowParameters.TransformerVoltageControlMode.class, names = {"WITH_GENERATOR_VOLTAGE_CONTROL", "AFTER_GENERATOR_VOLTAGE_CONTROL"})
+    void securityAnalysisOnOneMatrixWithTransformerVoltageControl(OpenLoadFlowParameters.TransformerVoltageControlMode mode) {
+        Network network = ZeroImpedanceNetworkFactory.createWithVoltageControl();
+        LoadFlowParameters parameters = new LoadFlowParameters().setDistributedSlack(false).setTransformerVoltageControlOn(true);
+        OpenLoadFlowParameters.create(parameters).setTransformerVoltageControlMode(mode);
+        assertEquals(1, countMatrices(network, parameters, List.of("l01", "l23")));
     }
 }

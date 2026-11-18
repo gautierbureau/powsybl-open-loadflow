@@ -73,6 +73,8 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         }
     }
 
+    private static final int[] NO_SLOT = new int[0];
+
     private final List<Variable<V>> variables;
     private final Map<Variable<V>, Integer> slots = new HashMap<>();
 
@@ -86,6 +88,8 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private final int[][] rows;
     private final int[] ownSlot;
     private final boolean[] fixesVariable;
+    /** For each equation, the slots it may take besides its own, sorted: empty for most. */
+    private final int[][] candidates;
 
     private final List<ArrayTerms<V, E>> arrayTerms = new ArrayList<>();
     private final int[] arrayElementsWithSingleTerms;
@@ -141,6 +145,18 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             }
         }
         arrayElementsWithSingleTerms = withSingleTerms.toArray();
+
+        candidates = new int[equationCount][];
+        Arrays.fill(candidates, NO_SLOT);
+        Map<Integer, TIntArrayList> candidateSlots = new HashMap<>();
+        placement.forEachCandidate((equationType, equationElementNum, variableType, variableElementNum) -> {
+            int equation = getNumber(equationType, equationElementNum);
+            Integer slot = slotByTypeAndElement.get(key(variableType, variableElementNum));
+            if (equation >= 0 && slot != null && slot != ownSlot[equation]) {
+                candidateSlots.computeIfAbsent(equation, e -> new TIntArrayList()).add(slot);
+            }
+        });
+        candidateSlots.forEach((equation, slotList) -> candidates[equation] = sortedDistinct(slotList));
 
         for (int a = 0; a < arrays.size(); a++) {
             for (EquationTermArray<V, E> termArray : arrays.get(a).getTermArrays()) {
@@ -224,6 +240,25 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         for (int slot = 0; slot < slotCount; slot++) {
             diagonal[slot] = index(slot, slot);
         }
+        setDestinations();
+    }
+
+    /**
+     * Takes the pattern of the structure this one replaces, when both have the same slots: the system was compiled
+     * again, for an equation it had not seen, and its matrix can stay as long as the pattern holds what is placed.
+     */
+    boolean adoptPattern(FixedStructure<V, E> previous) {
+        if (previous.rowIndices == null || !variables.equals(previous.variables)) {
+            return false;
+        }
+        columnStart = previous.columnStart;
+        rowIndices = previous.rowIndices;
+        diagonal = previous.diagonal;
+        setDestinations();
+        return true;
+    }
+
+    private void setDestinations() {
         for (ArrayTerms<V, E> terms : arrayTerms) {
             for (int term = 0; term < terms.equation.length; term++) {
                 for (int k = 0; k < terms.row[term].length; k++) {
@@ -231,6 +266,20 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
                 }
             }
         }
+    }
+
+    /** The number of the equation of a type and an element, single or element of an array; -1 when there is none. */
+    private int getNumber(E type, int elementNum) {
+        Integer number = singleEquationNumbers.get(key(type, elementNum));
+        if (number != null) {
+            return number;
+        }
+        for (int a = 0; a < arrays.size(); a++) {
+            if (arrays.get(a).getType() == type && elementNum < arrays.get(a).getElementCount()) {
+                return arrayFirstEquation[a] + elementNum;
+            }
+        }
+        return -1;
     }
 
     /**
@@ -407,6 +456,11 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
 
     boolean fixesVariable(int equation) {
         return fixesVariable[equation];
+    }
+
+    /** The slots the equation may take besides its own, as its {@link Placement} gives them. */
+    int[] getCandidates(int equation) {
+        return candidates[equation];
     }
 
     /** The slots of the variables the equation depends on, sorted. */
