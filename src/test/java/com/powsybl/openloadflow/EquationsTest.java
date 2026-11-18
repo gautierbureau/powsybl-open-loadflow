@@ -194,6 +194,14 @@ class EquationsTest {
         assertArrayEquals(new double[]{0.3420075216110214, Double.NaN, Double.NaN, 0.31907275662806295, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN},
                 eval(new OpenBranchSide2CurrentMagnitudeEquationTerm(branch, bus2, variableSet, false), variables, sv));
 
+        // the public open branch current functions give the terms' values from explicit inputs
+        var openI2Eq = new OpenBranchSide1CurrentMagnitudeEquationTerm(branch, bus2, variableSet);
+        openI2Eq.setStateVector(sv);
+        assertEquals(openI2Eq.eval(), OpenBranchSide1CurrentMagnitudeEquationTerm.i2(Y, Math.cos(KSI), Math.sin(KSI), G_1, B_1, G_2, B_2, V_2, PH_2), 0);
+        var openI1Eq = new OpenBranchSide2CurrentMagnitudeEquationTerm(branch, bus1, variableSet, false);
+        openI1Eq.setStateVector(sv);
+        assertEquals(openI1Eq.eval(), OpenBranchSide2CurrentMagnitudeEquationTerm.i1(Y, Math.cos(KSI), Math.sin(KSI), G_1, B_1, G_2, B_2, V_1, PH_1, R_1), 0);
+
         // assert current equation is consistent with active and reactive power ones
         var p1Eq = new ClosedBranchSide1ActiveFlowEquationTerm(branch, bus1, bus2, variableSet, true, true);
         p1Eq.setStateVector(sv);
