@@ -60,6 +60,11 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         this.matrixFactory = matrixFactory;
     }
 
+    /** The fixed view of the equation system the matrix is filled from. */
+    public FixedEquationSystemIndex<V, E> getFixedEquationSystemIndex() {
+        return fixed;
+    }
+
     /** To call when the state, an activation or a constant of the equation system changes. */
     public void invalidate() {
         valid = false;

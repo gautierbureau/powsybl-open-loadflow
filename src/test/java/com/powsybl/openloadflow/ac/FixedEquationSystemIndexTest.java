@@ -24,6 +24,7 @@ import com.powsybl.openloadflow.ac.equations.AcStateVectorUtil;
 import com.powsybl.openloadflow.ac.equations.AcVariablePairing;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.equations.EquationVector;
 import com.powsybl.openloadflow.equations.fixed.*;
 import com.powsybl.openloadflow.equations.fixed.FixedStructures;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
@@ -59,6 +60,7 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -496,7 +498,20 @@ class FixedEquationSystemIndexTest {
         equationSystem.getStateVector().set(x);
 
         DenseMatrix reference = (DenseMatrix) context.getJacobianMatrix().getMatrix();
-        double[] referenceValues = context.getEquationVector().getArray();
+        // OLF's own equation vector: the one of the context is computed from a fixed equation system
+        double[] referenceValues;
+        try (EquationVector<AcVariableType, AcEquationType> equationVector = new EquationVector<>(equationSystem)) {
+            referenceValues = equationVector.getArray().clone();
+        }
+        // the equations evaluated from the arrays of the structure: OLF's values, to the last bit
+        double[] values = new double[referenceValues.length];
+        assertEquals(referenceValues.length, fixed.evalEquations(values), state);
+        for (int column = 0; column < values.length; column++) {
+            assertEquals(Double.doubleToLongBits(referenceValues[column]), Double.doubleToLongBits(values[column]),
+                    state + ", column " + column + ": " + referenceValues[column] + " against " + values[column]);
+        }
+        assertArrayEquals(referenceValues, context.getEquationVector().getArray(), state);
+        assertEquals(0, ((FixedEquationVector<AcVariableType, AcEquationType>) context.getEquationVector()).getFallbackCount(), state);
         fixed.updateDer();
         FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
         int variableCount = structure.getVariableCount();
@@ -595,7 +610,10 @@ class FixedEquationSystemIndexTest {
     }
 
     private static void checkNewtonStep(AcLoadFlowContext context, FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed) {
-        double[] referenceStep = context.getEquationVector().getArray().clone();
+        double[] referenceStep;
+        try (EquationVector<AcVariableType, AcEquationType> equationVector = new EquationVector<>(context.getEquationSystem())) {
+            referenceStep = equationVector.getArray().clone();
+        }
         double[] targets = context.getTargetVector().getArray();
         for (int i = 0; i < referenceStep.length; i++) {
             referenceStep[i] -= targets[i];
