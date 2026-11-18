@@ -39,6 +39,8 @@ public class BusDcState extends ElementState<LfBus> {
         protected void restore(LfLoad load) {
             load.setTargetP(loadTargetP);
             load.setAbsVariableTargetP(absVariableLoadTargetP);
+            // A copy again: handing the saved map itself to the load would let the next contingency's
+            // setOriginalLoadDisabled write into the SAVED state, and every later restore would bring it back.
             load.setOriginalLoadsDisablingStatus(new HashMap<>(loadsDisablingStatus));
         }
     }
