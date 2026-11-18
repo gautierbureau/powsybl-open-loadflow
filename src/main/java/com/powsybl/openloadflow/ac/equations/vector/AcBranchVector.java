@@ -13,6 +13,7 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.PiModel;
 import com.powsybl.openloadflow.util.Evaluable;
+import gnu.trove.list.array.TIntArrayList;
 import net.jafama.FastMath;
 
 import java.util.List;
@@ -93,6 +94,27 @@ public class AcBranchVector {
     final double[] dq2da1;
     final double[] dq2dr1;
 
+    /** True for a branch that has terms for when it is open at side 1, and the numbers of these branches. */
+    final boolean[] openableSide1;
+    final TIntArrayList openableSide1Nums = new TIntArrayList();
+
+    /** True for a branch that has terms for when it is open at side 2, and the numbers of these branches. */
+    final boolean[] openableSide2;
+    final TIntArrayList openableSide2Nums = new TIntArrayList();
+
+    /** The flow at side 2 of a branch open at side 1, and its derivative. */
+    final double[] openP2;
+    final double[] openDp2dv2;
+    final double[] openQ2;
+    final double[] openDq2dv2;
+
+    /** The flow at side 1 of a branch open at side 2, its derivative, and the ratio of the branch they were computed with. */
+    final double[] openP1;
+    final double[] openDp1dv1;
+    final double[] openQ1;
+    final double[] openDq1dv1;
+    final double[] openR1;
+
     public AcBranchVector(List<LfBranch> branches, AcEquationSystemCreationParameters creationParameters) {
         int size = branches.size();
         bus1Num = new int[size];
@@ -159,6 +181,20 @@ public class AcBranchVector {
         dq2da1 = new double[size];
         dq2dr1 = new double[size];
 
+        openableSide1 = new boolean[size];
+        openableSide2 = new boolean[size];
+
+        openP2 = new double[size];
+        openDp2dv2 = new double[size];
+        openQ2 = new double[size];
+        openDq2dv2 = new double[size];
+
+        openP1 = new double[size];
+        openDp1dv1 = new double[size];
+        openQ1 = new double[size];
+        openDq1dv1 = new double[size];
+        openR1 = new double[size];
+
         for (int i = 0; i < branches.size(); i++) {
             LfBranch branch = branches.get(i);
             LfBus bus1 = branch.getBus1();
@@ -188,6 +224,28 @@ public class AcBranchVector {
 
     public int getSize() {
         return disabled.length;
+    }
+
+    /**
+     * Says that a branch has terms for when it is open at side 1, when they are created: its flow at side 2 is then
+     * computed at each state update.
+     */
+    void setOpenableSide1(int branchNum) {
+        if (!openableSide1[branchNum]) {
+            openableSide1[branchNum] = true;
+            openableSide1Nums.add(branchNum);
+        }
+    }
+
+    /**
+     * Says that a branch has terms for when it is open at side 2, when they are created: its flow at side 1 is then
+     * computed at each state update.
+     */
+    void setOpenableSide2(int branchNum) {
+        if (!openableSide2[branchNum]) {
+            openableSide2[branchNum] = true;
+            openableSide2Nums.add(branchNum);
+        }
     }
 
     public Evaluable getP1(int branchNum) {

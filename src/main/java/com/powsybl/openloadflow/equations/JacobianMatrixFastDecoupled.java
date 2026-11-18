@@ -15,6 +15,8 @@ import com.powsybl.openloadflow.ac.equations.vector.ClosedBranchSide1ActiveFlowE
 import com.powsybl.openloadflow.ac.equations.vector.ClosedBranchSide1ReactiveFlowEquationTermArrayEvaluator;
 import com.powsybl.openloadflow.ac.equations.vector.ClosedBranchSide2ActiveFlowEquationTermArrayEvaluator;
 import com.powsybl.openloadflow.ac.equations.vector.ClosedBranchSide2ReactiveFlowEquationTermArrayEvaluator;
+import com.powsybl.openloadflow.ac.equations.vector.OpenBranchSide1ReactiveFlowEquationTermArrayEvaluator;
+import com.powsybl.openloadflow.ac.equations.vector.OpenBranchSide2ReactiveFlowEquationTermArrayEvaluator;
 import com.powsybl.openloadflow.ac.equations.vector.ShuntCompensatorReactiveFlowEquationTermArrayEvaluator;
 
 import java.util.*;
@@ -82,6 +84,8 @@ public class JacobianMatrixFastDecoupled
             ClosedBranchSide1ReactiveFlowEquationTermArrayEvaluator.class.getName(),
             ClosedBranchSide2ActiveFlowEquationTermArrayEvaluator.class.getName(),
             ClosedBranchSide2ReactiveFlowEquationTermArrayEvaluator.class.getName(),
+            OpenBranchSide1ReactiveFlowEquationTermArrayEvaluator.class.getName(),
+            OpenBranchSide2ReactiveFlowEquationTermArrayEvaluator.class.getName(),
             ShuntCompensatorReactiveFlowEquationTermArrayEvaluator.class.getName()
     );
 
@@ -109,6 +113,10 @@ public class JacobianMatrixFastDecoupled
                     new ClosedBranchSide1ReactiveFlowFastDecoupledEquationTerm(closedQ1Evaluator, termArrayElement.termElementNum);
                 case ClosedBranchSide2ReactiveFlowEquationTermArrayEvaluator closedQ2Evaluator ->
                     new ClosedBranchSide2ReactiveFlowFastDecoupledEquationTerm(closedQ2Evaluator, termArrayElement.termElementNum);
+                case OpenBranchSide1ReactiveFlowEquationTermArrayEvaluator openQ2Evaluator ->
+                    new OpenBranchSide1ReactiveFlowFastDecoupledEquationTerm(openQ2Evaluator, termArrayElement.termElementNum);
+                case OpenBranchSide2ReactiveFlowEquationTermArrayEvaluator openQ1Evaluator ->
+                    new OpenBranchSide2ReactiveFlowFastDecoupledEquationTerm(openQ1Evaluator, termArrayElement.termElementNum);
                 case ShuntCompensatorReactiveFlowEquationTermArrayEvaluator shuntQEvaluator ->
                     new ShuntCompensatorReactiveFlowFastDecoupledEquationTerm(shuntQEvaluator, termArrayElement.termElementNum);
                 case null, default -> throw new IllegalStateException("Unexpected term array class: " + term.getClass());
