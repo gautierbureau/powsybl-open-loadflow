@@ -17,7 +17,7 @@ import com.powsybl.openloadflow.network.LfNetwork;
  */
 public class DcOuterLoopContext extends AbstractOuterLoopContext<DcVariableType, DcEquationType, DcLoadFlowParameters, DcLoadFlowContext> {
 
-    DcOuterLoopContext(LfNetwork network) {
+    public DcOuterLoopContext(LfNetwork network) {
         super(network);
     }
 
