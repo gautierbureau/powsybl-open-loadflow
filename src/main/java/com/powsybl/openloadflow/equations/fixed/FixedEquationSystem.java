@@ -89,6 +89,12 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
 
     private int[] slotOfEquation;
     private int[] equationOfSlot;
+    /** The row of the variable of each slot in OLF's index, as of the last placement: negative when it is not in the system. */
+    private int[] rowOfSlot;
+    /** OLF's state vector, by row, during a fill. */
+    private double[] state;
+    /** The linear terms of the structure, with their activity as of the last placement. */
+    private FixedStructure.LinearTerms<V, E> linearTerms;
     /** For the search of a placement: the slots already tried for the equation being placed. */
     private int[] visited;
     private int stamp;
@@ -122,6 +128,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             structureBuildCount++;
             slotOfEquation = new int[structure.getEquationCount()];
             equationOfSlot = new int[structure.getSlotCount()];
+            rowOfSlot = new int[structure.getSlotCount()];
             visited = new int[structure.getSlotCount()];
             stamp = 0;
             balance = new double[structure.getSlotCount()];
@@ -144,6 +151,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
                 }
             }
         }
+        boolean placedAgain = !placementValid;
         if (!placementValid) {
             place();
             placementValid = true;
@@ -155,6 +163,12 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             patternValid = true;
         }
         structure.updateDestinations();
+        // an activation always calls for a placement: the activity of the linear terms is read again with it
+        FixedStructure.LinearTerms<V, E> current = structure.getLinearTerms();
+        if (placedAgain && current == linearTerms) {
+            current.updateActivity();
+        }
+        linearTerms = current;
     }
 
     /**
@@ -201,6 +215,9 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
      */
     private void place() {
         equationSystem.getIndex().getSortedVariablesToFind();
+        for (int slot = 0; slot < rowOfSlot.length; slot++) {
+            rowOfSlot[slot] = structure.getVariable(slot).getRow();
+        }
         Arrays.fill(slotOfEquation, -1);
         Arrays.fill(equationOfSlot, -1);
         TIntArrayList displaced = new TIntArrayList();
@@ -296,7 +313,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     }
 
     private boolean isLive(int slot) {
-        return structure.getVariable(slot).getRow() >= 0;
+        return rowOfSlot[slot] >= 0;
     }
 
     private boolean isFree(int slot) {
@@ -339,6 +356,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
         }
         Arrays.fill(jacobianValues, 0, structure.getValueCount(), 0);
         Arrays.fill(balance, 0);
+        state = equationSystem.getStateVector().get();
         for (FixedStructure.ArrayTerms<V, E> terms : structure.getArrayTerms()) {
             double[] termValues = terms.termArray.eval();
             double[][] termDerivatives = terms.termArray.evalDer();
@@ -395,6 +413,9 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
      * bus's: it then has no value, and the result is NaN.
      */
     private double addSingleTerms(double[] jacobianValues, int equation, int column) {
+        if (!structure.isMixed(equation)) {
+            return addLinearTerms(jacobianValues, equation, column);
+        }
         FixedStructure.ObjectTerms<V, E> compiled = structure.getObjectTerms(equation);
         if (compiled == null) {
             return 0;
@@ -412,6 +433,32 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
                     for (int k = 0; k < compiled.row[t].length; k++) {
                         jacobianValues[compiled.destination[t][k]] += term.der(variables.get(k));
                     }
+                }
+            }
+        }
+        return value;
+    }
+
+    /**
+     * The same for an equation whose object terms are all linear, from the arrays of the structure: a coefficient
+     * times the value of a variable, and the coefficient as the derivative. No object is called, unless a term
+     * computes its coefficient.
+     */
+    private double addLinearTerms(double[] jacobianValues, int equation, int column) {
+        double value = 0;
+        for (int i = linearTerms.start[equation]; i < linearTerms.start[equation + 1]; i++) {
+            if (linearTerms.active[i]) {
+                int slot = linearTerms.slot[i];
+                if (column < 0 && rowOfSlot[slot] < 0) {
+                    return Double.NaN;
+                }
+                double coefficient = linearTerms.coefficient[i];
+                if (Double.isNaN(coefficient)) {
+                    coefficient = linearTerms.terms.get(i).der(linearTerms.variables.get(i));
+                }
+                value += coefficient * state[rowOfSlot[slot]];
+                if (column >= 0) {
+                    jacobianValues[linearTerms.destination[i]] += coefficient;
                 }
             }
         }

@@ -17,6 +17,8 @@ import com.powsybl.openloadflow.equations.Quantity;
 import com.powsybl.openloadflow.equations.SingleEquation;
 import com.powsybl.openloadflow.equations.SingleEquationTerm;
 import com.powsybl.openloadflow.equations.Variable;
+import com.powsybl.openloadflow.equations.VariableEquationTerm;
+import gnu.trove.list.array.TDoubleArrayList;
 import gnu.trove.list.array.TIntArrayList;
 
 import java.util.ArrayList;
@@ -92,6 +94,47 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         }
     }
 
+    /**
+     * The terms that are a coefficient times one variable, of the equations that hold no other term as an object, one
+     * equation after the other. The equations that tie the buses of a zero impedance branch together, the flows of
+     * such a branch in the balances of its buses, the targets of the voltages, the taps and the susceptances are of
+     * this kind. They are evaluated in one loop over these arrays, without a call to an object.
+     */
+    static final class LinearTerms<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> {
+
+        /** For each equation, the index of its first term; a last entry closes the last equation. */
+        final int[] start;
+        /** For each term: the slot of its variable. */
+        final int[] slot;
+        /** For each term: its coefficient, or NaN when the term computes it at each evaluation. */
+        final double[] coefficient;
+        /** For each term: the value index in the own column of its equation, -1 when the pattern lacks it. */
+        final int[] destination;
+        /** For each term: whether it is active, as of the last call to {@link #updateActivity()}. */
+        final boolean[] active;
+        final List<SingleEquationTerm<V, E>> terms;
+        final List<Variable<V>> variables;
+
+        LinearTerms(int[] start, TIntArrayList slot, TDoubleArrayList coefficient, TIntArrayList destination,
+                    List<SingleEquationTerm<V, E>> terms, List<Variable<V>> variables) {
+            this.start = start;
+            this.slot = slot.toArray();
+            this.coefficient = coefficient.toArray();
+            this.destination = destination.toArray();
+            this.active = new boolean[terms.size()];
+            this.terms = terms;
+            this.variables = variables;
+            updateActivity();
+        }
+
+        /** Reads again which terms are active: to call when an activation changed, before the terms are evaluated. */
+        void updateActivity() {
+            for (int i = 0; i < active.length; i++) {
+                active[i] = terms.get(i).isActive();
+            }
+        }
+    }
+
     private static final int[] NO_SLOT = new int[0];
 
     private final List<Variable<V>> variables;
@@ -123,6 +166,10 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private final int[][] candidates;
     /** For each equation, the terms it holds as objects: null when it has none. */
     private final List<ObjectTerms<V, E>> objectTerms;
+    /** True for an equation that holds as an object a term that is not linear: its object terms are evaluated one by one. */
+    private final boolean[] mixed;
+    /** The linear terms of the other equations: built when asked for, and again when an equation is compiled again. */
+    private LinearTerms<V, E> linearTerms;
 
     private final List<ArrayTerms<V, E>> arrayTerms = new ArrayList<>();
     /** For each equation array, the terms of its term arrays. */
@@ -199,6 +246,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         arrayElementsWithSingleTerms = withSingleTerms.toArray();
         destinationSlot = ownSlot.clone();
         objectTerms = new ArrayList<>(equationCount);
+        mixed = new boolean[equationCount];
         for (int equation = 0; equation < equationCount; equation++) {
             objectTerms.add(compileObjectTerms(equation));
         }
@@ -409,6 +457,11 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     /** The object terms of an equation with the slots of their variables; null when it has none or when a variable has no slot. */
     private ObjectTerms<V, E> compileObjectTerms(int equation) {
         List<SingleEquationTerm<V, E>> terms = List.copyOf(getSingleTerms(equation));
+        linearTerms = null;
+        mixed[equation] = false;
+        for (SingleEquationTerm<V, E> term : terms) {
+            mixed[equation] |= !isLinear(term);
+        }
         if (terms.isEmpty()) {
             return null;
         }
@@ -428,6 +481,54 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             }
         }
         return compiled;
+    }
+
+    /** A variable, or a variable multiplied by a scalar. */
+    private static boolean isLinear(SingleEquationTerm<?, ?> term) {
+        return term instanceof VariableEquationTerm
+                || term instanceof SingleEquationTerm.MultiplyByScalarEquationTerm<?, ?> multiple
+                        && multiple.getChildren().get(0) instanceof VariableEquationTerm;
+    }
+
+    /** The coefficient of a linear term: NaN when its scalar is not a constant. */
+    private static double coefficient(SingleEquationTerm<?, ?> term) {
+        if (term instanceof SingleEquationTerm.MultiplyByScalarEquationTerm<?, ?> multiple) {
+            return multiple.isScalarConstant() ? multiple.getScalar() : Double.NaN;
+        }
+        return 1;
+    }
+
+    /** True for an equation whose object terms are evaluated one by one: one of them is not linear. */
+    boolean isMixed(int equation) {
+        return mixed[equation];
+    }
+
+    /** The linear terms of the equations that are not mixed. */
+    LinearTerms<V, E> getLinearTerms() {
+        if (linearTerms == null) {
+            int[] start = new int[equationCount + 1];
+            TIntArrayList slot = new TIntArrayList();
+            TDoubleArrayList coefficient = new TDoubleArrayList();
+            TIntArrayList destination = new TIntArrayList();
+            List<SingleEquationTerm<V, E>> terms = new ArrayList<>();
+            List<Variable<V>> termVariables = new ArrayList<>();
+            for (int equation = 0; equation < equationCount; equation++) {
+                start[equation] = terms.size();
+                ObjectTerms<V, E> compiled = objectTerms.get(equation);
+                if (compiled != null && !mixed[equation]) {
+                    for (int t = 0; t < compiled.row.length; t++) {
+                        slot.add(compiled.row[t][0]);
+                        coefficient.add(coefficient(compiled.terms.get(t)));
+                        destination.add(compiled.destination[t][0]);
+                        terms.add(compiled.terms.get(t));
+                        termVariables.add(compiled.variables.get(t).get(0));
+                    }
+                }
+            }
+            start[equationCount] = terms.size();
+            linearTerms = new LinearTerms<>(start, slot, coefficient, destination, terms, termVariables);
+        }
+        return linearTerms;
     }
 
     private ArrayTerms<V, E> compile(EquationTermArray<V, E> termArray, int a) {
@@ -525,6 +626,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
 
     private void setDestinations() {
         staleDestinations.resetQuick();
+        linearTerms = null;
         for (int equation = 0; equation < equationCount; equation++) {
             setObjectTermDestinations(equation);
         }
@@ -541,6 +643,9 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             for (int t = 0; t < compiled.row.length; t++) {
                 for (int k = 0; k < compiled.row[t].length; k++) {
                     compiled.destination[t][k] = destinationSlot[equation] >= 0 ? index(destinationSlot[equation], compiled.row[t][k]) : -1;
+                }
+                if (linearTerms != null && !mixed[equation]) {
+                    linearTerms.destination[linearTerms.start[equation] + t] = compiled.destination[t][0];
                 }
             }
         }
@@ -582,7 +687,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     }
 
     /** The number of the equation of a type and an element, single or element of an array; -1 when there is none. */
-    private int getNumber(E type, int elementNum) {
+    int getNumber(E type, int elementNum) {
         Integer number = singleEquationNumbers.get(key(type, elementNum));
         if (number != null) {
             return number;
@@ -610,6 +715,8 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         if (number >= 0) {
             bound[number] = false;
             objectTerms.set(number, null);
+            mixed[number] = false;
+            linearTerms = null;
         }
         return number >= 0;
     }
