@@ -1332,6 +1332,36 @@ class AcSensitivityAnalysisAdjointTest {
     }
 
     @Test
+    void runAdjointWithSlackDistributionGivesTheSameGradientOnEveryNetwork() {
+        // the participating buses' terms are summed in their order: it must not depend on the identity of the
+        // network's buses, or the same network built twice gives gradients differing in their last bits (one
+        // cotangent, so nothing else is summed)
+        Map<AcSensitivityAnalysis.FunctionRef, Double> cot = Map.of(powerKey("L5-6-1"), 1.0);
+        List<AcSensitivityAnalysis.AdjointVariable> vars = IeeeCdfNetworkFactory.create118().getGeneratorStream()
+                .map(g -> AcSensitivityAnalysis.AdjointVariable.of(SensitivityVariableType.INJECTION_ACTIVE_POWER, g.getId()))
+                .toList();
+        Map<AcSensitivityAnalysis.VariableRef, Double> first = null;
+        for (int run = 0; run < 10; run++) {
+            Network network = IeeeCdfNetworkFactory.create118();
+            LoadFlowParameters lfp = distributedSlackCacheEnabledParameters();
+            assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+            SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+            sensiParams.setLoadFlowParameters(lfp);
+            sensiParams.addExtension(OpenSensitivityAnalysisParameters.class,
+                    new OpenSensitivityAnalysisParameters().setAdjointSlackDistribution(true));
+            AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                    new EvenShiloachGraphDecrementalConnectivityFactory<>(), sensiParams);
+            Map<AcSensitivityAnalysis.VariableRef, Double> theta = analysis.runAdjoint(network,
+                    network.getVariantManager().getWorkingVariantId(), List.of(), cot, vars);
+            if (first == null) {
+                first = theta;
+            } else {
+                assertEquals(first, theta, "network " + run);
+            }
+        }
+    }
+
+    @Test
     void runAdjointWithSlackDistributionMatchesALoadFlowReRun() {
         // With a distributed slack the load flow spreads the imbalance a lever creates, losses included, over the
         // participating generators. adjointSlackDistribution differentiates through that spread, so the gradient
