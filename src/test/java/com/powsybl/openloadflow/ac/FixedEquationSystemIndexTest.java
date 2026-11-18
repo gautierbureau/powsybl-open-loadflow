@@ -11,6 +11,7 @@ import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.PhaseTapChanger;
 import com.powsybl.iidm.network.TwoWindingsTransformer;
+import com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.DenseMatrix;
@@ -139,7 +140,7 @@ class FixedEquationSystemIndexTest {
                         parameters -> parameters.setPhaseShifterRegulationOn(true)),
                 new Case("generator remote reactive power control", ReactivePowerControlNetworkFactory::createWithGeneratorRemoteControl,
                         parameters -> OpenLoadFlowParameters.create(parameters).setGeneratorReactivePowerRemoteControl(true)),
-                new Case("hvdc in ac emulation", HvdcNetworkFactory::createWithHvdcInAcEmulation),
+                new Case("hvdc in ac emulation", FixedEquationSystemIndexTest::hvdcInAcEmulation),
                 new Case("zero impedance branches", ZeroImpedanceNetworkFactory::createWithVoltageControl),
                 new Case("node breaker", NodeBreakerNetworkFactory::create, parameters -> { }, true));
     }
@@ -618,5 +619,16 @@ class FixedEquationSystemIndexTest {
 
     private static void assertClose(double expected, double actual, String message) {
         assertEquals(expected, actual, 1e-12 * Math.max(1, Math.abs(expected)), message);
+    }
+
+    /** The HVDC line of the factory follows the angles of its two ends only with this extension. */
+    private static Network hvdcInAcEmulation() {
+        Network network = HvdcNetworkFactory.createWithHvdcInAcEmulation();
+        network.getHvdcLine("hvdc34").newExtension(HvdcAngleDroopActivePowerControlAdder.class)
+                .withDroop(180)
+                .withP0(0f)
+                .withEnabled(true)
+                .add();
+        return network;
     }
 }
