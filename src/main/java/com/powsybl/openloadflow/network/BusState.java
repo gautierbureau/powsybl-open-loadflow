@@ -29,6 +29,7 @@ public class BusState extends BusDcState {
     private final LfGenerator.GeneratorControlType[] generatorsControlType;
     private final LfBus.QLimitType qLimitType;
     private final double remoteControlReactivePercent;
+    private final double generatorVoltageControlTargetValue;
 
     private static final class LoadState extends LoadDcState {
 
@@ -70,6 +71,12 @@ public class BusState extends BusDcState {
         // the reactive key of this bus in a shared remote voltage control: renormalized over the remaining
         // generators when a contingency loses one (LfContingency.processLostGenerators)
         remoteControlReactivePercent = bus.getRemoteControlReactivePercent();
+        // the target of the generator voltage control this bus is the controlled bus of: outer loops move it
+        // (secondary voltage control, voltage monitoring), and a restored state must not keep their moves
+        generatorVoltageControlTargetValue = bus.getGeneratorVoltageControl()
+                .filter(vc -> vc.getControlledBus() == bus)
+                .map(GeneratorVoltageControl::getTargetValue)
+                .orElse(Double.NaN);
     }
 
     @Override
@@ -118,6 +125,9 @@ public class BusState extends BusDcState {
         }
         element.setQLimitType(qLimitType);
         element.setRemoteControlReactivePercent(remoteControlReactivePercent);
+        if (!Double.isNaN(generatorVoltageControlTargetValue)) {
+            element.getGeneratorVoltageControl().orElseThrow().setTargetValue(generatorVoltageControlTargetValue);
+        }
     }
 
     public static BusState save(LfBus bus) {
