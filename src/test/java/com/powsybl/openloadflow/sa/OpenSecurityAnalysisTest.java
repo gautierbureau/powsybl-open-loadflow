@@ -1533,6 +1533,51 @@ class OpenSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest {
     }
 
     @Test
+    void testViolationsEquivalentToTheLastBits() {
+        // with thresholds of 0, the default for voltages, a value that differs from the reference in its last bits only is the same value
+        SecurityAnalysisParameters.IncreasedViolationsParameters violationsParameters = new SecurityAnalysisParameters.IncreasedViolationsParameters();
+        violationsParameters.setFlowProportionalThreshold(0);
+        assertTrue(LimitViolationManager.violationWeakenedOrEquivalent(
+                violation(LimitViolationType.HIGH_VOLTAGE, 68, 68.0270776717795),
+                violation(LimitViolationType.HIGH_VOLTAGE, 68, 68.02707767177954),
+                violationsParameters));
+        assertTrue(LimitViolationManager.violationWeakenedOrEquivalent(
+                violation(LimitViolationType.LOW_VOLTAGE, 63, 60.97485712283573),
+                violation(LimitViolationType.LOW_VOLTAGE, 63, 60.97485712283572),
+                violationsParameters));
+        assertTrue(LimitViolationManager.violationWeakenedOrEquivalent(
+                violation(LimitViolationType.CURRENT, 1000, 1200.0000000000002),
+                violation(LimitViolationType.CURRENT, 1000, 1200.0000000000005),
+                violationsParameters));
+
+        // a real difference is still an increase
+        assertFalse(LimitViolationManager.violationWeakenedOrEquivalent(
+                violation(LimitViolationType.HIGH_VOLTAGE, 68, 68.0270776717795),
+                violation(LimitViolationType.HIGH_VOLTAGE, 68, 68.0270777),
+                violationsParameters));
+        assertFalse(LimitViolationManager.violationWeakenedOrEquivalent(
+                violation(LimitViolationType.LOW_VOLTAGE, 63, 60.97485712283573),
+                violation(LimitViolationType.LOW_VOLTAGE, 63, 60.9748571),
+                violationsParameters));
+        assertFalse(LimitViolationManager.violationWeakenedOrEquivalent(
+                violation(LimitViolationType.CURRENT, 1000, 1200),
+                violation(LimitViolationType.CURRENT, 1000, 1200.000001),
+                violationsParameters));
+    }
+
+    private static LimitViolation violation(LimitViolationType type, double limit, double value) {
+        LimitViolationBuilder builder = new LimitViolationBuilder()
+                .subject("subject")
+                .type(type)
+                .limit(limit)
+                .value(value);
+        if (type == LimitViolationType.CURRENT) {
+            builder.side(TwoSides.ONE);
+        }
+        return builder.build();
+    }
+
+    @Test
     void testViolationOnThreeWindingsTransformersLeg() {
         Network network = T3wtFactory.create();
         network.getThreeWindingsTransformer("3wt").getLeg2().getOrCreateSelectedOperationalLimitsGroup().newCurrentLimits()
