@@ -26,6 +26,10 @@ public class AcVectorizedEquationSystemCreator extends AcEquationSystemCreator {
 
     private EquationTermArray<AcVariableType, AcEquationType> closedQ2Array;
 
+    private EquationTermArray<AcVariableType, AcEquationType> hvdcP1Array;
+
+    private EquationTermArray<AcVariableType, AcEquationType> hvdcP2Array;
+
     public AcVectorizedEquationSystemCreator(LfNetwork network) {
         this(network, new AcEquationSystemCreationParameters());
     }
@@ -53,6 +57,12 @@ public class AcVectorizedEquationSystemCreator extends AcEquationSystemCreator {
         closedQ2Array = new EquationTermArray<>(ElementType.BRANCH,
             new ClosedBranchSide2ReactiveFlowEquationTermArrayEvaluator(networkVector.getBranchVector(), networkVector.getBusVector(), equationSystem.getVariableSet()));
         qArray.addTermArray(closedQ2Array);
+        hvdcP1Array = new EquationTermArray<>(ElementType.HVDC,
+            new HvdcAcEmulationSide1ActiveFlowEquationTermArrayEvaluator(networkVector.getHvdcVector(), equationSystem.getVariableSet()));
+        pArray.addTermArray(hvdcP1Array);
+        hvdcP2Array = new EquationTermArray<>(ElementType.HVDC,
+            new HvdcAcEmulationSide2ActiveFlowEquationTermArrayEvaluator(networkVector.getHvdcVector(), equationSystem.getVariableSet()));
+        pArray.addTermArray(hvdcP2Array);
 
         networkVector.startListening();
 
@@ -62,6 +72,21 @@ public class AcVectorizedEquationSystemCreator extends AcEquationSystemCreator {
         closedP2Array.compress();
         closedQ1Array.compress();
         closedQ2Array.compress();
+        hvdcP1Array.compress();
+        hvdcP2Array.compress();
+    }
+
+    @Override
+    protected EquationTerm<AcVariableType, AcEquationType> createHvdcAcEmulationSide1ActiveFlowEquationTerm(LfHvdc hvdc,
+                                                                                                            EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        networkVector.getHvdcVector().set(hvdc);
+        return hvdcP1Array.getElement(hvdc.getNum());
+    }
+
+    @Override
+    protected EquationTerm<AcVariableType, AcEquationType> createHvdcAcEmulationSide2ActiveFlowEquationTerm(LfHvdc hvdc,
+                                                                                                            EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        return hvdcP2Array.getElement(hvdc.getNum());
     }
 
     @Override

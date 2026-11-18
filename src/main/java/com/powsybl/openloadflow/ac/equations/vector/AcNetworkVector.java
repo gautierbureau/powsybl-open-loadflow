@@ -37,6 +37,7 @@ public class AcNetworkVector extends AbstractLfNetworkListener
     private final EquationSystem<AcVariableType, AcEquationType> equationSystem;
     private final AcBusVector busVector;
     private final AcBranchVector branchVector;
+    private final AcHvdcVector hvdcVector;
     private boolean variablesInvalid = true;
 
     public AcNetworkVector(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem,
@@ -45,6 +46,7 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         this.equationSystem = Objects.requireNonNull(equationSystem);
         busVector = new AcBusVector(network.getBuses());
         branchVector = new AcBranchVector(network.getBranches(), creationParameters);
+        hvdcVector = new AcHvdcVector(network.getHvdcs());
     }
 
     public AcBusVector getBusVector() {
@@ -53,6 +55,10 @@ public class AcNetworkVector extends AbstractLfNetworkListener
 
     public AcBranchVector getBranchVector() {
         return branchVector;
+    }
+
+    public AcHvdcVector getHvdcVector() {
+        return hvdcVector;
     }
 
     public void startListening() {
@@ -222,12 +228,37 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         }
     }
 
+    /**
+     * Update the active power at both ends of all HVDC lines in AC emulation, and their derivatives: also of a line
+     * whose terms are off, as the outer loop that takes it out of its limits reads them.
+     */
+    public void updateHvdcs() {
+        for (int hvdcNum = 0; hvdcNum < hvdcVector.getSize(); hvdcNum++) {
+            if (hvdcVector.bus1Num[hvdcNum] != -1) {
+                double p0 = hvdcVector.p0[hvdcNum];
+                double k = hvdcVector.k[hvdcNum];
+                double r = hvdcVector.r[hvdcNum];
+                double lossFactor1 = hvdcVector.lossFactor1[hvdcNum];
+                double lossFactor2 = hvdcVector.lossFactor2[hvdcNum];
+                double ph1 = busVector.ph[hvdcVector.bus1Num[hvdcNum]];
+                double ph2 = busVector.ph[hvdcVector.bus2Num[hvdcNum]];
+                hvdcVector.p1[hvdcNum] = HvdcAcEmulationSide1ActiveFlowEquationTerm.p1(p0, k, lossFactor1, lossFactor2, r, ph1, ph2);
+                hvdcVector.dp1dph1[hvdcNum] = HvdcAcEmulationSide1ActiveFlowEquationTerm.dp1dph1(p0, k, lossFactor1, lossFactor2, ph1, ph2);
+                hvdcVector.dp1dph2[hvdcNum] = HvdcAcEmulationSide1ActiveFlowEquationTerm.dp1dph2(p0, k, lossFactor1, lossFactor2, ph1, ph2);
+                hvdcVector.p2[hvdcNum] = HvdcAcEmulationSide2ActiveFlowEquationTerm.p2(p0, k, lossFactor1, lossFactor2, r, ph1, ph2);
+                hvdcVector.dp2dph1[hvdcNum] = HvdcAcEmulationSide2ActiveFlowEquationTerm.dp2dph1(p0, k, lossFactor1, lossFactor2, ph1, ph2);
+                hvdcVector.dp2dph2[hvdcNum] = HvdcAcEmulationSide2ActiveFlowEquationTerm.dp2dph2(p0, k, lossFactor1, lossFactor2, ph1, ph2);
+            }
+        }
+    }
+
     public void updateNetworkState() {
         Stopwatch stopwatch = Stopwatch.createStarted();
 
         double[] state = equationSystem.getStateVector().get();
         updateBuses(state);
         updateClosedBranches(state);
+        updateHvdcs();
         stopwatch.stop();
         LOGGER.debug("AC network vector update in {} us", stopwatch.elapsed(TimeUnit.MICROSECONDS));
     }
@@ -238,6 +269,8 @@ public class AcNetworkVector extends AbstractLfNetworkListener
             busVector.disabled[element.getNum()] = disabled;
         } else if (element.getType() == ElementType.BRANCH) {
             branchVector.disabled[element.getNum()] = disabled;
+        } else if (element.getType() == ElementType.HVDC) {
+            hvdcVector.disabled[element.getNum()] = disabled;
         }
     }
 
