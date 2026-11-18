@@ -82,7 +82,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         final List<List<Variable<V>>> variables = new ArrayList<>();
         /** For each variable of each term: its slot. */
         final int[][] row;
-        /** For each variable of each term: the value index in the own column of the equation, -1 when the pattern lacks it. */
+        /** For each variable of each term: the value index in the column of the slot of the equation, -1 when the pattern lacks it. */
         final int[][] destination;
 
         ObjectTerms(List<SingleEquationTerm<V, E>> terms) {
@@ -106,6 +106,10 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private final int equationCount;
     private final int[][] rows;
     private final int[] ownSlot;
+    /** For each equation, the slot its destinations are for: its own at first, then the one the placement gives it. */
+    private final int[] destinationSlot;
+    /** The equations that changed slot since their destinations were computed. */
+    private final TIntArrayList staleDestinations = new TIntArrayList();
     /** True for an equation with a term that depends on the variable it is paired with. */
     private final boolean[] dependsOnOwnSlot;
     /** True for an equation that takes part in a chain of moves: what it depends on is then asked of its active terms. */
@@ -126,7 +130,11 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private int[] diagonal;
 
     FixedStructure(EquationSystem<V, E> equationSystem, Placement<V, E> placement) {
+        // numbered by type and element, not in the order of OLF's hash map, which changes from one run to the next:
+        // where several placements are possible the choice follows the numbers, and must be the same each time
         singleEquations = new ArrayList<>(equationSystem.getEquations());
+        singleEquations.sort(Comparator.<SingleEquation<V, E>>comparingInt(equation -> equation.getType().ordinal())
+                .thenComparingInt(SingleEquation::getElementNum));
         bound = new boolean[singleEquations.size()];
         Arrays.fill(bound, true);
         for (int equation = 0; equation < singleEquations.size(); equation++) {
@@ -175,6 +183,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             }
         }
         arrayElementsWithSingleTerms = withSingleTerms.toArray();
+        destinationSlot = ownSlot.clone();
         objectTerms = new ArrayList<>(equationCount);
         for (int equation = 0; equation < equationCount; equation++) {
             objectTerms.add(compileObjectTerms(equation));
@@ -401,7 +410,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
                     return null;
                 }
                 compiled.row[t][k] = slot;
-                compiled.destination[t][k] = rowIndices != null && ownSlot[equation] >= 0 ? index(ownSlot[equation], slot) : -1;
+                compiled.destination[t][k] = rowIndices != null && destinationSlot[equation] >= 0 ? index(destinationSlot[equation], slot) : -1;
             }
         }
         return compiled;
@@ -501,23 +510,61 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     }
 
     private void setDestinations() {
+        staleDestinations.resetQuick();
         for (int equation = 0; equation < equationCount; equation++) {
-            ObjectTerms<V, E> compiled = objectTerms.get(equation);
-            if (compiled != null) {
-                for (int t = 0; t < compiled.row.length; t++) {
-                    for (int k = 0; k < compiled.row[t].length; k++) {
-                        compiled.destination[t][k] = ownSlot[equation] >= 0 ? index(ownSlot[equation], compiled.row[t][k]) : -1;
+            setObjectTermDestinations(equation);
+        }
+        for (ArrayTerms<V, E> terms : arrayTerms) {
+            for (int term = 0; term < terms.equation.length; term++) {
+                setDestinations(terms, term);
+            }
+        }
+    }
+
+    private void setObjectTermDestinations(int equation) {
+        ObjectTerms<V, E> compiled = objectTerms.get(equation);
+        if (compiled != null) {
+            for (int t = 0; t < compiled.row.length; t++) {
+                for (int k = 0; k < compiled.row[t].length; k++) {
+                    compiled.destination[t][k] = destinationSlot[equation] >= 0 ? index(destinationSlot[equation], compiled.row[t][k]) : -1;
+                }
+            }
+        }
+    }
+
+    private void setDestinations(ArrayTerms<V, E> terms, int term) {
+        for (int k = 0; k < terms.row[term].length; k++) {
+            terms.destination[term][k] = index(destinationSlot[terms.equation[term]], terms.row[term][k]);
+        }
+    }
+
+    /**
+     * The slot an equation holds now. Its destinations are for that slot, so that a fill writes each derivative
+     * without looking for its entry, wherever the equation is: {@link #updateDestinations()} computes them again.
+     */
+    void setDestinationSlot(int equation, int slot) {
+        if (destinationSlot[equation] != slot) {
+            destinationSlot[equation] = slot;
+            staleDestinations.add(equation);
+        }
+    }
+
+    /** Computes again the destinations of the equations that changed slot. The pattern must hold their entries. */
+    void updateDestinations() {
+        for (int i = 0; i < staleDestinations.size(); i++) {
+            int equation = staleDestinations.getQuick(i);
+            setObjectTermDestinations(equation);
+            if (equation >= singleEquations.size()) {
+                int a = getArrayIndex(equation);
+                for (ArrayTerms<V, E> terms : arrayTermsOfArray.get(a)) {
+                    TIntArrayList termNums = terms.termArray.getTermNumsForEquationElementNum(equation - arrayFirstEquation[a]);
+                    for (int j = 0; j < termNums.size(); j++) {
+                        setDestinations(terms, termNums.getQuick(j));
                     }
                 }
             }
         }
-        for (ArrayTerms<V, E> terms : arrayTerms) {
-            for (int term = 0; term < terms.equation.length; term++) {
-                for (int k = 0; k < terms.row[term].length; k++) {
-                    terms.destination[term][k] = index(ownSlot[terms.equation[term]], terms.row[term][k]);
-                }
-            }
-        }
+        staleDestinations.resetQuick();
     }
 
     /** The number of the equation of a type and an element, single or element of an array; -1 when there is none. */

@@ -158,6 +158,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             patternBuildCount++;
             patternValid = true;
         }
+        structure.updateDestinations();
     }
 
     /**
@@ -258,6 +259,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
                 if (slot != structure.getOwnSlot(equation)) {
                     movedTo[equation] = slot;
                 }
+                structure.setDestinationSlot(equation, slot);
                 addToPattern(equation, slot);
             }
         }
@@ -359,15 +361,11 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
                     int slot = slotOfEquation[equation];
                     int[] localIndex = terms.localIndex[term];
                     balance[own] += termValues[element];
-                    if (slot == own) {
+                    if (slot >= 0) {
+                        // the destinations are for the slot the equation holds, its own or another
                         int[] destination = terms.destination[term];
                         for (int k = 0; k < destination.length; k++) {
                             jacobianValues[destination[k]] += termDerivatives[localIndex[k]][element];
-                        }
-                    } else if (slot >= 0) {
-                        // a balance that took another slot: rare, so its entries are searched
-                        for (int k = 0; k < localIndex.length; k++) {
-                            add(jacobianValues, slot, terms.row[term][k], termDerivatives[localIndex[k]][element]);
                         }
                     }
                 }
@@ -412,7 +410,6 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
         if (compiled == null) {
             return 0;
         }
-        boolean own = column == structure.getOwnSlot(equation);
         double value = 0;
         for (int t = 0; t < compiled.row.length; t++) {
             SingleEquationTerm<V, E> term = compiled.terms.get(t);
@@ -424,13 +421,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
                 value += term.eval();
                 if (column >= 0) {
                     for (int k = 0; k < compiled.row[t].length; k++) {
-                        double derivative = term.der(variables.get(k));
-                        if (own) {
-                            jacobianValues[compiled.destination[t][k]] += derivative;
-                        } else {
-                            // an equation that took another slot: rare, so its entries are searched
-                            add(jacobianValues, column, compiled.row[t][k], derivative);
-                        }
+                        jacobianValues[compiled.destination[t][k]] += term.der(variables.get(k));
                     }
                 }
             }
@@ -445,14 +436,6 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             }
         }
         return true;
-    }
-
-    private void add(double[] jacobianValues, int column, int row, double value) {
-        int index = structure.index(column, row);
-        if (index < 0) {
-            throw new IllegalStateException("No entry at row " + row + " of column " + column);
-        }
-        jacobianValues[index] += value;
     }
 
     /**
