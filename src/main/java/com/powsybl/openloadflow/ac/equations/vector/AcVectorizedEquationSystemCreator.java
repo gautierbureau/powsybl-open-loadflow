@@ -26,6 +26,10 @@ public class AcVectorizedEquationSystemCreator extends AcEquationSystemCreator {
 
     private EquationTermArray<AcVariableType, AcEquationType> closedQ2Array;
 
+    private EquationTermArray<AcVariableType, AcEquationType> loadPArray;
+
+    private EquationTermArray<AcVariableType, AcEquationType> loadQArray;
+
     public AcVectorizedEquationSystemCreator(LfNetwork network) {
         this(network, new AcEquationSystemCreationParameters());
     }
@@ -53,6 +57,12 @@ public class AcVectorizedEquationSystemCreator extends AcEquationSystemCreator {
         closedQ2Array = new EquationTermArray<>(ElementType.BRANCH,
             new ClosedBranchSide2ReactiveFlowEquationTermArrayEvaluator(networkVector.getBranchVector(), networkVector.getBusVector(), equationSystem.getVariableSet()));
         qArray.addTermArray(closedQ2Array);
+        loadPArray = new EquationTermArray<>(ElementType.BUS,
+            new LoadModelActiveFlowEquationTermArrayEvaluator(networkVector.getLoadVector(), networkVector.getBusVector(), equationSystem.getVariableSet()));
+        pArray.addTermArray(loadPArray);
+        loadQArray = new EquationTermArray<>(ElementType.BUS,
+            new LoadModelReactiveFlowEquationTermArrayEvaluator(networkVector.getLoadVector(), networkVector.getBusVector(), equationSystem.getVariableSet()));
+        qArray.addTermArray(loadQArray);
 
         networkVector.startListening();
 
@@ -62,6 +72,30 @@ public class AcVectorizedEquationSystemCreator extends AcEquationSystemCreator {
         closedP2Array.compress();
         closedQ1Array.compress();
         closedQ2Array.compress();
+        loadPArray.compress();
+        loadQArray.compress();
+    }
+
+    /**
+     * The loads of a bus that follow a model give one term to each balance of the bus, their sum, and each load reads
+     * its own power in the load vector.
+     */
+    @Override
+    protected void createLoadEquations(LfBus bus, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        AcLoadVector loadVector = networkVector.getLoadVector();
+        boolean hasTerms = false;
+        for (LfLoad load : bus.getLoads()) {
+            if (load.getLoadModel().isPresent()) {
+                int loadNum = loadVector.add(bus, load);
+                load.setP(loadVector.getP(loadNum));
+                load.setQ(loadVector.getQ(loadNum));
+                if (!hasTerms) {
+                    equationSystem.createEquation(bus, AcEquationType.BUS_TARGET_P).addTerm(loadPArray.getElement(bus.getNum()));
+                    equationSystem.createEquation(bus, AcEquationType.BUS_TARGET_Q).addTerm(loadQArray.getElement(bus.getNum()));
+                    hasTerms = true;
+                }
+            }
+        }
     }
 
     @Override
