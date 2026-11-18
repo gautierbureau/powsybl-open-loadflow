@@ -26,6 +26,10 @@ public class AcVectorizedEquationSystemCreator extends AcEquationSystemCreator {
 
     private EquationTermArray<AcVariableType, AcEquationType> closedQ2Array;
 
+    private EquationTermArray<AcVariableType, AcEquationType> shuntPArray;
+
+    private EquationTermArray<AcVariableType, AcEquationType> shuntQArray;
+
     public AcVectorizedEquationSystemCreator(LfNetwork network) {
         this(network, new AcEquationSystemCreationParameters());
     }
@@ -53,6 +57,12 @@ public class AcVectorizedEquationSystemCreator extends AcEquationSystemCreator {
         closedQ2Array = new EquationTermArray<>(ElementType.BRANCH,
             new ClosedBranchSide2ReactiveFlowEquationTermArrayEvaluator(networkVector.getBranchVector(), networkVector.getBusVector(), equationSystem.getVariableSet()));
         qArray.addTermArray(closedQ2Array);
+        shuntPArray = new EquationTermArray<>(ElementType.SHUNT_COMPENSATOR,
+            new ShuntCompensatorActiveFlowEquationTermArrayEvaluator(networkVector.getShuntVector(), networkVector.getBusVector(), equationSystem.getVariableSet()));
+        pArray.addTermArray(shuntPArray);
+        shuntQArray = new EquationTermArray<>(ElementType.SHUNT_COMPENSATOR,
+            new ShuntCompensatorReactiveFlowEquationTermArrayEvaluator(networkVector.getShuntVector(), networkVector.getBusVector(), equationSystem.getVariableSet()));
+        qArray.addTermArray(shuntQArray);
 
         networkVector.startListening();
 
@@ -62,6 +72,21 @@ public class AcVectorizedEquationSystemCreator extends AcEquationSystemCreator {
         closedP2Array.compress();
         closedQ1Array.compress();
         closedQ2Array.compress();
+        shuntPArray.compress();
+        shuntQArray.compress();
+    }
+
+    @Override
+    protected EquationTerm<AcVariableType, AcEquationType> createShuntCompensatorReactiveFlowEquationTerm(LfShunt shunt, LfBus bus, boolean deriveB,
+                                                                                                          EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        networkVector.getShuntVector().set(shunt, bus, deriveB);
+        return shuntQArray.getElement(shunt.getNum());
+    }
+
+    @Override
+    protected EquationTerm<AcVariableType, AcEquationType> createShuntCompensatorActiveFlowEquationTerm(LfShunt shunt, LfBus bus,
+                                                                                                        EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        return shuntPArray.getElement(shunt.getNum());
     }
 
     @Override
