@@ -91,6 +91,8 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     private int[] equationOfSlot;
     /** The row of the variable of each slot in OLF's index, as of the last placement: negative when it is not in the system. */
     private int[] rowOfSlot;
+    /** For each equation, its column in OLF's index, during an evaluation of the equations. */
+    private int[] columnOfEquation;
     /** OLF's state vector, by row, during a fill. */
     private double[] state;
     /** The linear terms of the structure, with their activity as of the last placement. */
@@ -355,6 +357,96 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             }
         }
         return -1;
+    }
+
+    /**
+     * The value of each active equation at the current state of OLF's equation system, written at its column in OLF's
+     * index: OLF's equation vector, from the arrays of the structure. The term arrays are read as the fill reads them,
+     * the terms held as objects from the two tables of the structure, in the order of their creation, so that each
+     * sum is the one OLF computes, to the last bit. Only an equation that holds a term of another kind calls its
+     * objects. Returns the number of columns written: OLF's column count when the structure holds every active
+     * equation.
+     */
+    public int evalEquations(double[] values) {
+        update();
+        Arrays.fill(values, 0);
+        state = equationSystem.getStateVector().get();
+        int equationCount = structure.getEquationCount();
+        if (columnOfEquation == null || columnOfEquation.length != equationCount) {
+            columnOfEquation = new int[equationCount];
+        }
+        for (int equation = 0; equation < equationCount; equation++) {
+            columnOfEquation[equation] = structure.getColumnInEquationSystem(equation);
+        }
+        for (FixedStructure.ArrayTerms<V, E> terms : structure.getArrayTerms()) {
+            double[] termValues = terms.termArray.eval();
+            for (int term = 0; term < terms.equation.length; term++) {
+                int column = columnOfEquation[terms.equation[term]];
+                if (column >= 0 && terms.termArray.isTermActive(term)) {
+                    values[column] += termValues[terms.element[term]];
+                }
+            }
+        }
+        elementTerms.readTermArrays();
+        int written = 0;
+        for (int equation : structure.getArrayElementsWithSingleTerms()) {
+            int column = columnOfEquation[equation];
+            if (column >= 0) {
+                values[column] = addObjectTermValues(equation, values[column], false);
+            }
+        }
+        for (int equation = 0; equation < equationCount; equation++) {
+            int column = columnOfEquation[equation];
+            if (column >= 0) {
+                written++;
+                if (equation < structure.getSingleEquationCount()) {
+                    values[column] = addObjectTermValues(equation, 0, true);
+                }
+            }
+        }
+        return written;
+    }
+
+    /**
+     * Adds the values of the active terms an equation holds as objects to a sum, in the order the terms were created:
+     * from the tables of the structure, two cursors following the kind of each term. A single equation adds the left
+     * hand side of each term, as OLF does, and an element of an equation array its value.
+     */
+    private double addObjectTermValues(int equation, double sum, boolean lhs) {
+        FixedStructure.ObjectTerms<V, E> compiled = structure.getObjectTerms(equation);
+        double value = sum;
+        if (compiled == null || structure.isMixed(equation)) {
+            for (SingleEquationTerm<V, E> term : structure.getSingleTerms(equation)) {
+                if (term.isActive()) {
+                    value += lhs ? term.evalLhs() : term.eval();
+                }
+            }
+            return value;
+        }
+        int linear = linearTerms.start[equation];
+        int element = elementTerms.start[equation];
+        for (byte kind : compiled.kind) {
+            if (kind == FixedStructure.LINEAR) {
+                if (linearTerms.active[linear]) {
+                    double coefficient = linearTerms.coefficient[linear];
+                    if (Double.isNaN(coefficient)) {
+                        coefficient = linearTerms.terms.get(linear).der(linearTerms.variables.get(linear));
+                    }
+                    value += coefficient * state[rowOfSlot[linearTerms.slot[linear]]];
+                }
+                linear++;
+            } else {
+                if (elementTerms.active[element]) {
+                    double coefficient = elementTerms.coefficient[element];
+                    if (Double.isNaN(coefficient)) {
+                        coefficient = elementTerms.computeCoefficient(element);
+                    }
+                    value += coefficient * elementTerms.values[elementTerms.termArray[element]][elementTerms.element[element]];
+                }
+                element++;
+            }
+        }
+        return value;
     }
 
     /** Computes the Jacobian values, the equation values and the balances at the current state of OLF's equation system. */
