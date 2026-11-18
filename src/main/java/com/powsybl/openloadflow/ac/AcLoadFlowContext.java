@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationVector;
 import com.powsybl.openloadflow.equations.JacobianMatrix;
 import com.powsybl.openloadflow.equations.TargetVector;
+import com.powsybl.openloadflow.equations.fixed.FixedEquationVector;
 import com.powsybl.openloadflow.lf.AbstractLoadFlowContext;
 import com.powsybl.openloadflow.network.LfNetwork;
 
@@ -67,7 +68,9 @@ public class AcLoadFlowContext extends AbstractLoadFlowContext<AcVariableType, A
 
     public EquationVector<AcVariableType, AcEquationType> getEquationVector() {
         if (equationVector == null) {
-            equationVector = new EquationVector<>(getEquationSystem());
+            // computed from the structure the Jacobian is filled from
+            equationVector = new FixedEquationVector<>(getEquationSystem(),
+                () -> ((AcJacobianMatrix) getJacobianMatrix()).getFixedJacobian().getFixedEquationSystem());
         }
         return equationVector;
     }
