@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.equations.fixed;
 
 import com.powsybl.commons.PowsyblException;
+import com.powsybl.openloadflow.equations.Equation;
 import com.powsybl.openloadflow.equations.EquationArray;
 import com.powsybl.openloadflow.equations.EquationEventType;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -105,6 +106,33 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     /** For an equation that took a unpaired position: the position, kept as long as it is free, so that the matrix structure stops growing. */
     private int[] movedTo;
 
+    /*
+     * The first pass of the pairing, kept from one pairing to the next: each equation on its own position when it
+     * depends on its live variable. It is local to the equations of one position, so after an activation only the positions
+     * of the equations that changed, and the positions whose variable entered or left the system, are resolved again.
+     */
+    /** For each position, the equations whose own position it is, in their order. */
+    private int[][] ownersOfPosition;
+    /** The equations that have no own position. */
+    private int[] withoutOwnPosition;
+    /** For each position, the equation the first pass puts on it, or -1. */
+    private int[] firstPassEquationOfPosition;
+    /**
+     * The equations the first pass leaves without a position, each at the index the full pass would list it at: its own
+     * number, or the number of the equation that took its position from it.
+     */
+    private int[] displacedAt;
+    private final BitSet displacedListIndices = new BitSet();
+    /** False when the first pass has to be computed for every equation: a new structure, an equation created or removed. */
+    private boolean firstPassValid;
+    /** The equations whose activity, or the activity of a term, changed since the last pairing. */
+    private final TIntHashSet changedEquations = new TIntHashSet();
+    /** The position of each equation at the last pairing, to visit only the equations that moved. */
+    private int[] lastPositionOfEquation;
+    /** False when every equation has to be visited after the pairing: a new structure. */
+    private boolean lastPairingValid;
+    private int pairingCount;
+
     private double[] values;
     private double[] balance;
     private double[] equationValues;
@@ -148,6 +176,7 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
             matrixStructureValid = discarded != null && structure.adoptMatrixStructure(discarded);
             discarded = null;
             pairingValid = false;
+            initFirstPass();
             if (scope == Scope.ALL) {
                 for (int equation = 0; equation < structure.getEquationCount(); equation++) {
                     if (structure.getOwnPosition(equation) >= 0) {
@@ -227,29 +256,28 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
      * with the equations in another order.
      */
     private void place() {
+        pairingCount++;
         equationSystem.getIndex().getSortedVariablesToFind();
+        TIntHashSet changedPositions = new TIntHashSet();
         for (int position = 0; position < rowOfPosition.length; position++) {
-            rowOfPosition[position] = structure.getVariable(position).getRow();
+            int row = structure.getVariable(position).getRow();
+            if ((row >= 0) != (rowOfPosition[position] >= 0)) {
+                changedPositions.add(position);
+            }
+            rowOfPosition[position] = row;
         }
+        updateFirstPass(changedPositions);
+        assert firstPassIsTheFullOne() : "The first pass kept from the last pairing is not the one computed again";
+        System.arraycopy(firstPassEquationOfPosition, 0, equationOfPosition, 0, equationOfPosition.length);
         Arrays.fill(positionOfEquation, -1);
-        Arrays.fill(equationOfPosition, -1);
+        for (int position = 0; position < equationOfPosition.length; position++) {
+            if (equationOfPosition[position] >= 0) {
+                positionOfEquation[equationOfPosition[position]] = position;
+            }
+        }
         TIntArrayList displaced = new TIntArrayList();
-        for (int equation = 0; equation < structure.getEquationCount(); equation++) {
-            if (!structure.isActive(equation)) {
-                continue;
-            }
-            int own = structure.getOwnPosition(equation);
-            if (own < 0 || !isToFind(own) || !structure.dependsOn(equation, own)) {
-                displaced.add(equation);
-            } else if (equationOfPosition[own] < 0) {
-                take(equation, own);
-            } else if (structure.fixesVariable(equation) && !structure.fixesVariable(equationOfPosition[own])) {
-                displaced.add(equationOfPosition[own]);
-                positionOfEquation[equationOfPosition[own]] = -1;
-                take(equation, own);
-            } else {
-                displaced.add(equation);
-            }
+        for (int listIndex = displacedListIndices.nextSetBit(0); listIndex >= 0; listIndex = displacedListIndices.nextSetBit(listIndex + 1)) {
+            displaced.add(displacedAt[listIndex]);
         }
         // a displaced equation takes a position it may take and depends on; an equation in its way moves the same way
         TIntArrayList left = new TIntArrayList();
@@ -279,9 +307,10 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
                 throw new PowsyblException("More variables than active equations: no equation for " + structure.getVariable(position));
             }
         }
+        // an equation on the position it had at the last pairing already has its matrix element indices, its entries in the matrix structure and its move noted
         for (int equation = 0; equation < positionOfEquation.length; equation++) {
             int position = positionOfEquation[equation];
-            if (position >= 0) {
+            if (position >= 0 && (!lastPairingValid || position != lastPositionOfEquation[equation])) {
                 if (position != structure.getOwnPosition(equation)) {
                     movedTo[equation] = position;
                 }
@@ -289,6 +318,114 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
                 addToMatrixStructure(equation, position);
             }
         }
+        System.arraycopy(positionOfEquation, 0, lastPositionOfEquation, 0, positionOfEquation.length);
+        lastPairingValid = true;
+    }
+
+    private void initFirstPass() {
+        int equationCount = structure.getEquationCount();
+        int variableCount = structure.getVariableCount();
+        TIntArrayList[] owners = new TIntArrayList[variableCount];
+        TIntArrayList without = new TIntArrayList();
+        for (int equation = 0; equation < equationCount; equation++) {
+            int own = structure.getOwnPosition(equation);
+            if (own < 0) {
+                without.add(equation);
+            } else {
+                if (owners[own] == null) {
+                    owners[own] = new TIntArrayList(2);
+                }
+                owners[own].add(equation);
+            }
+        }
+        ownersOfPosition = new int[variableCount][];
+        for (int position = 0; position < variableCount; position++) {
+            ownersOfPosition[position] = owners[position] == null ? new int[0] : owners[position].toArray();
+        }
+        withoutOwnPosition = without.toArray();
+        firstPassEquationOfPosition = new int[variableCount];
+        displacedAt = new int[equationCount];
+        lastPositionOfEquation = new int[equationCount];
+        Arrays.fill(rowOfPosition, -1);
+        firstPassValid = false;
+        lastPairingValid = false;
+        changedEquations.clear();
+    }
+
+    /** Resolves the first pass again for every position, or for the positions that may have changed only. */
+    private void updateFirstPass(TIntHashSet changedPositions) {
+        if (!firstPassValid) {
+            Arrays.fill(firstPassEquationOfPosition, -1);
+            Arrays.fill(displacedAt, -1);
+            displacedListIndices.clear();
+            for (int position = 0; position < ownersOfPosition.length; position++) {
+                resolvePosition(position);
+            }
+            for (int equation : withoutOwnPosition) {
+                resolveWithoutOwnPosition(equation);
+            }
+            firstPassValid = true;
+        } else {
+            for (TIntIterator it = changedEquations.iterator(); it.hasNext();) {
+                int equation = it.next();
+                int own = structure.getOwnPosition(equation);
+                if (own >= 0) {
+                    changedPositions.add(own);
+                } else {
+                    resolveWithoutOwnPosition(equation);
+                }
+            }
+            for (TIntIterator it = changedPositions.iterator(); it.hasNext();) {
+                resolvePosition(it.next());
+            }
+        }
+        changedEquations.clear();
+    }
+
+    /** The first pass on one position: what the full pass does for the equations whose own position it is, in their order. */
+    private void resolvePosition(int position) {
+        int[] owners = ownersOfPosition[position];
+        for (int equation : owners) {
+            setDisplaced(equation, -1);
+        }
+        int holder = -1;
+        for (int equation : owners) {
+            if (!structure.isActive(equation)) {
+                continue;
+            }
+            if (!isToFind(position) || !structure.dependsOn(equation, position)) {
+                setDisplaced(equation, equation);
+            } else if (holder < 0) {
+                holder = equation;
+            } else if (structure.fixesVariable(equation) && !structure.fixesVariable(holder)) {
+                // the equation that held the position is listed where the full pass meets the one that takes it
+                setDisplaced(equation, holder);
+                holder = equation;
+            } else {
+                setDisplaced(equation, equation);
+            }
+        }
+        firstPassEquationOfPosition[position] = holder;
+    }
+
+    private void resolveWithoutOwnPosition(int equation) {
+        setDisplaced(equation, structure.isActive(equation) ? equation : -1);
+    }
+
+    private void setDisplaced(int listIndex, int equation) {
+        displacedAt[listIndex] = equation;
+        displacedListIndices.set(listIndex, equation >= 0);
+    }
+
+    /** For the assertion of {@link #place()}: the first pass computed for every position gives the one kept. */
+    private boolean firstPassIsTheFullOne() {
+        int[] keptEquationOfPosition = firstPassEquationOfPosition.clone();
+        int[] keptDisplacedAt = displacedAt.clone();
+        BitSet keptListIndices = (BitSet) displacedListIndices.clone();
+        firstPassValid = false;
+        updateFirstPass(new TIntHashSet());
+        return Arrays.equals(keptEquationOfPosition, firstPassEquationOfPosition) && Arrays.equals(keptDisplacedAt, displacedAt)
+                && keptListIndices.equals(displacedListIndices);
     }
 
     /**
@@ -637,18 +774,47 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
             case EQUATION_CREATED -> structure != null && termsChanged(structure.bind(equation));
             default -> true;
         };
+        if (eventType == EquationEventType.EQUATION_ACTIVATED || eventType == EquationEventType.EQUATION_DEACTIVATED) {
+            changed(equation.getType(), equation.getElementNum());
+        } else {
+            firstPassValid = false;
+        }
         invalidate(!kept);
     }
 
     @Override
     public void onEquationArrayChange(EquationArray<V, E> equationArray, int elementNum, EquationEventType eventType) {
+        if (eventType == EquationEventType.EQUATION_ACTIVATED || eventType == EquationEventType.EQUATION_DEACTIVATED) {
+            changed(equationArray.getType(), elementNum);
+        } else {
+            firstPassValid = false;
+        }
         invalidate(eventType == EquationEventType.EQUATION_CREATED || eventType == EquationEventType.EQUATION_REMOVED);
     }
 
     @Override
     public void onEquationTermChange(SingleEquationTerm<V, E> term, EquationTermEventType eventType) {
+        // a term changes what its equation depends on
+        Equation<V, E> equation = term.getEquation();
+        if (equation != null) {
+            changed(equation.getType(), equation.getElementNum());
+        } else {
+            firstPassValid = false;
+        }
         invalidate(eventType == EquationTermEventType.EQUATION_TERM_ADDED
                 && !(structure != null && termsChanged(structure.getNumber(term.getEquation()))));
+    }
+
+    /** Notes an equation whose activity, or the activity of one of its terms, changed: its position is resolved again. */
+    private void changed(E type, int elementNum) {
+        if (structure != null && firstPassValid) {
+            int equation = structure.getNumber(type, elementNum);
+            if (equation >= 0) {
+                changedEquations.add(equation);
+            } else {
+                firstPassValid = false;
+            }
+        }
     }
 
     /** Notes that a single equation of the structure has other terms than when its rows were computed. */
@@ -661,7 +827,13 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
 
     @Override
     public void onEquationTermArrayChange(EquationTermArray<V, E> equationTermArray, int termNum, EquationTermEventType eventType) {
+        changed(equationTermArray.getEquationArray().getType(), equationTermArray.getEquationElementNum(termNum));
         invalidate(eventType == EquationTermEventType.EQUATION_TERM_ADDED);
+    }
+
+    /** The number of pairings made: each activation that changed something calls for one. */
+    public int getPairingCount() {
+        return pairingCount;
     }
 
     @Override
