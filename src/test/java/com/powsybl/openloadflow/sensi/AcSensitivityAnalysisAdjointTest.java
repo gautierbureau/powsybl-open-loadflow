@@ -278,6 +278,32 @@ class AcSensitivityAnalysisAdjointTest {
     }
 
     @Test
+    void runAdjointGivesTheSameGradientOnEveryRun() {
+        // The cotangents of functions sharing state variables (P1 and P2 of every line touch the same bus angles
+        // and voltages) are summed into one right-hand side: the order of that sum must not change between runs,
+        // or the gradient moves in its last bits from one run to the next.
+        Network network = IeeeCdfNetworkFactory.create14();
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        Map<AcSensitivityAnalysis.FunctionRef, Double> cot = new LinkedHashMap<>();
+        double w = 0.1;
+        for (String line : network.getLineStream().map(l -> l.getId()).sorted().toList()) {
+            cot.put(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, line), w);
+            cot.put(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BRANCH_ACTIVE_POWER_2, line), -0.7 * w);
+            w += 0.13;
+        }
+        List<AcSensitivityAnalysis.AdjointVariable> vars = levers(SensitivityVariableType.INJECTION_ACTIVE_POWER, GENS);
+        AcSensitivityAnalysis analysis = newAnalysis(lfp);
+        String variantId = network.getVariantManager().getWorkingVariantId();
+
+        Map<AcSensitivityAnalysis.VariableRef, Double> first = analysis.runAdjoint(network, variantId, List.of(), cot, vars);
+        for (int run = 1; run < 20; run++) {
+            assertEquals(first, analysis.runAdjoint(network, variantId, List.of(), cot, vars), "run " + run);
+        }
+    }
+
+    @Test
     void runAdjointIsLinearInTheFunctionCotangents() {
         Network network = IeeeCdfNetworkFactory.create14();
         LoadFlowParameters lfp = cacheEnabledParameters();
