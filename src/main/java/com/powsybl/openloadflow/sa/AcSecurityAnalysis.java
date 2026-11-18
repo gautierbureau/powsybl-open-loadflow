@@ -97,7 +97,7 @@ public class AcSecurityAnalysis extends AbstractSecurityAnalysis<AcVariableType,
 
     @Override
     protected AcloadFlowEngine createLoadFlowEngine(AcLoadFlowContext context) {
-        return new AcloadFlowEngine(context);
+        return context.getParameters().getSolverFactory().createLoadFlowEngine(context);
     }
 
     @Override
