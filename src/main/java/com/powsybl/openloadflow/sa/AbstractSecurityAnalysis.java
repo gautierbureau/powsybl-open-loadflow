@@ -837,46 +837,6 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         return connectivity.supportTemporaryChangesNesting() ? connectivity : null;
     }
 
-    /**
-     * The post-contingency result of a contingency without operator strategies, answered without changing the network,
-     * or empty to run the contingency as usual (apply, loss distribution, simulation, restore). A subclass that answers
-     * reports what the usual path would report on {@code reportNode}, and puts back whatever
-     * {@link PropagatedContingency#toLfContingency} changed in the network (the excluded slack buses of a relocated slack
-     * bus, which {@code networkState} holds); it reads the contingency's topology from its disabled network.
-     */
-    protected Optional<PostContingencyResult> resultWithoutNetwork(LfNetwork network, C context, PropagatedContingency propagatedContingency,
-                                                                   LfContingency lfContingency, NetworkState networkState,
-                                                                   LimitViolationManager preContingencyLimitViolationManager,
-                                                                   SecurityAnalysisParameters securityAnalysisParameters,
-                                                                   PreContingencyNetworkResult preContingencyNetworkResult,
-                                                                   boolean createResultExtension, List<LimitScaling> limitScalings,
-                                                                   ReportNode reportNode) {
-        return Optional.empty();
-    }
-
-    /**
-     * Put the network back in its base (pre-contingency) state after a contingency, before the next one is applied.
-     * The default restores every saved bus, branch, HVDC and area state; an implementation that knows what a
-     * contingency's simulation changed may restore less, provided the network ends up identical.
-     *
-     * @param networkState the base state, saved once after the pre-contingency simulation
-     * @param network the network
-     * @param lfContingency the contingency just simulated
-     */
-    protected void restoreBaseState(NetworkState networkState, LfNetwork network, LfContingency lfContingency) {
-        networkState.restore();
-    }
-
-    /**
-     * Puts the network back in its post-contingency state after an operator strategy's simulation, before the next
-     * strategy of the same contingency. Overridable: a security analysis that knows what a strategy's simulation
-     * changed may restore only that.
-     */
-    protected void restorePostContingencyState(NetworkState postContingencyNetworkState, LfNetwork network,
-                                               LfContingency lfContingency) {
-        postContingencyNetworkState.restore();
-    }
-
     private void processContingency(LfNetwork lfNetwork, SecurityAnalysisParameters securityAnalysisParameters,
                                     List<LimitScaling> limitScalings, ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution,
                                     ReportNode networkReportNode, LfContingency lfContingency, P p, NetworkState networkState,
