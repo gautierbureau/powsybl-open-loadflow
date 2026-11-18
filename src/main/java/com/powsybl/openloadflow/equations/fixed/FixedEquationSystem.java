@@ -47,9 +47,13 @@ import java.util.Set;
  *     NaN where the equation cannot be evaluated: a disabled bus's.</li>
  * </ul>
  *
- * <p>The pattern only grows, and only when an active equation needs entries it does not hold: with
- * {@link Scope#ALL}, when a balance takes a slot it never took; with {@link Scope#ACTIVE}, also the first time an
- * equation becomes active.
+ * <p>The pattern only grows, and only when an active equation needs entries it does not hold. With
+ * {@link Scope#ALL} it holds from the start every equation on its own slot and on the candidates its
+ * {@link Placement} gives: it then grows only when an equation takes a slot that is neither. With
+ * {@link Scope#ACTIVE} it also grows the first time an equation becomes active.
+ *
+ * <p>When OLF creates an equation the structure has not seen, the arrays are compiled again, and the pattern is
+ * kept if the new arrays fit in it.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -58,7 +62,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
 
     /** Which equations have their entries in the pattern from the start. */
     public enum Scope {
-        /** Every equation OLF created, on the slot it is paired with. */
+        /** Every equation OLF created, on the slot it is paired with and on its candidates. */
         ALL,
         /** The active equations only. */
         ACTIVE
@@ -69,6 +73,8 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     private final Scope scope;
 
     private FixedStructure<V, E> structure;
+    /** The structure that was discarded, until the arrays are compiled again: the new one takes its pattern if it can. */
+    private FixedStructure<V, E> discarded;
     private final TIntArrayList placedEquations = new TIntArrayList();
     private final TIntArrayList placedSlots = new TIntArrayList();
     private final Set<Long> placed = new HashSet<>();
@@ -103,7 +109,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
 
     private void update() {
         if (structure != null && !changedTerms.isEmpty() && !addRows()) {
-            structure = null;
+            invalidate(true);
         }
         changedTerms.clear();
         if (structure == null) {
@@ -118,12 +124,16 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             placed.clear();
             placedEquations.resetQuick();
             placedSlots.resetQuick();
-            patternValid = false;
+            patternValid = discarded != null && structure.adoptPattern(discarded);
+            discarded = null;
             placementValid = false;
             if (scope == Scope.ALL) {
                 for (int equation = 0; equation < structure.getEquationCount(); equation++) {
                     if (structure.getOwnSlot(equation) >= 0) {
                         addToPattern(equation, structure.getOwnSlot(equation));
+                    }
+                    for (int slot : structure.getCandidates(equation)) {
+                        addToPattern(equation, slot);
                     }
                 }
             }
@@ -170,8 +180,9 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     /**
      * Gives each active equation a slot. A slot is live when an active term depends on its variable: OLF's index keeps
      * a row for exactly those variables. Each equation takes the slot it is paired with; when two claim one, the one
-     * that fixes the variable keeps it. The others take a free live slot: the one they had before, else one of a
-     * variable they depend on, else any. Any choice gives the same system, with the equations in another order.
+     * that fixes the variable keeps it. The others take a free live slot: the one they had before, else one of their
+     * candidates, else one of a variable they depend on, else any. Any choice gives the same system, with the
+     * equations in another order; a candidate is in the pattern already.
      */
     private void place() {
         equationSystem.getIndex().getSortedVariablesToFind();
@@ -194,15 +205,20 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
                 displaced.add(equation);
             }
         }
-        for (int i = 0; i < displaced.size(); i++) {
-            int equation = displaced.getQuick(i);
-            int slot = findFreeSlot(equation);
-            if (slot < 0) {
-                throw new PowsyblException("More active equations than variables: no slot left for "
-                        + structure.getType(equation) + " of element " + structure.getElementNum(equation));
+        // the equations that have candidates choose first: the others can take any slot
+        for (boolean withCandidates : new boolean[] {true, false}) {
+            for (int i = 0; i < displaced.size(); i++) {
+                int equation = displaced.getQuick(i);
+                if (structure.getCandidates(equation).length > 0 == withCandidates) {
+                    int slot = findFreeSlot(equation);
+                    if (slot < 0) {
+                        throw new PowsyblException("More active equations than variables: no slot left for "
+                                + structure.getType(equation) + " of element " + structure.getElementNum(equation));
+                    }
+                    take(equation, slot);
+                    movedTo[equation] = slot;
+                }
             }
-            take(equation, slot);
-            movedTo[equation] = slot;
         }
         for (int slot = 0; slot < equationOfSlot.length; slot++) {
             if (isFree(slot)) {
@@ -232,6 +248,11 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     private int findFreeSlot(int equation) {
         if (movedTo[equation] >= 0 && isFree(movedTo[equation])) {
             return movedTo[equation];
+        }
+        for (int slot : structure.getCandidates(equation)) {
+            if (isFree(slot)) {
+                return slot;
+            }
         }
         for (int row : structure.getRows(equation)) {
             if (isFree(row)) {
@@ -404,7 +425,8 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     /** An activation moves equations between slots; an equation or a term the structure cannot keep changes the compiled arrays. */
     private void invalidate(boolean compiledArrays) {
         placementValid = false;
-        if (compiledArrays) {
+        if (compiledArrays && structure != null) {
+            discarded = structure;
             structure = null;
         }
     }

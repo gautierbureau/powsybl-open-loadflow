@@ -28,4 +28,20 @@ public interface Placement<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
      * variable, this one keeps the slot and the other takes a free one.
      */
     boolean fixesVariable(E equationType);
+
+    /**
+     * The slots an equation may take besides its own, each given as the variable of the slot: where a balance goes
+     * when the equation that fixes its variable holds its slot. They are in the pattern from the start, so that it
+     * does not grow the first time the equation is placed there. None by default: the pattern then grows as the
+     * placements are met.
+     */
+    default void forEachCandidate(CandidateConsumer<V, E> consumer) {
+    }
+
+    /** An equation, by type and element, and the variable of a slot it may take, by type and element. */
+    @FunctionalInterface
+    interface CandidateConsumer<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> {
+
+        void accept(E equationType, int equationElementNum, V variableType, int variableElementNum);
+    }
 }
