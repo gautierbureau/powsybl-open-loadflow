@@ -407,8 +407,9 @@ class FixedEquationSystemTest {
     /**
      * Around a zero impedance line every term held as an object is a coefficient times one variable: the two angles in
      * the equation of the line, its flow in the balances of its two buses. The structure holds them in one table, with
-     * their slot and their coefficient, and evaluates them from it. The balance of a bus of an HVDC line in AC
-     * emulation holds a term that is not of this kind: its object terms are evaluated one by one.
+     * their slot and their coefficient, and evaluates them from it. The equation that shares the reactive power
+     * between the generators that hold one voltage holds terms that are not of this kind, the reactive flows of the
+     * branches of these generators: its object terms are evaluated one by one.
      */
     @Test
     void linearTermsAreHeldInATable() {
@@ -451,17 +452,22 @@ class FixedEquationSystemTest {
             assertEquals(Map.of(flow1, -1d, flow3, 1d), coefficients(fixed.getStructure().getLinearTerms(), balance, true));
         }
 
-        Network hvdcNetwork = hvdcInAcEmulation();
-        AcLoadFlowParameters hvdcParameters = acParameters(hvdcNetwork, new LoadFlowParameters(), false, true);
-        LfNetwork hvdcLfNetwork = Networks.load(hvdcNetwork, hvdcParameters.getNetworkParameters()).get(0);
-        try (AcLoadFlowContext context = new AcLoadFlowContext(hvdcLfNetwork, hvdcParameters);
+        Network remoteControlNetwork = VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        AcLoadFlowParameters remoteControlParameters = acParameters(remoteControlNetwork, new LoadFlowParameters(), false, true);
+        LfNetwork remoteControlLfNetwork = Networks.load(remoteControlNetwork, remoteControlParameters.getNetworkParameters()).get(0);
+        try (AcLoadFlowContext context = new AcLoadFlowContext(remoteControlLfNetwork, remoteControlParameters);
              FixedEquationSystem<AcVariableType, AcEquationType> fixed =
-                     new FixedEquationSystem<>(context.getEquationSystem(), new AcPlacement(hvdcLfNetwork), FixedEquationSystem.Scope.ALL)) {
+                     new FixedEquationSystem<>(context.getEquationSystem(), new AcPlacement(remoteControlLfNetwork), FixedEquationSystem.Scope.ALL)) {
             FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
-            LfBus converterBus = hvdcLfNetwork.getHvdcs().get(0).getBus1();
-            int balance = structure.getNumber(AcEquationType.BUS_TARGET_P, converterBus.getNum());
-            assertTrue(structure.isMixed(balance));
-            assertTrue(coefficients(structure.getLinearTerms(), balance, true).isEmpty());
+            int distribution = -1;
+            for (int equation = 0; equation < structure.getSingleEquationCount() && distribution < 0; equation++) {
+                if (structure.getType(equation) == AcEquationType.DISTR_Q) {
+                    distribution = equation;
+                }
+            }
+            assertTrue(distribution >= 0);
+            assertTrue(structure.isMixed(distribution));
+            assertTrue(coefficients(structure.getLinearTerms(), distribution, true).isEmpty());
         }
     }
 
