@@ -53,6 +53,7 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     private double[] bySlot;
 
     private int analysisCount;
+    private int pivotingCount;
 
     public FixedJacobian(EquationSystem<V, E> equationSystem, Placement<V, E> placement, MatrixFactory matrixFactory) {
         this.fixed = new FixedEquationSystem<>(equationSystem, placement, FixedEquationSystem.Scope.ALL);
@@ -110,6 +111,7 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         try {
             lu.update(true);
         } catch (MatrixException e) {
+            pivotingCount++;
             lu.update(false);
         }
     }
@@ -215,6 +217,16 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     /** How many times the matrix was analysed: once, plus once each time the pattern grew or a factorisation failed. */
     public int getAnalysisCount() {
         return analysisCount;
+    }
+
+    /** How many times a pivot of the previous factorisation had become zero, so that new ones were chosen. */
+    public int getPivotingCount() {
+        return pivotingCount;
+    }
+
+    /** How many zeros the diagonal holds in the current state: see {@link FixedEquationSystem#getZeroDiagonalCount()}. */
+    public int getZeroDiagonalCount() {
+        return fixed.getZeroDiagonalCount();
     }
 
     private void closeLu() {

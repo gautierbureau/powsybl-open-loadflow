@@ -64,6 +64,19 @@ public final class AcPlacement implements Placement<AcVariableType, AcEquationTy
         };
     }
 
+    /**
+     * Angles, phase shifts and active flows on one side, voltages, ratios, susceptances and reactive flows on the
+     * other: an active power equation barely depends on a voltage, and not at all on a flat start without losses.
+     */
+    @Override
+    public int kind(AcVariableType variableType) {
+        return switch (variableType) {
+            case BUS_PHI, BRANCH_ALPHA1, DUMMY_P -> 0;
+            case BUS_V, BRANCH_RHO1, SHUNT_B, DUMMY_Q -> 1;
+            default -> 2 + variableType.ordinal();
+        };
+    }
+
     @Override
     public void forEachCandidate(CandidateConsumer<AcVariableType, AcEquationType> consumer) {
         if (network == null) {
