@@ -128,4 +128,33 @@ public class ZeroImpedanceNetworkFactory extends AbstractLoadFlowNetworkFactory 
         createThreeWindingsTransformer(network, "s", b2, b3, b5, "t3wt", 0., 1., 0., 1., 0., 1.);
         return network;
     }
+
+    /**
+     * A loop of zero impedance lines: its flows are only defined up to a circulating flow, so they are computed on a
+     * spanning tree of the loop, the branch out of the tree carrying no flow.
+     *
+     *  g1              ld2
+     *  b1 ===== z12 ===== b2
+     *    \\              //
+     *    z13          z23
+     *        \\      //
+     *           b3 ----- b4
+     *               l34   |
+     *                    ld4
+     */
+    public static Network createWithZeroImpedanceLoop() {
+        Network network = Network.create("test", "code");
+        Bus b1 = createBus(network, "s", "b1");
+        Bus b2 = createBus(network, "s", "b2");
+        Bus b3 = createBus(network, "s", "b3");
+        Bus b4 = createBus(network, "s", "b4");
+        createGenerator(b1, "g1", 3, 1);
+        createLoad(b2, "ld2", 2);
+        createLoad(b4, "ld4", 1);
+        createLine(network, b1, b2, "z12", 0.0);
+        createLine(network, b1, b3, "z13", 0.0);
+        createLine(network, b2, b3, "z23", 0.0);
+        createLine(network, b3, b4, "l34", 0.1);
+        return network;
+    }
 }
