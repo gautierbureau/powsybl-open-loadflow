@@ -31,6 +31,18 @@ public class ElementState<T extends LfElement> {
         element.setDisabled(disabled);
     }
 
+    /**
+     * What differs between the element and this saved state, or null when {@link #restore()} would change nothing.
+     * For the assertion that follows a partial restore of the network.
+     */
+    String findDifference() {
+        return element.isDisabled() == disabled ? null : "disabled";
+    }
+
+    static boolean same(double value, double saved) {
+        return value == saved || Double.isNaN(value) && Double.isNaN(saved);
+    }
+
     public static <T extends LfElement, U extends ElementState<T>> List<U> save(Collection<T> elements, Function<T, U> save) {
         Objects.requireNonNull(elements);
         Objects.requireNonNull(save);
