@@ -20,6 +20,7 @@ import com.powsybl.openloadflow.dc.equations.AbstractClosedBranchDcFlowEquationT
 import com.powsybl.openloadflow.dc.equations.ClosedBranchSide1DcFlowEquationTerm;
 import com.powsybl.openloadflow.dc.equations.DcApproximationType;
 import com.powsybl.openloadflow.dc.equations.DcEquationSystemCreationParameters;
+import com.powsybl.openloadflow.dc.equations.DcEquationSystemCreator;
 import com.powsybl.openloadflow.dc.equations.DcEquationType;
 import com.powsybl.openloadflow.dc.equations.DcVariableType;
 import com.powsybl.openloadflow.equations.Equation;
@@ -27,6 +28,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.graph.GraphConnectivity;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.network.PiModel;
 import com.powsybl.openloadflow.network.TapPositionChange;
 import com.powsybl.openloadflow.network.action.AbstractLfBranchAction;
@@ -65,6 +67,25 @@ public interface ComputedElement {
     ClosedBranchSide1DcFlowEquationTerm getLfBranchEquation();
 
     void applyToConnectivity(GraphConnectivity<LfBus, LfBranch> connectivity);
+
+    /**
+     * Build a standalone DC side-1 flow equation term for the given branch, used by the Woodbury engine
+     * to read the branch angle variable rows and compute sensitivities. Built directly (rather than
+     * looked up in the equation system) so it works both with the scalar and the vectorized DC equation
+     * systems; returns {@code null} for branches that have no closed DC flow term (open or zero impedance).
+     */
+    static ClosedBranchSide1DcFlowEquationTerm createBranchEquation(LfBranch branch,
+                                                                    EquationSystem<DcVariableType, DcEquationType> equationSystem,
+                                                                    DcEquationSystemCreationParameters creationParameters) {
+        LfBus bus1 = branch.getBus1();
+        LfBus bus2 = branch.getBus2();
+        if (bus1 == null || bus2 == null || branch.isZeroImpedance(LoadFlowModel.DC)) {
+            return null;
+        }
+        return ClosedBranchSide1DcFlowEquationTerm.create(branch, bus1, bus2, equationSystem.getVariableSet(),
+                DcEquationSystemCreator.isDeriveA1(branch, creationParameters),
+                creationParameters.isUseTransformerRatio(), creationParameters.getDcApproximationType());
+    }
 
     /**
      * Set the indexes of the computed elements in the +1-1 rhs, used in Woodbury calculations.
@@ -159,9 +180,9 @@ public interface ComputedElement {
             case SwitchAction.NAME, TerminalsConnectionAction.NAME -> {
                 AbstractLfBranchAction<?> lfBranchAction = (AbstractLfBranchAction<?>) lfAction;
                 if (!lfBranchAction.getEnabledBranches().isEmpty()) {
-                    elements.addAll(lfBranchAction.getEnabledBranches().stream().map(b -> ComputedSwitchBranchElement.create(b, true, equationSystem)).toList());
+                    elements.addAll(lfBranchAction.getEnabledBranches().stream().map(b -> ComputedSwitchBranchElement.create(b, true, equationSystem, creationParameters)).toList());
                 } else if (!lfBranchAction.getDisabledBranches().isEmpty()) {
-                    elements.addAll(lfBranchAction.getDisabledBranches().stream().map(b -> ComputedSwitchBranchElement.create(b, false, equationSystem)).toList());
+                    elements.addAll(lfBranchAction.getDisabledBranches().stream().map(b -> ComputedSwitchBranchElement.create(b, false, equationSystem, creationParameters)).toList());
                 }
             }
             case PhaseTapChangerTapPositionAction.NAME -> {
@@ -170,7 +191,7 @@ public interface ComputedElement {
                 // handled through the target vector: it must not produce a Woodbury element, otherwise its
                 // diagonal term (1 / (oldPower - newPower)) would be infinite and corrupt the alpha solve
                 if (changesBranchPower(change, creationParameters)) {
-                    elements.add(new ComputedTapPositionChangeElement(change, equationSystem));
+                    elements.add(new ComputedTapPositionChangeElement(change, equationSystem, creationParameters));
                 }
             }
             case GeneratorAction.NAME -> { /* generator actions modify the target vector, they produce no Woodbury elements */ }
