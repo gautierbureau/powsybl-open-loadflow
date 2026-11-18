@@ -73,6 +73,24 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         }
     }
 
+    /** The terms an equation holds as objects: for each variable of each one, its slot and where its derivative goes. */
+    static final class ObjectTerms<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> {
+
+        final List<SingleEquationTerm<V, E>> terms;
+        /** For each term, its variables. */
+        final List<List<Variable<V>>> variables = new ArrayList<>();
+        /** For each variable of each term: its slot. */
+        final int[][] row;
+        /** For each variable of each term: the value index in the own column of the equation, -1 when the pattern lacks it. */
+        final int[][] destination;
+
+        ObjectTerms(List<SingleEquationTerm<V, E>> terms) {
+            this.terms = terms;
+            row = new int[terms.size()][];
+            destination = new int[terms.size()][];
+        }
+    }
+
     private static final int[] NO_SLOT = new int[0];
 
     private final List<Variable<V>> variables;
@@ -90,6 +108,8 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private final boolean[] fixesVariable;
     /** For each equation, the slots it may take besides its own, sorted: empty for most. */
     private final int[][] candidates;
+    /** For each equation, the terms it holds as objects: null when it has none. */
+    private final List<ObjectTerms<V, E>> objectTerms;
 
     private final List<ArrayTerms<V, E>> arrayTerms = new ArrayList<>();
     private final int[] arrayElementsWithSingleTerms;
@@ -145,6 +165,10 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             }
         }
         arrayElementsWithSingleTerms = withSingleTerms.toArray();
+        objectTerms = new ArrayList<>(equationCount);
+        for (int equation = 0; equation < equationCount; equation++) {
+            objectTerms.add(compileObjectTerms(equation));
+        }
 
         candidates = new int[equationCount][];
         Arrays.fill(candidates, NO_SLOT);
@@ -163,6 +187,30 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
                 arrayTerms.add(compile(termArray, a));
             }
         }
+    }
+
+    /** The object terms of an equation with the slots of their variables; null when it has none or when a variable has no slot. */
+    private ObjectTerms<V, E> compileObjectTerms(int equation) {
+        List<SingleEquationTerm<V, E>> terms = List.copyOf(getSingleTerms(equation));
+        if (terms.isEmpty()) {
+            return null;
+        }
+        ObjectTerms<V, E> compiled = new ObjectTerms<>(terms);
+        for (int t = 0; t < terms.size(); t++) {
+            List<Variable<V>> termVariables = terms.get(t).getVariables();
+            compiled.variables.add(termVariables);
+            compiled.row[t] = new int[termVariables.size()];
+            compiled.destination[t] = new int[termVariables.size()];
+            for (int k = 0; k < termVariables.size(); k++) {
+                Integer slot = slots.get(termVariables.get(k));
+                if (slot == null) {
+                    return null;
+                }
+                compiled.row[t][k] = slot;
+                compiled.destination[t][k] = rowIndices != null && ownSlot[equation] >= 0 ? index(ownSlot[equation], slot) : -1;
+            }
+        }
+        return compiled;
     }
 
     private ArrayTerms<V, E> compile(EquationTermArray<V, E> termArray, int a) {
@@ -259,6 +307,16 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     }
 
     private void setDestinations() {
+        for (int equation = 0; equation < equationCount; equation++) {
+            ObjectTerms<V, E> compiled = objectTerms.get(equation);
+            if (compiled != null) {
+                for (int t = 0; t < compiled.row.length; t++) {
+                    for (int k = 0; k < compiled.row[t].length; k++) {
+                        compiled.destination[t][k] = ownSlot[equation] >= 0 ? index(ownSlot[equation], compiled.row[t][k]) : -1;
+                    }
+                }
+            }
+        }
         for (ArrayTerms<V, E> terms : arrayTerms) {
             for (int term = 0; term < terms.equation.length; term++) {
                 for (int k = 0; k < terms.row[term].length; k++) {
@@ -296,6 +354,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         int number = getNumber(equation);
         if (number >= 0) {
             bound[number] = false;
+            objectTerms.set(number, null);
         }
         return number >= 0;
     }
@@ -330,6 +389,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             }
         }
         rows[equation] = sortedDistinct(all);
+        objectTerms.set(equation, compileObjectTerms(equation));
         return true;
     }
 
@@ -456,6 +516,11 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
 
     boolean fixesVariable(int equation) {
         return fixesVariable[equation];
+    }
+
+    /** The terms the equation holds as objects, compiled; null when it has none. */
+    ObjectTerms<V, E> getObjectTerms(int equation) {
+        return objectTerms.get(equation);
     }
 
     /** The slots the equation may take besides its own, as its {@link Placement} gives them. */
