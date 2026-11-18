@@ -39,6 +39,7 @@ public class AcNetworkVector extends AbstractLfNetworkListener
     private final AcBranchVector branchVector;
     private final AcShuntVector shuntVector;
     private final AcHvdcVector hvdcVector;
+    private final AcLoadVector loadVector;
     private boolean variablesInvalid = true;
 
     public AcNetworkVector(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem,
@@ -49,6 +50,7 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         branchVector = new AcBranchVector(network.getBranches(), creationParameters);
         shuntVector = new AcShuntVector(network.getShunts());
         hvdcVector = new AcHvdcVector(network.getHvdcs());
+        loadVector = new AcLoadVector(network.getBuses().size());
     }
 
     public AcBusVector getBusVector() {
@@ -65,6 +67,10 @@ public class AcNetworkVector extends AbstractLfNetworkListener
 
     public AcHvdcVector getHvdcVector() {
         return hvdcVector;
+    }
+
+    public AcLoadVector getLoadVector() {
+        return loadVector;
     }
 
     public void startListening() {
@@ -330,6 +336,34 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         }
     }
 
+    /**
+     * Update the power of the loads that follow a model and its derivative, for each load and for each bus. As a term
+     * held as an object does, the target of a load is read from the load each time.
+     */
+    public void updateLoads() {
+        for (int i = 0; i < loadVector.busNums.size(); i++) {
+            int busNum = loadVector.busNums.getQuick(i);
+            double v = busVector.v[busNum];
+            int first = loadVector.firstLoad[busNum];
+            for (int loadNum = first; loadNum < first + loadVector.loadCount[busNum]; loadNum++) {
+                LfLoad load = loadVector.loads.get(loadNum);
+                LfLoadModel loadModel = load.getLoadModel().orElseThrow();
+                double p = AbstractLoadModelEquationTerm.f(v, load.getTargetP(), loadModel.getExpTermsP());
+                double dpdv = AbstractLoadModelEquationTerm.dfdv(v, load.getTargetP(), loadModel.getExpTermsP());
+                double q = AbstractLoadModelEquationTerm.f(v, load.getTargetQ(), loadModel.getExpTermsQ());
+                double dqdv = AbstractLoadModelEquationTerm.dfdv(v, load.getTargetQ(), loadModel.getExpTermsQ());
+                loadVector.p.setQuick(loadNum, p);
+                loadVector.q.setQuick(loadNum, q);
+                // the first load of the bus sets the sums, so that a bus with one load has the very values of its load
+                boolean isFirst = loadNum == first;
+                loadVector.busP[busNum] = isFirst ? p : loadVector.busP[busNum] + p;
+                loadVector.busDpdv[busNum] = isFirst ? dpdv : loadVector.busDpdv[busNum] + dpdv;
+                loadVector.busQ[busNum] = isFirst ? q : loadVector.busQ[busNum] + q;
+                loadVector.busDqdv[busNum] = isFirst ? dqdv : loadVector.busDqdv[busNum] + dqdv;
+            }
+        }
+    }
+
     public void updateNetworkState() {
         Stopwatch stopwatch = Stopwatch.createStarted();
 
@@ -339,6 +373,7 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         updateOpenBranches();
         updateShunts(state);
         updateHvdcs();
+        updateLoads();
         stopwatch.stop();
         LOGGER.debug("AC network vector update in {} us", stopwatch.elapsed(TimeUnit.MICROSECONDS));
     }
