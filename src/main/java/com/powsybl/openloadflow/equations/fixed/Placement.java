@@ -38,6 +38,15 @@ public interface Placement<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     default void forEachCandidate(CandidateConsumer<V, E> consumer) {
     }
 
+    /**
+     * The kind of a variable. An equation that would leave a zero on the diagonal where it is moves to the slot of
+     * another variable of the kind of its own: there its derivative is as strong as on its own slot. One kind by
+     * default.
+     */
+    default int kind(V variableType) {
+        return 0;
+    }
+
     /** An equation, by type and element, and the variable of a slot it may take, by type and element. */
     @FunctionalInterface
     interface CandidateConsumer<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> {

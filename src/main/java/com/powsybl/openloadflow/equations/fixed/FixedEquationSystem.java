@@ -89,6 +89,9 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
 
     private int[] slotOfEquation;
     private int[] equationOfSlot;
+    /** For the search of a placement: the slots already tried for the equation being placed. */
+    private int[] visited;
+    private int stamp;
     /** For an equation that took a free slot: the slot, kept as long as it is free, so that the pattern stops growing. */
     private int[] movedTo;
 
@@ -123,6 +126,8 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             movedTo = new int[structure.getEquationCount()];
             Arrays.fill(movedTo, -1);
             equationOfSlot = new int[structure.getSlotCount()];
+            visited = new int[structure.getSlotCount()];
+            stamp = 0;
             balance = new double[structure.getSlotCount()];
             equationValues = new double[structure.getSlotCount()];
             placed.clear();
@@ -190,10 +195,12 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
 
     /**
      * Gives each active equation a slot. A slot is live when an active term depends on its variable: OLF's index keeps
-     * a row for exactly those variables. Each equation takes the slot it is paired with; when two claim one, the one
-     * that fixes the variable keeps it. The others take a free live slot: the one they had before, else one of their
-     * candidates, else one of a variable they depend on, else any. Any choice gives the same system, with the
-     * equations in another order; a candidate is in the pattern already.
+     * a row for exactly those variables. Each equation takes the slot it is paired with, when it depends on its
+     * variable; when two claim one, the one that fixes the variable keeps it. The others are placed one by one on a
+     * slot they may take and whose variable they depend on: the one they had before or a candidate, which are in the
+     * pattern already. An equation in the way moves the same way. So no slot holds an equation that does not depend on
+     * its variable, a zero on the diagonal, as long as the candidates allow it. Any placement gives the same system,
+     * with the equations in another order.
      */
     private void place() {
         equationSystem.getIndex().getSortedVariablesToFind();
@@ -205,30 +212,39 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
                 continue;
             }
             int own = structure.getOwnSlot(equation);
-            int other = own >= 0 && isLive(own) ? equationOfSlot[own] : Integer.MAX_VALUE;
-            if (other < 0) {
+            if (own < 0 || !isLive(own) || !structure.dependsOn(equation, own)) {
+                displaced.add(equation);
+            } else if (equationOfSlot[own] < 0) {
                 take(equation, own);
-            } else if (other != Integer.MAX_VALUE && structure.fixesVariable(equation) && !structure.fixesVariable(other)) {
-                slotOfEquation[other] = -1;
-                displaced.add(other);
+            } else if (structure.fixesVariable(equation) && !structure.fixesVariable(equationOfSlot[own])) {
+                displaced.add(equationOfSlot[own]);
+                slotOfEquation[equationOfSlot[own]] = -1;
                 take(equation, own);
             } else {
                 displaced.add(equation);
             }
         }
-        // the equations that have candidates choose first: the others can take any slot
-        for (boolean withCandidates : new boolean[] {true, false}) {
-            for (int i = 0; i < displaced.size(); i++) {
-                int equation = displaced.getQuick(i);
-                if (structure.getCandidates(equation).length > 0 == withCandidates) {
-                    int slot = findFreeSlot(equation);
-                    if (slot < 0) {
-                        throw new PowsyblException("More active equations than variables: no slot left for "
-                                + structure.getType(equation) + " of element " + structure.getElementNum(equation));
-                    }
-                    take(equation, slot);
-                    movedTo[equation] = slot;
+        // a displaced equation takes a slot it may take and depends on; an equation in its way moves the same way
+        TIntArrayList left = new TIntArrayList();
+        for (int i = 0; i < displaced.size(); i++) {
+            int equation = displaced.getQuick(i);
+            stamp++;
+            if (!move(equation, true)) {
+                left.add(equation);
+            }
+        }
+        // what is left has no such slot. It takes one it may take all the same, which leaves a zero on the diagonal
+        // and keeps the pattern; only then any free one
+        for (int i = 0; i < left.size(); i++) {
+            int equation = left.getQuick(i);
+            stamp++;
+            if (!move(equation, false)) {
+                int slot = findFreeSlot(equation);
+                if (slot < 0) {
+                    throw new PowsyblException("More active equations than variables: no slot left for "
+                            + structure.getType(equation) + " of element " + structure.getElementNum(equation));
                 }
+                take(equation, slot);
             }
         }
         for (int slot = 0; slot < equationOfSlot.length; slot++) {
@@ -237,10 +253,47 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             }
         }
         for (int equation = 0; equation < slotOfEquation.length; equation++) {
-            if (slotOfEquation[equation] >= 0) {
-                addToPattern(equation, slotOfEquation[equation]);
+            int slot = slotOfEquation[equation];
+            if (slot >= 0) {
+                if (slot != structure.getOwnSlot(equation)) {
+                    movedTo[equation] = slot;
+                }
+                addToPattern(equation, slot);
             }
         }
+    }
+
+    /**
+     * Gives the equation one of the slots it may take: its own, the one it had or a candidate. When the slot is
+     * held, its equation is moved the same way first: one that has no other slot to go to keeps it. This is the
+     * search of an augmenting path. With {@code dependent}, only slots whose variable the equations depend on are
+     * taken: together the moves then leave no zero on the diagonal when such a placement exists.
+     */
+    private boolean move(int equation, boolean dependent) {
+        int own = structure.getOwnSlot(equation);
+        if (own >= 0 && moveTo(equation, own, dependent)
+                || movedTo[equation] >= 0 && moveTo(equation, movedTo[equation], dependent)) {
+            return true;
+        }
+        for (int slot : structure.getCandidates(equation)) {
+            if (moveTo(equation, slot, dependent)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean moveTo(int equation, int slot, boolean dependent) {
+        if (visited[slot] == stamp || !isLive(slot) || dependent && !structure.dependsOn(equation, slot)) {
+            return false;
+        }
+        visited[slot] = stamp;
+        int other = equationOfSlot[slot];
+        if (other >= 0 && !move(other, dependent)) {
+            return false;
+        }
+        take(equation, slot);
+        return true;
     }
 
     private void take(int equation, int slot) {
@@ -458,6 +511,21 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     public FixedStructure<V, E> getStructure() {
         update();
         return structure;
+    }
+
+    /**
+     * How many slots hold an equation that does not depend, in the current state, on their variable: the zeros on
+     * the diagonal. A factorisation without pivoting needs none.
+     */
+    public int getZeroDiagonalCount() {
+        update();
+        int count = 0;
+        for (int slot = 0; slot < equationOfSlot.length; slot++) {
+            if (equationOfSlot[slot] >= 0 && !structure.dependsOnNow(equationOfSlot[slot], slot)) {
+                count++;
+            }
+        }
+        return count;
     }
 
     /**
