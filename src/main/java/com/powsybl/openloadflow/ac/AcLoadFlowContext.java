@@ -35,6 +35,17 @@ public class AcLoadFlowContext extends AbstractLoadFlowContext<AcVariableType, A
         super(network, parameters);
     }
 
+    /**
+     * The next factorisation of the Jacobian chooses its pivots ({@link com.powsybl.openloadflow.equations.fixed.FixedJacobian#forgetPivots()}).
+     * Nothing is done when the Jacobian is not created yet: its first factorisation chooses them anyway, and creating it
+     * here would create it earlier than the load flow does.
+     */
+    public void forgetPivots() {
+        if (jacobianMatrix != null) {
+            ((AcFixedJacobianMatrix) jacobianMatrix).getFixedJacobian().forgetPivots();
+        }
+    }
+
     @Override
     public JacobianMatrix<AcVariableType, AcEquationType> getJacobianMatrix() {
         if (jacobianMatrix == null) {

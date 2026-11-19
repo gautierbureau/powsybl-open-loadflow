@@ -54,6 +54,8 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
 
     private int analysisCount;
     private int pivotingCount;
+    /** True when the next numerical factorisation chooses its pivots instead of trying those of the previous one. */
+    private boolean freshPivots;
 
     public FixedJacobian(EquationSystem<V, E> equationSystem, VariablePairing<V, E> pairing, MatrixFactory matrixFactory) {
         this.fixed = new FixedEquationSystemIndex<>(equationSystem, pairing, FixedEquationSystemIndex.Scope.ALL);
@@ -122,6 +124,12 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
      * ones when they are no longer good. When one of them has become zero the update fails, and new ones are asked for.
      */
     private void updateLu() {
+        if (freshPivots) {
+            freshPivots = false;
+            pivotingCount++;
+            lu.update(false);
+            return;
+        }
         try {
             lu.update(true);
         } catch (MatrixException e) {
@@ -238,6 +246,15 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     }
 
     /** How many times a pivot of the previous factorisation had become zero, so that new ones were chosen. */
+    /**
+     * The next numerical factorisation chooses its pivots, and the later ones try those first. A computation whose
+     * results must not depend on the ones solved before it calls this when it starts: the pivots it factorises with
+     * then depend on its own matrices only.
+     */
+    public void forgetPivots() {
+        freshPivots = true;
+    }
+
     public int getPivotingCount() {
         return pivotingCount;
     }
