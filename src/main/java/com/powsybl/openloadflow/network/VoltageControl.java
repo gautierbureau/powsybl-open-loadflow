@@ -106,6 +106,7 @@ public class VoltageControl<T extends LfElement> extends Control {
 
     public void setDisabled(boolean disabled) {
         this.disabled = disabled;
+        controlledBus.getNetwork().invalidateControllerElements();
     }
 
     public MergeStatus getMergeStatus() {
