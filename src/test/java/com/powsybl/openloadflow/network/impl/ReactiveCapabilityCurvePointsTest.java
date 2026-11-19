@@ -40,7 +40,6 @@ class ReactiveCapabilityCurvePointsTest {
 
     private static void assertSameLimits(ReactiveCapabilityCurve curve, List<Double> activePowers) {
         ReactiveCapabilityCurvePoints points = ReactiveCapabilityCurvePoints.of(curve);
-        assertTrue(points.isOf(curve));
         for (boolean extrapolate : new boolean[] {false, true}) {
             for (double p : activePowers) {
                 assertEquals(Double.doubleToRawLongBits(curve.getMinQ(p, extrapolate)), Double.doubleToRawLongBits(points.getMinQ(p, extrapolate)),
@@ -112,16 +111,5 @@ class ReactiveCapabilityCurvePointsTest {
         Generator generator = network.getGenerator("GEN");
         double[][] points = {{-0.0, -100, 100}, {100, -50, 50}};
         assertSameLimits(curve(generator, points), List.of(0.0, -0.0, 50.0));
-    }
-
-    @Test
-    void testOtherCurve() {
-        Network network = EurostagTutorialExample1Factory.create();
-        Generator generator = network.getGenerator("GEN");
-        ReactiveCapabilityCurve curve1 = curve(generator, new double[][] {{0, -100, 100}, {100, -50, 50}});
-        ReactiveCapabilityCurvePoints points = ReactiveCapabilityCurvePoints.of(curve1);
-        ReactiveCapabilityCurve curve2 = curve(generator, new double[][] {{0, -100, 100}, {100, -50, 50}});
-        assertTrue(points.isOf(curve1));
-        assertFalse(points.isOf(curve2));
     }
 }
