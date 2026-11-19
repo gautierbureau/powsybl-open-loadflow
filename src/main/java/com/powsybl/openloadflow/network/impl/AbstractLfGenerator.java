@@ -63,12 +63,12 @@ public abstract class AbstractLfGenerator extends AbstractLfInjection implements
     private final boolean extrapolateReactiveLimits;
 
     /*
-     * The limits last read on a reactive capability curve, with the curve and the active power they were read for.
-     * A curve is a lookup in a sorted map that depends on the active power only, and the reactive limits loop reads
-     * the limits of every controller at each check while most active powers do not move. Other limits are read each
-     * time: those of a static var compensator follow the voltage of its bus.
+     * The points of the reactive capability curve as arrays, and the limits last read on them with the active power
+     * they were read for. The limits depend on the active power only, and the reactive limits loop reads the limits of
+     * every controller at each check while most active powers do not move. Other limits are read each time: those of
+     * a static var compensator follow the voltage of its bus.
      */
-    private ReactiveCapabilityCurve curveOfReadQ;
+    private ReactiveCapabilityCurvePoints curvePoints;
     private long activePowerBitsOfReadQ;
     private double readMinQ;
     private double readMaxQ;
@@ -95,7 +95,7 @@ public abstract class AbstractLfGenerator extends AbstractLfInjection implements
         this.referencePriority = other.referencePriority;
         this.reference = other.reference;
         this.extrapolateReactiveLimits = other.extrapolateReactiveLimits;
-        this.curveOfReadQ = other.curveOfReadQ;
+        this.curvePoints = other.curvePoints;
         this.activePowerBitsOfReadQ = other.activePowerBitsOfReadQ;
         this.readMinQ = other.readMinQ;
         this.readMaxQ = other.readMaxQ;
@@ -202,22 +202,29 @@ public abstract class AbstractLfGenerator extends AbstractLfInjection implements
 
     protected abstract Optional<ReactiveLimits> getReactiveLimits();
 
-    /** The limits of a curve at an active power, read again only when the curve or the active power changed. */
+    /**
+     * The limits of a curve at an active power, read again only when the curve or the active power changed. The points
+     * of a curve are read into arrays once.
+     */
     private void readCurveLimits(ReactiveCapabilityCurve curve, double activePower) {
         long activePowerBits = Double.doubleToRawLongBits(activePower);
-        if (curve != curveOfReadQ || activePowerBits != activePowerBitsOfReadQ) {
-            readMinQ = curve.getMinQ(activePower * PerUnit.SB, extrapolateReactiveLimits) / PerUnit.SB;
-            readMaxQ = curve.getMaxQ(activePower * PerUnit.SB, extrapolateReactiveLimits) / PerUnit.SB;
-            curveOfReadQ = curve;
+        boolean newCurve = curvePoints == null || !curvePoints.isOf(curve);
+        if (newCurve) {
+            curvePoints = ReactiveCapabilityCurvePoints.of(curve);
+        }
+        if (newCurve || activePowerBits != activePowerBitsOfReadQ) {
+            readMinQ = curvePoints.getMinQ(activePower * PerUnit.SB, extrapolateReactiveLimits) / PerUnit.SB;
+            readMaxQ = curvePoints.getMaxQ(activePower * PerUnit.SB, extrapolateReactiveLimits) / PerUnit.SB;
             activePowerBitsOfReadQ = activePowerBits;
         }
     }
 
     protected double getMinQ(double activePower) {
-        if (getReactiveLimits().isEmpty()) {
+        Optional<ReactiveLimits> limits = getReactiveLimits();
+        if (limits.isEmpty()) {
             return -Double.MAX_VALUE;
         }
-        ReactiveLimits reactiveLimits = getReactiveLimits().orElseThrow();
+        ReactiveLimits reactiveLimits = limits.get();
         if (reactiveLimits.getKind() == ReactiveLimitsKind.CURVE) {
             readCurveLimits((ReactiveCapabilityCurve) reactiveLimits, activePower);
             return readMinQ;
@@ -227,10 +234,11 @@ public abstract class AbstractLfGenerator extends AbstractLfInjection implements
     }
 
     protected double getMaxQ(double activePower) {
-        if (getReactiveLimits().isEmpty()) {
+        Optional<ReactiveLimits> limits = getReactiveLimits();
+        if (limits.isEmpty()) {
             return Double.MAX_VALUE;
         }
-        ReactiveLimits reactiveLimits = getReactiveLimits().orElseThrow();
+        ReactiveLimits reactiveLimits = limits.get();
         if (reactiveLimits.getKind() == ReactiveLimitsKind.CURVE) {
             readCurveLimits((ReactiveCapabilityCurve) reactiveLimits, activePower);
             return readMaxQ;
