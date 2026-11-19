@@ -109,8 +109,6 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     /** For the search of a placement: the slots already tried for the equation being placed. */
     private int[] visited;
     private int stamp;
-    /** For an equation that took a free slot: the slot, kept as long as it is free, so that the pattern stops growing. */
-    private int[] movedTo;
 
     /*
      * The first pass of the placement, kept from one placement to the next: each equation on its own slot when it
@@ -171,8 +169,6 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             structure = new FixedStructure<>(equationSystem, placement);
             structureBuildCount++;
             slotOfEquation = new int[structure.getEquationCount()];
-            movedTo = new int[structure.getEquationCount()];
-            Arrays.fill(movedTo, -1);
             equationOfSlot = new int[structure.getSlotCount()];
             rowOfSlot = new int[structure.getSlotCount()];
             visited = new int[structure.getSlotCount()];
@@ -318,13 +314,10 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
                 throw new PowsyblException("More variables than active equations: no equation for " + structure.getVariable(slot));
             }
         }
-        // an equation on the slot it had at the last placement already has its destinations, its entries in the pattern and its move noted
+        // an equation on the slot it had at the last placement already has its destinations and its entries in the pattern
         for (int equation = 0; equation < slotOfEquation.length; equation++) {
             int slot = slotOfEquation[equation];
             if (slot >= 0 && (!lastPlacementValid || slot != lastSlotOfEquation[equation])) {
-                if (slot != structure.getOwnSlot(equation)) {
-                    movedTo[equation] = slot;
-                }
                 structure.setDestinationSlot(equation, slot);
                 addToPattern(equation, slot);
             }
@@ -447,8 +440,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
      */
     private boolean move(int equation, boolean dependent) {
         int own = structure.getOwnSlot(equation);
-        if (own >= 0 && moveTo(equation, own, dependent)
-                || movedTo[equation] >= 0 && moveTo(equation, movedTo[equation], dependent)) {
+        if (own >= 0 && moveTo(equation, own, dependent)) {
             return true;
         }
         for (int slot : structure.getCandidates(equation)) {
@@ -486,9 +478,6 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     }
 
     private int findFreeSlot(int equation) {
-        if (movedTo[equation] >= 0 && isFree(movedTo[equation])) {
-            return movedTo[equation];
-        }
         for (int slot : structure.getCandidates(equation)) {
             if (isFree(slot)) {
                 return slot;
