@@ -22,9 +22,6 @@ import com.powsybl.openloadflow.util.PerUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.HashMap;
-import java.util.List;
-
 /**
  * @author Didier Vidal {@literal <didier.vidal_externe at rte-france.com>}
  */
@@ -34,26 +31,17 @@ public class FreezingHvdcACEmulationOuterloop implements AcOuterLoop {
 
     public static final String NAME = "FreezingHvdcACEmulation";
 
-    private enum Step {
-        UNFREEZE,
-        COMPLETE
-    }
-
+    /**
+     * The HVDC lines in AC emulation, gathered once when the outer loop is initialized: the ones frozen before the
+     * first solve, and released at the first check.
+     */
     private static final class ContextData {
 
-        private final Step step = Step.UNFREEZE;
-        private final HashMap<String, Double> angles = new HashMap<>();
-        private final HashMap<String, Double> voltage = new HashMap<>();
+        private final LfHvdc[] acEmulationHvdcs;
 
         private ContextData(LfNetwork network) {
-            network.getBuses()
-                    .stream().filter(b -> !b.isDisabled())
-                    .forEach(b -> {
-                        angles.put(b.getId(), Double.isNaN(b.getAngle()) ? 0 : b.getAngle());
-                        voltage.put(b.getId(), Double.isNaN(b.getV()) ? 1 : b.getV());
-                    });
+            acEmulationHvdcs = network.getHvdcs().stream().filter(LfHvdc::isAcEmulation).toArray(LfHvdc[]::new);
         }
-
     }
 
     @Override
@@ -65,32 +53,30 @@ public class FreezingHvdcACEmulationOuterloop implements AcOuterLoop {
     public void initialize(AcOuterLoopContext context) {
         ContextData contextData = new ContextData(context.getNetwork());
         context.setData(contextData);
-        LfNetwork network = context.getNetwork();
         AcSolverUtil.initStateVector(context.getNetwork(), context.getLoadFlowContext().getEquationSystem(), new PreviousValueVoltageInitializer(true)); // Updating State Vector with previous values
-        network.getHvdcs().stream()
-                .filter(LfHvdc::isAcEmulation)
-                // If some angles are at NaN, it means that the HVDC has been reconnected by an action, AC emulation is not frozen
-                .filter(lfHvdc -> !lfHvdc.isDisabled() && !lfHvdc.getBus1().isDisabled() && !lfHvdc.getBus2().isDisabled())
-                .forEach(lfHvdc -> {
-                    if (!Double.isNaN(lfHvdc.getBus1().getAngle() - lfHvdc.getBus2().getAngle())) {
-                        lfHvdc.getAcEmulationControl().switchToFrozenState(true);
-                        double setPointHvdc;
-                        String controllerId;
-                        String nonControllerId;
-                        if (lfHvdc.getConverterStation1().getTargetP() < 0) {
-                            setPointHvdc = -lfHvdc.getConverterStation1().getTargetP() * PerUnit.SB;
-                            controllerId = lfHvdc.getConverterStation1().getId();
-                            nonControllerId = lfHvdc.getConverterStation2().getId();
-                        } else {
-                            setPointHvdc = -lfHvdc.getConverterStation2().getTargetP() * PerUnit.SB;
-                            controllerId = lfHvdc.getConverterStation2().getId();
-                            nonControllerId = lfHvdc.getConverterStation1().getId();
-                        }
-                        LfReports.reportFreezeHvdc(context.getNetwork().getReportNode(), lfHvdc.getId(), controllerId, nonControllerId, setPointHvdc, LOGGER);
+        for (LfHvdc lfHvdc : contextData.acEmulationHvdcs) {
+            // If some angles are at NaN, it means that the HVDC has been reconnected by an action, AC emulation is not frozen
+            if (!lfHvdc.isDisabled() && !lfHvdc.getBus1().isDisabled() && !lfHvdc.getBus2().isDisabled()) {
+                if (!Double.isNaN(lfHvdc.getBus1().getAngle() - lfHvdc.getBus2().getAngle())) {
+                    lfHvdc.getAcEmulationControl().switchToFrozenState(true);
+                    double setPointHvdc;
+                    String controllerId;
+                    String nonControllerId;
+                    if (lfHvdc.getConverterStation1().getTargetP() < 0) {
+                        setPointHvdc = -lfHvdc.getConverterStation1().getTargetP() * PerUnit.SB;
+                        controllerId = lfHvdc.getConverterStation1().getId();
+                        nonControllerId = lfHvdc.getConverterStation2().getId();
                     } else {
-                        LfReports.reportNoFreezeBecauseHvdcAction(context.getNetwork().getReportNode(), lfHvdc.getId(), LOGGER);
+                        setPointHvdc = -lfHvdc.getConverterStation2().getTargetP() * PerUnit.SB;
+                        controllerId = lfHvdc.getConverterStation2().getId();
+                        nonControllerId = lfHvdc.getConverterStation1().getId();
                     }
-                });
+                    LfReports.reportFreezeHvdc(context.getNetwork().getReportNode(), lfHvdc.getId(), controllerId, nonControllerId, setPointHvdc, LOGGER);
+                } else {
+                    LfReports.reportNoFreezeBecauseHvdcAction(context.getNetwork().getReportNode(), lfHvdc.getId(), LOGGER);
+                }
+            }
+        }
     }
 
     @Override
@@ -99,30 +85,19 @@ public class FreezingHvdcACEmulationOuterloop implements AcOuterLoop {
         return context.getNetwork().getHvdcs().stream().anyMatch(LfHvdc::isAcEmulation);
     }
 
+    /** The HVDC lines frozen before the first solve are released at the first check; the next checks find none. */
     @Override
     public OuterLoopResult check(AcOuterLoopContext context, ReportNode reportNode) {
         ContextData contextData = (ContextData) context.getData();
-        return switch (contextData.step) {
-            case UNFREEZE -> unfreezeHvdcs(context, reportNode);
-            case COMPLETE -> new OuterLoopResult(this, OuterLoopStatus.STABLE);
-        };
-    }
-
-    private OuterLoopResult unfreezeHvdcs(AcOuterLoopContext context, ReportNode reportNode) {
-
-        List<LfHvdc> frozenHvdc = context.getNetwork().getHvdcs().stream()
-                .filter(LfHvdc::isAcEmulation)
-                .filter(hvdc -> hvdc.getAcEmulationControl().getAcEmulationStatus() == LfHvdc.AcEmulationControl.AcEmulationStatus.FROZEN)
-                .toList();
-
-        if (!frozenHvdc.isEmpty()) {
-            for (LfHvdc lfHvdc : frozenHvdc) {
+        boolean unfrozen = false;
+        for (LfHvdc lfHvdc : contextData.acEmulationHvdcs) {
+            if (lfHvdc.getAcEmulationControl().getAcEmulationStatus() == LfHvdc.AcEmulationControl.AcEmulationStatus.FROZEN) {
                 LfReports.reportUnfreezeHvdc(reportNode, lfHvdc.getId(), LOGGER);
                 lfHvdc.getAcEmulationControl().switchToLinearMode();
+                unfrozen = true;
             }
         }
-
-        return new OuterLoopResult(this, frozenHvdc.isEmpty() ? OuterLoopStatus.STABLE : OuterLoopStatus.UNSTABLE);
+        return new OuterLoopResult(this, unfrozen ? OuterLoopStatus.UNSTABLE : OuterLoopStatus.STABLE);
     }
 
 }
