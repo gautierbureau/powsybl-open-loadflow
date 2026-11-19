@@ -356,24 +356,20 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     }
 
     public void eval(double[] values) {
+        // the columns and the number of terms of an array are read once and not at each term: the loop below is the
+        // whole cost of this method
+        int[] columns = getElementNumToColumn();
         for (EquationTermArray<V, E> termArray : termArrays) {
             double[] termValues = termArray.eval();
-            int[] termNumsConcatenatedStartIndices = termArray.getTermNumsConcatenatedStartIndices();
-            for (int elementNum = 0; elementNum < elementCount; elementNum++) {
-                // skip inactive equations
-                if (!elementActive[elementNum]) {
-                    continue;
-                }
-                int column = getElementNumToColumn(elementNum);
-                var termNums = termArray.getTermNumsConcatenated();
-                int iStart = termNumsConcatenatedStartIndices[elementNum];
-                int iEnd = termNumsConcatenatedStartIndices[elementNum + 1];
-                for (int i = iStart; i < iEnd; i++) {
-                    int termNum = termNums.getQuick(i);
-                    // skip inactive terms
-                    if (termArray.isTermActive(termNum)) {
-                        int termElementNum = termArray.getTermElementNum(termNum);
-                        values[column] += termValues[termElementNum];
+            // by term and not by equation: a term array may hold terms for few equations, and the terms of an
+            // equation come in the order they were added either way, so each sum is the same
+            int termCount = termArray.getTermCount();
+            for (int termNum = 0; termNum < termCount; termNum++) {
+                // skip inactive terms and the terms of inactive equations
+                if (termArray.isTermActive(termNum)) {
+                    int elementNum = termArray.getEquationElementNum(termNum);
+                    if (elementActive[elementNum]) {
+                        values[columns[elementNum]] += termValues[termArray.getTermElementNum(termNum)];
                     }
                 }
             }

@@ -116,6 +116,11 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
         return termActive.getQuick(termNum) == 1;
     }
 
+    /** The number of terms, active or not. */
+    public int getTermCount() {
+        return termElementNums.size();
+    }
+
     public int getEquationElementNum(int termNum) {
         return equationElementNums.getQuick(termNum);
     }
