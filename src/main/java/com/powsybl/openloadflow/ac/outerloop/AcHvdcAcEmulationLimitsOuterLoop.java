@@ -30,12 +30,25 @@ public class AcHvdcAcEmulationLimitsOuterLoop
 
     private static final Logger LOGGER = LoggerFactory.getLogger(AcHvdcAcEmulationLimitsOuterLoop.class);
 
+    /** The HVDC lines in AC emulation, gathered once when the outer loop is initialized, in the order of the network. */
+    private record ContextData(LfHvdc[] acEmulationHvdcs) {
+    }
+
+    @Override
+    public void initialize(AcOuterLoopContext context) {
+        context.setData(new ContextData(context.getNetwork().getHvdcs().stream().filter(LfHvdc::isAcEmulation).toArray(LfHvdc[]::new)));
+    }
+
+    /**
+     * Checks each HVDC line in AC emulation that is connected, as the device does one line per thread: its flows
+     * against its limits switch it between linear mode and saturation.
+     */
     @Override
     public OuterLoopResult check(AcOuterLoopContext context, ReportNode reportNode) {
         OuterLoopStatus status = OuterLoopStatus.STABLE;
 
-        for (LfHvdc hvdc : context.getNetwork().getHvdcs()) {
-            if (!hvdc.isAcEmulation() || hvdc.getBus1().isDisabled() || hvdc.getBus2().isDisabled() || hvdc.isDisabled()) {
+        for (LfHvdc hvdc : ((ContextData) context.getData()).acEmulationHvdcs()) {
+            if (hvdc.getBus1().isDisabled() || hvdc.getBus2().isDisabled() || hvdc.isDisabled()) {
                 continue;
             }
             if (checkAcEmulationMode(hvdc, true, LOGGER, reportNode)) {
