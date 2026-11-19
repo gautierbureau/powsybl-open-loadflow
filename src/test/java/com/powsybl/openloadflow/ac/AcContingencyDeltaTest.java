@@ -212,4 +212,46 @@ class AcContingencyDeltaTest {
         }
         assertTrue(recorded > 80, recorded + " contingencies recorded");
     }
+
+    /**
+     * With the slack distributed, the loss of the generator of bus 2 is spread over the other generators before the
+     * solve, as a security analysis does. The record taken after the spreading carries the lost generator, at a target
+     * and an anchor of 0, and every participant it moved, at its new target; they make up the spread power.
+     */
+    @Test
+    void theSpreadLossMovesTheParticipants() {
+        Network network = IeeeCdfNetworkFactory.create14();
+        Contingency contingency = new Contingency("B2-G", new GeneratorContingency("B2-G"));
+        LoadFlowParameters parameters = new LoadFlowParameters().setDistributedSlack(true);
+        PropagatedContingency propagated = PropagatedContingency.createList(network, List.of(contingency), new LfTopoConfig(),
+                new PropagatedContingencyCreationParameters()).get(0);
+        AcLoadFlowParameters acParameters = OpenLoadFlowParameters.createAcParameters(network, parameters, OpenLoadFlowParameters.create(parameters),
+                new DenseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>(), false, false);
+        LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
+        try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters)) {
+            new AcloadFlowEngine(context).run();
+            AcContingencyDelta.Baseline base = AcContingencyDelta.baseline(context);
+            java.util.Map<String, Double> before = new java.util.HashMap<>();
+            lfNetwork.getBuses().forEach(b -> b.getGenerators().forEach(g -> before.put(g.getId(), g.getTargetP())));
+            LfContingency lfContingency = propagated.toLfContingency(lfNetwork).orElseThrow();
+            lfContingency.apply(parameters.getBalanceType());
+            double spread = new com.powsybl.openloadflow.sa.DefaultContingencyActivePowerLossDistribution().run(lfNetwork, lfContingency, contingency,
+                    new com.powsybl.security.SecurityAnalysisParameters().setLoadFlowParameters(parameters), null, com.powsybl.commons.report.ReportNode.NO_OP);
+            AcContingencyDelta delta = AcContingencyDelta.record(lfContingency, context, base, spread);
+            assertEquals(spread, delta.preDistributedActivePower());
+            assertTrue(spread > 0);
+            List<String> ids = List.of(delta.generatorIds());
+            int lost = ids.indexOf("B2-G");
+            assertTrue(lost >= 0);
+            assertEquals(0, delta.generatorTargetP()[lost]);
+            assertEquals(0, delta.generatorInitialTargetP()[lost]);
+            double moved = 0;
+            for (int g = 0; g < ids.size(); g++) {
+                if (g != lost) {
+                    moved += delta.generatorTargetP()[g] - before.get(ids.get(g));
+                }
+            }
+            assertEquals(spread, moved, 1e-9);
+        }
+    }
 }

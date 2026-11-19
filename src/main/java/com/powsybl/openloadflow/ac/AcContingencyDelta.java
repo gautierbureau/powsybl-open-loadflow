@@ -12,11 +12,17 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.equations.fixed.FixedEquationSystem;
 import com.powsybl.openloadflow.equations.fixed.FixedStructure;
 import com.powsybl.openloadflow.network.DisabledBranchStatus;
+import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfContingency;
 import com.powsybl.openloadflow.network.LfElement;
+import com.powsybl.openloadflow.network.LfGenerator;
+import com.powsybl.openloadflow.network.LfLoad;
+import com.powsybl.openloadflow.network.LfNetwork;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.List;
 import java.util.Objects;
 import java.util.function.ToIntFunction;
 
@@ -32,7 +38,11 @@ import java.util.function.ToIntFunction;
  *     active and reactive balances of its bus;</li>
  * <li>the elements the contingency disables, by number: buses, branches open at both sides or at one, HVDC lines;</li>
  * <li>the active power the contingency takes out of the balance, which the slack distribution spreads before the
- *     solve.</li>
+ *     solve, and the part of it that was spread ({@code preDistributedActivePower});</li>
+ * <li>the generators and the loads whose target, or whose anchor ({@code initialTargetP}: the target the slack
+ *     distribution starts from again when it resets), changed: the lost ones, and those the spreading of the loss
+ *     moved. Taken after that spreading, they are the starting point of the post-contingency solve, so a device needs
+ *     no distribution of its own before it.</li>
  * </ul>
  *
  * <p>The delta is taken between the state recorded in a {@link Baseline} before the contingency and the state after
@@ -40,14 +50,20 @@ import java.util.function.ToIntFunction;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public record AcContingencyDelta(String contingencyId, double activePowerLoss,
+public record AcContingencyDelta(String contingencyId, double activePowerLoss, double preDistributedActivePower,
                                  int[] disabledBuses, int[] disabledBranches, int[] side1OpenBranches, int[] side2OpenBranches,
-                                 int[] disabledHvdcs, int[] slots, int[] modes, double[] targets) {
+                                 int[] disabledHvdcs, int[] slots, int[] modes, double[] targets,
+                                 String[] generatorIds, double[] generatorTargetP, double[] generatorInitialTargetP,
+                                 String[] loadIds, double[] loadTargetP) {
 
     public AcContingencyDelta {
         Objects.requireNonNull(contingencyId);
         if (slots.length != modes.length || slots.length != targets.length) {
             throw new IllegalArgumentException("One mode and one target by slot");
+        }
+        if (generatorIds.length != generatorTargetP.length || generatorIds.length != generatorInitialTargetP.length
+                || loadIds.length != loadTargetP.length) {
+            throw new IllegalArgumentException("One target by generator and by load");
         }
     }
 
@@ -57,11 +73,25 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss,
         private final FixedStructure<AcVariableType, AcEquationType> structure;
         private final int[] modes;
         private final double[] targets;
+        private final List<LfGenerator> generators;
+        private final double[] generatorTargetP;
+        private final double[] generatorInitialTargetP;
+        private final List<LfLoad> loads;
+        private final double[] loadTargetP;
 
-        private Baseline(FixedStructure<AcVariableType, AcEquationType> structure, int[] modes, double[] targets) {
+        private Baseline(FixedStructure<AcVariableType, AcEquationType> structure, int[] modes, double[] targets, LfNetwork network) {
             this.structure = structure;
             this.modes = modes;
             this.targets = targets;
+            generators = new ArrayList<>();
+            loads = new ArrayList<>();
+            for (LfBus bus : network.getBuses()) {
+                generators.addAll(bus.getGenerators());
+                loads.addAll(bus.getLoads());
+            }
+            generatorTargetP = generators.stream().mapToDouble(LfGenerator::getTargetP).toArray();
+            generatorInitialTargetP = generators.stream().mapToDouble(LfGenerator::getInitialTargetP).toArray();
+            loadTargetP = loads.stream().mapToDouble(LfLoad::getTargetP).toArray();
         }
 
         public int[] getModes() {
@@ -97,7 +127,7 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss,
         double[] targetVector = context.getTargetVector().getArray();
         int[] modes = fixed.getModes().clone();
         FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
-        return new Baseline(structure, modes, targetsBySlot(fixed, structure, targetVector));
+        return new Baseline(structure, modes, targetsBySlot(fixed, structure, targetVector), context.getNetwork());
     }
 
     /**
@@ -106,6 +136,15 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss,
      * again.
      */
     public static AcContingencyDelta record(LfContingency contingency, AcLoadFlowContext context, Baseline baseline) {
+        return record(contingency, context, baseline, 0);
+    }
+
+    /**
+     * The same, once the loss has also been spread over the participants of the slack distribution
+     * ({@code ContingencyActivePowerLossDistribution}), which spread {@code preDistributedActivePower} of it.
+     */
+    public static AcContingencyDelta record(LfContingency contingency, AcLoadFlowContext context, Baseline baseline,
+                                            double preDistributedActivePower) {
         Objects.requireNonNull(contingency);
         FixedEquationSystem<AcVariableType, AcEquationType> fixed = fixed(context);
         double[] targetVector = context.getTargetVector().getArray();
@@ -130,14 +169,44 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss,
             deltaModes[i] = modes[slots[i]];
             deltaTargets[i] = targets[slots[i]];
         }
+        List<String> generatorIds = new ArrayList<>();
+        List<Double> generatorTargets = new ArrayList<>();
+        List<Double> generatorAnchors = new ArrayList<>();
+        for (int g = 0; g < baseline.generators.size(); g++) {
+            LfGenerator generator = baseline.generators.get(g);
+            if (differs(generator.getTargetP(), baseline.generatorTargetP[g]) || differs(generator.getInitialTargetP(), baseline.generatorInitialTargetP[g])) {
+                generatorIds.add(generator.getId());
+                generatorTargets.add(generator.getTargetP());
+                generatorAnchors.add(generator.getInitialTargetP());
+            }
+        }
+        List<String> loadIds = new ArrayList<>();
+        List<Double> loadTargets = new ArrayList<>();
+        for (int l = 0; l < baseline.loads.size(); l++) {
+            LfLoad load = baseline.loads.get(l);
+            if (differs(load.getTargetP(), baseline.loadTargetP[l])) {
+                loadIds.add(load.getId());
+                loadTargets.add(load.getTargetP());
+            }
+        }
         var disabledNetwork = contingency.getDisabledNetwork();
-        return new AcContingencyDelta(contingency.getId(), contingency.getActivePowerLoss(),
+        return new AcContingencyDelta(contingency.getId(), contingency.getActivePowerLoss(), preDistributedActivePower,
                 nums(disabledNetwork.getBuses(), LfElement::getNum),
                 branches(disabledNetwork.getBranchesStatus(), DisabledBranchStatus.BOTH_SIDES),
                 branches(disabledNetwork.getBranchesStatus(), DisabledBranchStatus.SIDE_1),
                 branches(disabledNetwork.getBranchesStatus(), DisabledBranchStatus.SIDE_2),
                 nums(disabledNetwork.getHvdcs(), LfElement::getNum),
-                slots, deltaModes, deltaTargets);
+                slots, deltaModes, deltaTargets,
+                generatorIds.toArray(new String[0]), unbox(generatorTargets), unbox(generatorAnchors),
+                loadIds.toArray(new String[0]), unbox(loadTargets));
+    }
+
+    private static boolean differs(double a, double b) {
+        return Double.doubleToLongBits(a) != Double.doubleToLongBits(b);
+    }
+
+    private static double[] unbox(List<Double> values) {
+        return values.stream().mapToDouble(Double::doubleValue).toArray();
     }
 
     private static <T> int[] nums(Collection<T> elements, ToIntFunction<T> num) {
