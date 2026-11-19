@@ -21,6 +21,8 @@ import com.powsybl.openloadflow.network.impl.LfNetworkLoaderImpl;
 import com.powsybl.openloadflow.network.util.UniformValueVoltageInitializer;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -125,6 +127,76 @@ class EquationArrayTest {
 
         assertEquals(equationSystem.getEquation(1, AcEquationType.BUS_TARGET_P).orElseThrow().eval(),
                      equationSystem2.getEquationArray(AcEquationType.BUS_TARGET_P).orElseThrow().getElement(1).eval());
+    }
+
+    /**
+     * The values of an equation array are those of the equations held as objects when some terms and some equations
+     * are inactive: an inactive term adds nothing, an inactive equation has no value, and the terms of an equation are
+     * added in the same order.
+     */
+    @Test
+    void testEvalWithInactiveTermsAndEquations() {
+        Network network = EurostagTutorialExample1Factory.create();
+        LfNetwork lfNetwork = LfNetwork.load(network, new LfNetworkLoaderImpl(), new FirstSlackBusSelector()).get(0);
+        LfBranch line = lfNetwork.getBranchById("NHV1_NHV2_1");
+        LfBus loadBus = lfNetwork.getBranchById("NHV2_NLOAD").getBus2();
+
+        EquationSystem<AcVariableType, AcEquationType> equationSystem = createEquationSystem(lfNetwork);
+        EquationSystem<AcVariableType, AcEquationType> equationSystem2 = createEquationSystemUsingArrayEquations(lfNetwork);
+        EquationArray<AcVariableType, AcEquationType> equationArray = equationSystem2.getEquationArray(AcEquationType.BUS_TARGET_P).orElseThrow();
+        // a state that is not flat, so that no flow is zero
+        for (EquationSystem<AcVariableType, AcEquationType> es : List.of(equationSystem, equationSystem2)) {
+            double[] x = es.getStateVector().get().clone();
+            for (Variable<AcVariableType> variable : es.getIndex().getSortedVariablesToFind()) {
+                x[variable.getRow()] += 0.05 * Math.sin(1.0 + variable.getElementNum() + 10 * variable.getType().ordinal());
+            }
+            es.getStateVector().set(x);
+        }
+
+        // the flow of a line at its side 1 is off, in both systems
+        equationSystem.getEquationTerms(ElementType.BRANCH, line.getNum()).stream()
+                .filter(ClosedBranchSide1ActiveFlowEquationTerm.class::isInstance)
+                .forEach(term -> term.setActive(false));
+        equationArray.getTermArrays().get(0).setTermElementActive(line.getNum(), false);
+        assertValuesOfTheArraysAreThoseOfTheObjects(equationSystem, equationSystem2, lfNetwork);
+        assertNotEquals(0, equationArray.getElement(line.getBus1().getNum()).eval());
+
+        // the equation of a bus is off too
+        equationSystem.getEquation(loadBus.getNum(), AcEquationType.BUS_TARGET_P).orElseThrow().setActive(false);
+        equationArray.getElement(loadBus.getNum()).setActive(false);
+        assertEquals(lfNetwork.getBuses().size() - 1, equationSystem2.getIndex().getColumnCount());
+        assertValuesOfTheArraysAreThoseOfTheObjects(equationSystem, equationSystem2, lfNetwork);
+
+        // and back
+        equationSystem.getEquationTerms(ElementType.BRANCH, line.getNum()).forEach(term -> term.setActive(true));
+        equationArray.getTermArrays().get(0).setTermElementActive(line.getNum(), true);
+        equationSystem.getEquation(loadBus.getNum(), AcEquationType.BUS_TARGET_P).orElseThrow().setActive(true);
+        equationArray.getElement(loadBus.getNum()).setActive(true);
+        assertValuesOfTheArraysAreThoseOfTheObjects(equationSystem, equationSystem2, lfNetwork);
+    }
+
+    private static void assertValuesOfTheArraysAreThoseOfTheObjects(EquationSystem<AcVariableType, AcEquationType> equationSystem,
+                                                                   EquationSystem<AcVariableType, AcEquationType> equationSystem2,
+                                                                   LfNetwork lfNetwork) {
+        double[] values = new double[lfNetwork.getBuses().size()];
+        for (var equation : equationSystem.getIndex().getSortedSingleEquationsToSolve()) {
+            values[equation.getColumn()] += equation.eval();
+        }
+        double[] values2 = new double[lfNetwork.getBuses().size()];
+        for (var equationArray : equationSystem2.getEquationArrays()) {
+            equationArray.eval(values2);
+            // the value of each equation of the array alone is the same one
+            for (int elementNum = 0; elementNum < equationArray.getElementCount(); elementNum++) {
+                if (equationArray.isElementActive(elementNum)) {
+                    assertEquals(equationArray.getElement(elementNum).eval(), values2[equationArray.getElementNumToColumn(elementNum)]);
+                }
+            }
+        }
+        assertArrayEquals(values, values2);
+        try (EquationVector<AcVariableType, AcEquationType> equationVector = new EquationVector<>(equationSystem);
+             EquationVector<AcVariableType, AcEquationType> equationVector2 = new EquationVector<>(equationSystem2)) {
+            assertArrayEquals(equationVector.getArray(), equationVector2.getArray());
+        }
     }
 
     /**
