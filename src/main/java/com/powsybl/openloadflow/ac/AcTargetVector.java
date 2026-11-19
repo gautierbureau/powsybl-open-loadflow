@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac;
 
 import com.powsybl.commons.PowsyblException;
+import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.equations.EquationArray;
@@ -16,10 +17,22 @@ import com.powsybl.openloadflow.equations.SingleEquation;
 import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.network.*;
 
-import java.util.List;
-import java.util.Objects;
+import java.util.*;
 
 /**
+ * The targets of the AC equations, in the columns of the index.
+ *
+ * <p>The target of each equation is kept by equation type and element, and computed again only when an event of the
+ * network changes what it is computed from: the active power of a bus for its active balance, its reactive power
+ * (or its active power, or its voltage control switched, which compute it again) for its reactive balance and its
+ * voltage target with a slope, a tap for the targets of its branch, a susceptance
+ * for the target of its shunt. Other events (an element disabled or enabled, a control switched, a target of a
+ * control changed, a zero impedance network split or merged, the slack bus moved) are rarer: every target is
+ * computed again. When the index changes, the targets are gathered into its columns: a target is computed only for
+ * an equation that has none yet. The right-hand side of a single equation is read at each gather.
+ *
+ * <p>With assertions enabled, each gather is compared with the targets computed again for every equation.
+ *
  * @author Geoffroy Jamgotchian {@literal <geoffroy.jamgotchian at rte-france.com>}
  */
 public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType> {
@@ -169,17 +182,244 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
         }
     }
 
-    public AcTargetVector(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
-        super(network, equationSystem, new Initializer<>() {
-            @Override
-            public void initialize(SingleEquation<AcVariableType, AcEquationType> equation, LfNetwork network, double[] targets) {
-                AcTargetVector.init(equation, network, targets);
-            }
+    private static final Initializer<AcVariableType, AcEquationType> INITIALIZER = new Initializer<>() {
+        @Override
+        public void initialize(SingleEquation<AcVariableType, AcEquationType> equation, LfNetwork network, double[] targets) {
+            AcTargetVector.init(equation, network, targets);
+        }
 
-            @Override
-            public void initialize(EquationArray<AcVariableType, AcEquationType> equationArray, LfNetwork network, double[] targets) {
-                AcTargetVector.init(equationArray, network, targets);
+        @Override
+        public void initialize(EquationArray<AcVariableType, AcEquationType> equationArray, LfNetwork network, double[] targets) {
+            AcTargetVector.init(equationArray, network, targets);
+        }
+    };
+
+    private final LfNetwork network;
+
+    /** For each equation type, the target of each element, valid where {@link #computed} is set. */
+    private final EnumMap<AcEquationType, double[]> targets = new EnumMap<>(AcEquationType.class);
+
+    private final EnumMap<AcEquationType, BitSet> computed = new EnumMap<>(AcEquationType.class);
+
+    private int computedCount;
+
+    private final LfNetworkListener targetListener = new AbstractLfNetworkListener() {
+
+        @Override
+        public void onLoadActivePowerTargetChange(LfLoad load, double oldTargetP, double newTargetP) {
+            onActivePowerChange(load.getBus());
+        }
+
+        @Override
+        public void onGenerationActivePowerTargetChange(LfGenerator generator, double oldGenerationTargetP, double newGenerationTargetP) {
+            onActivePowerChange(generator.getBus());
+        }
+
+        @Override
+        public void onLoadReactivePowerTargetChange(LfLoad load, double oldTargetQ, double newTargetQ) {
+            onReactivePowerChange(load.getBus());
+        }
+
+        @Override
+        public void onGenerationReactivePowerTargetChange(LfBus bus, double oldGenerationTargetQ, double newGenerationTargetQ) {
+            onReactivePowerChange(bus);
+        }
+
+        @Override
+        public void onGeneratorVoltageControlChange(LfBus controllerBus, boolean newVoltageControllerEnabled) {
+            // the generation target Q of the bus is computed again when it is read, without an event
+            onReactivePowerChange(controllerBus);
+        }
+
+        @Override
+        public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition, boolean modifiedTapImpedance) {
+            int num = branch.getNum();
+            forget(AcEquationType.BRANCH_TARGET_P1, num);
+            forget(AcEquationType.BRANCH_TARGET_P2, num);
+            forget(AcEquationType.BRANCH_TARGET_ALPHA1, num);
+            forget(AcEquationType.BRANCH_TARGET_RHO1, num);
+            forget(AcEquationType.ZERO_PHI, num);
+        }
+
+        @Override
+        public void onShuntSusceptanceChange(LfShunt shunt, double b) {
+            forget(AcEquationType.SHUNT_TARGET_B, shunt.getNum());
+        }
+
+        @Override
+        public void onGeneratorVoltageControlTargetChange(GeneratorVoltageControl control, double newTargetVoltage) {
+            forgetAll();
+        }
+
+        @Override
+        public void onTransformerVoltageControlTargetChange(TransformerVoltageControl transformerVoltageControl, double newTargetVoltage) {
+            forgetAll();
+        }
+
+        @Override
+        public void onDisableChange(LfElement element, boolean disabled) {
+            forgetAll();
+        }
+
+        @Override
+        public void onHvdcAcEmulationStatusChange(LfHvdc hvdc, LfHvdc.AcEmulationControl.AcEmulationStatus acEmulationStatus) {
+            forgetAll();
+        }
+
+        @Override
+        public void onGeneratorReactivePowerControlChange(LfBus controllerBus, boolean newReactiveControllerEnabled) {
+            forgetAll();
+        }
+
+        @Override
+        public void onTransformerPhaseControlChange(LfBranch controllerBranch, boolean newPhaseControlEnabled) {
+            forgetAll();
+        }
+
+        @Override
+        public void onTransformerVoltageControlChange(LfBranch controllerBranch, boolean newVoltageControllerEnabled) {
+            forgetAll();
+        }
+
+        @Override
+        public void onShuntVoltageControlChange(LfShunt controllerShunt, boolean newVoltageControllerEnabled) {
+            forgetAll();
+        }
+
+        @Override
+        public void onZeroImpedanceNetworkSplit(LfZeroImpedanceNetwork initialNetwork, List<LfZeroImpedanceNetwork> splitNetworks, LoadFlowModel loadFlowModel) {
+            forgetAll();
+        }
+
+        @Override
+        public void onZeroImpedanceNetworkMerge(LfZeroImpedanceNetwork network1, LfZeroImpedanceNetwork network2, LfZeroImpedanceNetwork mergedNetwork, LoadFlowModel loadFlowModel) {
+            forgetAll();
+        }
+
+        @Override
+        public void onBranchConnectionStatusChange(LfBranch branch, TwoSides side, boolean connected) {
+            forgetAll();
+        }
+
+        @Override
+        public void onSlackBusChange(LfBus bus, boolean slack) {
+            forgetAll();
+        }
+    };
+
+    public AcTargetVector(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        super(network, equationSystem, INITIALIZER);
+        this.network = network;
+        network.addListener(targetListener);
+    }
+
+    /**
+     * The active power of a bus is in its active balance, and the slack's in the distribution of every bus. A
+     * generator whose target Q follows its reactive limits moves it with the active power, without an event.
+     */
+    private void onActivePowerChange(LfBus bus) {
+        forget(AcEquationType.BUS_TARGET_P, bus.getNum());
+        if (bus.isSlack()) {
+            forget(AcEquationType.BUS_DISTR_SLACK_P);
+        } else {
+            forget(AcEquationType.BUS_DISTR_SLACK_P, bus.getNum());
+        }
+        onReactivePowerChange(bus);
+    }
+
+    /**
+     * The reactive power of a bus is in its reactive balance, in its voltage target when a generator has a slope, and
+     * in the targets of the reactive power distribution of every control it may belong to.
+     */
+    private void onReactivePowerChange(LfBus bus) {
+        forget(AcEquationType.BUS_TARGET_Q, bus.getNum());
+        forget(AcEquationType.BUS_TARGET_V, bus.getNum());
+        forget(AcEquationType.DISTR_Q);
+        invalidateValues();
+    }
+
+    private void forget(AcEquationType type, int elementNum) {
+        BitSet c = computed.get(type);
+        if (c != null) {
+            c.clear(elementNum);
+        }
+    }
+
+    private void forget(AcEquationType type) {
+        BitSet c = computed.get(type);
+        if (c != null) {
+            c.clear();
+        }
+    }
+
+    private void forgetAll() {
+        computed.values().forEach(BitSet::clear);
+        invalidateValues();
+    }
+
+    private double target(AcEquationType type, int elementNum) {
+        BitSet c = computed.computeIfAbsent(type, k -> new BitSet());
+        double[] t = targets.get(type);
+        if (t == null || elementNum >= t.length) {
+            t = t == null ? new double[Math.max(16, elementNum + 1)] : Arrays.copyOf(t, Math.max(2 * t.length, elementNum + 1));
+            targets.put(type, t);
+        }
+        if (!c.get(elementNum)) {
+            init(type, elementNum, elementNum, network, t);
+            c.set(elementNum);
+            computedCount++;
+        }
+        return t[elementNum];
+    }
+
+    private void gather(double[] array) {
+        for (SingleEquation<AcVariableType, AcEquationType> equation : equationSystem.getIndex().getSortedSingleEquationsToSolve()) {
+            int column = equation.getColumn();
+            array[column] = target(equation.getType(), equation.getElementNum());
+            array[column] -= equation.rhs();
+        }
+        for (EquationArray<AcVariableType, AcEquationType> equationArray : equationSystem.getEquationArrays()) {
+            AcEquationType type = equationArray.getType();
+            for (int elementNum = 0; elementNum < equationArray.getElementCount(); elementNum++) {
+                if (equationArray.isElementActive(elementNum)) {
+                    array[equationArray.getElementNumToColumn(elementNum)] = target(type, elementNum);
+                }
             }
-        });
+        }
+        assert sameAsComputedAgain(array);
+    }
+
+    private boolean sameAsComputedAgain(double[] array) {
+        double[] again = createArray(network, equationSystem, INITIALIZER);
+        for (int column = 0; column < again.length; column++) {
+            if (Double.doubleToLongBits(array[column]) != Double.doubleToLongBits(again[column])) {
+                throw new AssertionError("Kept target of " + equationSystem.getIndex().getEquationAtColumn(column)
+                        + " is " + array[column] + ", computed again " + again[column]);
+            }
+        }
+        return true;
+    }
+
+    @Override
+    protected double[] createArray() {
+        double[] array = new double[equationSystem.getIndex().getColumnCount()];
+        gather(array);
+        return array;
+    }
+
+    @Override
+    protected void updateArray(double[] array) {
+        gather(array);
+    }
+
+    /** How many targets were computed since the vector was created. */
+    public int getComputedCount() {
+        return computedCount;
+    }
+
+    @Override
+    public void close() {
+        super.close();
+        network.removeListener(targetListener);
     }
 }
