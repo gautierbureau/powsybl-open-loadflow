@@ -12,12 +12,17 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.equations.fixed.FixedEquationSystemIndex;
 import com.powsybl.openloadflow.equations.fixed.FixedStructure;
 import com.powsybl.openloadflow.network.DisabledBranchStatus;
+import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfContingency;
 import com.powsybl.openloadflow.network.LfElement;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfLoad;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.LfShunt;
+import com.powsybl.openloadflow.network.LfSynchronousNetwork;
+import com.powsybl.openloadflow.network.PiModel;
+import com.powsybl.openloadflow.network.PiModelArray;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -42,7 +47,14 @@ import java.util.function.ToIntFunction;
  * <li>the generators and the loads whose target, or whose anchor ({@code initialTargetP}: the target the slack
  *     distribution starts from again when it resets), changed: the lost ones, and those the spreading of the loss
  *     moved. Taken after that spreading, they are the starting point of the post-contingency solve, so a device needs
- *     no distribution of its own before it.</li>
+ *     no distribution of its own before it;</li>
+ * <li>the slack buses and the reference bus of the main synchronous component: OLF picks others when the contingency
+ *     isolates them;</li>
+ * <li>the buses whose share of a reactive power distribution ({@code remoteControlReactivePercent}, the key of their
+ *     {@code DISTR_Q} terms) changed, with their new share: a controller lost, or cut off, leaves the others a larger
+ *     one;</li>
+ * <li>the shunts whose admittance changed, with their new one, and the branches whose ratio or phase shift changed,
+ *     with their new tap (-1 for a branch without a table of taps), ratio and phase shift.</li>
  * </ul>
  *
  * <p>The delta is taken between the state recorded in a {@link Baseline} before the contingency and the state after
@@ -54,7 +66,11 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
                                  int[] disabledBuses, int[] disabledBranches, int[] side1OpenBranches, int[] side2OpenBranches,
                                  int[] disabledHvdcs, int[] positions, int[] modes, double[] targets,
                                  String[] generatorIds, double[] generatorTargetP, double[] generatorInitialTargetP,
-                                 String[] loadIds, double[] loadTargetP) {
+                                 String[] loadIds, double[] loadTargetP,
+                                 int[] slackBuses, int referenceBus,
+                                 int[] reactivePercentBuses, double[] reactivePercents,
+                                 int[] shunts, double[] shuntG, double[] shuntB,
+                                 int[] tapBranches, int[] tapPositions, double[] tapR1, double[] tapA1) {
 
     public AcContingencyDelta {
         Objects.requireNonNull(contingencyId);
@@ -78,6 +94,11 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
         private final double[] generatorInitialTargetP;
         private final List<LfLoad> loads;
         private final double[] loadTargetP;
+        private final double[] reactivePercent;
+        private final double[] shuntGBase;
+        private final double[] shuntBBase;
+        private final double[] r1Base;
+        private final double[] a1Base;
 
         private Baseline(FixedStructure<AcVariableType, AcEquationType> structure, int[] modes, double[] targets, LfNetwork network) {
             this.structure = structure;
@@ -92,6 +113,11 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
             generatorTargetP = generators.stream().mapToDouble(LfGenerator::getTargetP).toArray();
             generatorInitialTargetP = generators.stream().mapToDouble(LfGenerator::getInitialTargetP).toArray();
             loadTargetP = loads.stream().mapToDouble(LfLoad::getTargetP).toArray();
+            reactivePercent = network.getBuses().stream().mapToDouble(LfBus::getRemoteControlReactivePercent).toArray();
+            shuntGBase = network.getShunts().stream().mapToDouble(LfShunt::getG).toArray();
+            shuntBBase = network.getShunts().stream().mapToDouble(LfShunt::getB).toArray();
+            r1Base = network.getBranches().stream().mapToDouble(b -> b.getPiModel().getR1()).toArray();
+            a1Base = network.getBranches().stream().mapToDouble(b -> b.getPiModel().getA1()).toArray();
         }
 
         public int[] getModes() {
@@ -189,6 +215,42 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
                 loadTargets.add(load.getTargetP());
             }
         }
+        LfNetwork network = context.getNetwork();
+        LfSynchronousNetwork main = network.getSynchronousNetworks().getFirst();
+        int[] slackBuses = main.getSlackBuses().stream().mapToInt(LfBus::getNum).toArray();
+        int referenceBus = main.getReferenceBus() != null ? main.getReferenceBus().getNum() : -1;
+        List<Integer> percentBuses = new ArrayList<>();
+        List<Double> percents = new ArrayList<>();
+        for (LfBus bus : network.getBuses()) {
+            if (differs(bus.getRemoteControlReactivePercent(), baseline.reactivePercent[bus.getNum()])) {
+                percentBuses.add(bus.getNum());
+                percents.add(bus.getRemoteControlReactivePercent());
+            }
+        }
+        List<Integer> shunts = new ArrayList<>();
+        List<Double> shuntG = new ArrayList<>();
+        List<Double> shuntB = new ArrayList<>();
+        for (LfShunt shunt : network.getShunts()) {
+            if (differs(shunt.getG(), baseline.shuntGBase[shunt.getNum()]) || differs(shunt.getB(), baseline.shuntBBase[shunt.getNum()])) {
+                shunts.add(shunt.getNum());
+                shuntG.add(shunt.getG());
+                shuntB.add(shunt.getB());
+            }
+        }
+        List<Integer> tapBranches = new ArrayList<>();
+        List<Integer> taps = new ArrayList<>();
+        List<Double> r1 = new ArrayList<>();
+        List<Double> a1 = new ArrayList<>();
+        for (LfBranch branch : network.getBranches()) {
+            PiModel piModel = branch.getPiModel();
+            if (differs(piModel.getR1(), baseline.r1Base[branch.getNum()]) || differs(piModel.getA1(), baseline.a1Base[branch.getNum()])) {
+                tapBranches.add(branch.getNum());
+                // a branch whose ratio is not a tap of a table has no position
+                taps.add(piModel instanceof PiModelArray ? piModel.getTapPosition() : -1);
+                r1.add(piModel.getR1());
+                a1.add(piModel.getA1());
+            }
+        }
         var disabledNetwork = contingency.getDisabledNetwork();
         return new AcContingencyDelta(contingency.getId(), contingency.getActivePowerLoss(), preDistributedActivePower,
                 nums(disabledNetwork.getBuses(), LfElement::getNum),
@@ -198,7 +260,12 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
                 nums(disabledNetwork.getHvdcs(), LfElement::getNum),
                 positions, deltaModes, deltaTargets,
                 generatorIds.toArray(new String[0]), unbox(generatorTargets), unbox(generatorAnchors),
-                loadIds.toArray(new String[0]), unbox(loadTargets));
+                loadIds.toArray(new String[0]), unbox(loadTargets),
+                slackBuses, referenceBus,
+                percentBuses.stream().mapToInt(Integer::intValue).toArray(), unbox(percents),
+                shunts.stream().mapToInt(Integer::intValue).toArray(), unbox(shuntG), unbox(shuntB),
+                tapBranches.stream().mapToInt(Integer::intValue).toArray(), taps.stream().mapToInt(Integer::intValue).toArray(),
+                unbox(r1), unbox(a1));
     }
 
     private static boolean differs(double a, double b) {

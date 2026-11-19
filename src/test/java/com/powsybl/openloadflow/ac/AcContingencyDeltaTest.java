@@ -77,6 +77,9 @@ class AcContingencyDeltaTest {
             state.restore();
             AcContingencyDelta restored = AcContingencyDelta.record(lfContingency, context, base);
             assertEquals(0, restored.positions().length, "the base state again");
+            assertEquals(0, restored.reactivePercentBuses().length);
+            assertEquals(0, restored.shunts().length);
+            assertEquals(0, restored.tapBranches().length);
         }
     }
 
@@ -253,5 +256,17 @@ class AcContingencyDeltaTest {
             }
             assertEquals(spread, moved, 1e-9);
         }
+    }
+
+    /** The shunt of bus 9 lost: its admittance goes to 0, and nothing else of the record moves but the positions of its bus. */
+    @Test
+    void aLostShuntIsRecordedWithItsAdmittance() {
+        check(new Contingency("B9-SH", new com.powsybl.contingency.ShuntCompensatorContingency("B9-SH")), r -> {
+            assertEquals(1, r.delta().shunts().length);
+            assertEquals(0, r.delta().shuntB()[0]);
+            assertEquals(0, r.delta().tapBranches().length);
+            assertEquals(0, r.delta().reactivePercentBuses().length);
+            assertEquals(r.network().getSynchronousNetworks().getFirst().getSlackBuses().getFirst().getNum(), r.delta().slackBuses()[0]);
+        });
     }
 }
