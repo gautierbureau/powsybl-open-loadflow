@@ -92,8 +92,6 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     /** For the search of a placement: the slots already tried for the equation being placed. */
     private int[] visited;
     private int stamp;
-    /** For an equation that took a free slot: the slot, kept as long as it is free, so that the pattern stops growing. */
-    private int[] movedTo;
 
     private double[] values;
     private double[] balance;
@@ -123,8 +121,6 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             structure = new FixedStructure<>(equationSystem, placement);
             structureBuildCount++;
             slotOfEquation = new int[structure.getEquationCount()];
-            movedTo = new int[structure.getEquationCount()];
-            Arrays.fill(movedTo, -1);
             equationOfSlot = new int[structure.getSlotCount()];
             visited = new int[structure.getSlotCount()];
             stamp = 0;
@@ -256,9 +252,6 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
         for (int equation = 0; equation < slotOfEquation.length; equation++) {
             int slot = slotOfEquation[equation];
             if (slot >= 0) {
-                if (slot != structure.getOwnSlot(equation)) {
-                    movedTo[equation] = slot;
-                }
                 structure.setDestinationSlot(equation, slot);
                 addToPattern(equation, slot);
             }
@@ -273,8 +266,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
      */
     private boolean move(int equation, boolean dependent) {
         int own = structure.getOwnSlot(equation);
-        if (own >= 0 && moveTo(equation, own, dependent)
-                || movedTo[equation] >= 0 && moveTo(equation, movedTo[equation], dependent)) {
+        if (own >= 0 && moveTo(equation, own, dependent)) {
             return true;
         }
         for (int slot : structure.getCandidates(equation)) {
@@ -312,9 +304,6 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     }
 
     private int findFreeSlot(int equation) {
-        if (movedTo[equation] >= 0 && isFree(movedTo[equation])) {
-            return movedTo[equation];
-        }
         for (int slot : structure.getCandidates(equation)) {
             if (isFree(slot)) {
                 return slot;
