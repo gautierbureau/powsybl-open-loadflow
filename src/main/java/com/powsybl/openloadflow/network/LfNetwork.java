@@ -115,6 +115,9 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
 
     private final List<LfNetworkListener> listeners = new ArrayList<>();
 
+    /** How many times a bus voltage or angle was written: a state kept from a solve is valid while it does not move. */
+    private long stateWriteCount;
+
     private Validity validity = Validity.VALID;
 
     private final GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory;
@@ -1204,6 +1207,15 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
 
     public void removeListener(LfNetworkListener listener) {
         listeners.remove(listener);
+    }
+
+    public long getStateWriteCount() {
+        return stateWriteCount;
+    }
+
+    /** Notes that a bus voltage or angle was written. */
+    public void onStateWrite() {
+        stateWriteCount++;
     }
 
     public List<LfNetworkListener> getListeners() {

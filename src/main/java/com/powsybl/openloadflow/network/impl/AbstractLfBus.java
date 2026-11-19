@@ -618,6 +618,7 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
     @Override
     public void setV(double v) {
         this.v = v * getNominalV();
+        network.onStateWrite();
     }
 
     @Override
@@ -638,6 +639,7 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
     @Override
     public void setAngle(double angle) {
         this.angle = angle;
+        network.onStateWrite();
     }
 
     @Override
