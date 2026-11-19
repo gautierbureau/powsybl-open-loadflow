@@ -1136,12 +1136,22 @@ public class AcEquationSystemCreator {
         }
     }
 
-    private static void createHvdcAcEmulationEquations(LfHvdc hvdc, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+    protected EquationTerm<AcVariableType, AcEquationType> createHvdcAcEmulationSide1ActiveFlowEquationTerm(LfHvdc hvdc,
+                                                                                                            EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        return new HvdcAcEmulationSide1ActiveFlowEquationTerm(hvdc, hvdc.getBus1(), hvdc.getBus2(), equationSystem.getVariableSet());
+    }
+
+    protected EquationTerm<AcVariableType, AcEquationType> createHvdcAcEmulationSide2ActiveFlowEquationTerm(LfHvdc hvdc,
+                                                                                                            EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+        return new HvdcAcEmulationSide2ActiveFlowEquationTerm(hvdc, hvdc.getBus1(), hvdc.getBus2(), equationSystem.getVariableSet());
+    }
+
+    private void createHvdcAcEmulationEquations(LfHvdc hvdc, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
         EquationTerm<AcVariableType, AcEquationType> p1 = null;
         EquationTerm<AcVariableType, AcEquationType> p2 = null;
         if (hvdc.getBus1() != null && hvdc.getBus2() != null && hvdc.isAcEmulation()) {
-            p1 = new HvdcAcEmulationSide1ActiveFlowEquationTerm(hvdc, hvdc.getBus1(), hvdc.getBus2(), equationSystem.getVariableSet());
-            p2 = new HvdcAcEmulationSide2ActiveFlowEquationTerm(hvdc, hvdc.getBus1(), hvdc.getBus2(), equationSystem.getVariableSet());
+            p1 = createHvdcAcEmulationSide1ActiveFlowEquationTerm(hvdc, equationSystem);
+            p2 = createHvdcAcEmulationSide2ActiveFlowEquationTerm(hvdc, equationSystem);
         } else {
             // nothing to do
         }

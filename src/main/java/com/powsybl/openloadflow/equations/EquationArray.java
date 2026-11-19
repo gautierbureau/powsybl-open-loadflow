@@ -566,6 +566,7 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
                         if (!term.isActive()) {
                             writer.write(" ]");
                         }
+                        first = false;
                     }
                 }
                 if (!isElementActive(elementNum)) {
