@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
 import com.powsybl.openloadflow.lf.util.LfReports;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
+import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfStaticVarCompensator;
 import com.powsybl.openloadflow.network.VoltageControl;
 import org.apache.commons.lang3.Range;
@@ -124,14 +125,48 @@ public class MonitoringVoltageOuterLoop implements AcOuterLoop {
         .orElse(Double.NaN);
     }
 
+    private static final String MONITORED_BUSES_PROPERTY = MonitoringVoltageOuterLoop.class.getName() + ".monitoredBuses";
+
+    /**
+     * For each bus of the network, whether it has a static var compensator with a stand-by automaton: the buses that
+     * can monitor a voltage, as the device's list of monitoring controllers. The generators of a bus and the automaton
+     * of a compensator do not change once the network is built, so they are gathered once per network, by bus number.
+     * Whether a compensator monitors a voltage now, and whether its bus controls one, is read at each check.
+     *
+     * @return null when no bus can monitor a voltage
+     */
+    private static boolean[] getMonitoredBuses(LfNetwork network) {
+        Object gathered = network.getProperty(MONITORED_BUSES_PROPERTY);
+        if (gathered == null) {
+            boolean[] monitored = new boolean[network.getBuses().size()];
+            boolean any = false;
+            for (LfBus bus : network.getBuses()) {
+                for (LfGenerator generator : bus.getGenerators()) {
+                    if (generator instanceof LfStaticVarCompensator svc && svc.getStandByAutomaton().isPresent()) {
+                        monitored[bus.getNum()] = true;
+                        any = true;
+                    }
+                }
+            }
+            gathered = any ? monitored : Boolean.FALSE;
+            network.setProperty(MONITORED_BUSES_PROPERTY, gathered);
+        }
+        return gathered instanceof boolean[] monitored ? monitored : null;
+    }
+
     @Override
     public OuterLoopResult check(AcOuterLoopContext context, ReportNode reportNode) {
         OuterLoopStatus status = OuterLoopStatus.STABLE;
 
         List<PqToPvBus> pqToPvBuses = new ArrayList<>();
-        context.getNetwork().<LfBus>getControllerElements(VoltageControl.Type.GENERATOR).stream()
-                .filter(bus -> !bus.isGeneratorVoltageControlEnabled())
-                .forEach(bus -> getControlledBusVoltageLimits(bus).ifPresent(voltageLimits -> checkPqBusForVoltageLimits(bus, pqToPvBuses, voltageLimits)));
+        boolean[] monitoredBuses = getMonitoredBuses(context.getNetwork());
+        if (monitoredBuses != null) {
+            for (LfBus bus : context.getNetwork().<LfBus>getControllerElements(VoltageControl.Type.GENERATOR)) {
+                if (monitoredBuses[bus.getNum()] && !bus.isGeneratorVoltageControlEnabled()) {
+                    getControlledBusVoltageLimits(bus).ifPresent(voltageLimits -> checkPqBusForVoltageLimits(bus, pqToPvBuses, voltageLimits));
+                }
+            }
+        }
 
         if (!pqToPvBuses.isEmpty()) {
             switchPqPv(pqToPvBuses, reportNode);
@@ -143,7 +178,9 @@ public class MonitoringVoltageOuterLoop implements AcOuterLoop {
 
     @Override
     public boolean isNeeded(AcLoadFlowContext context) {
-        return context.getNetwork().<LfBus>getControllerElements(VoltageControl.Type.GENERATOR).stream()
+        boolean[] monitoredBuses = getMonitoredBuses(context.getNetwork());
+        return monitoredBuses != null && context.getNetwork().<LfBus>getControllerElements(VoltageControl.Type.GENERATOR).stream()
+                .filter(bus -> monitoredBuses[bus.getNum()])
                 .filter(LfBus::isGeneratorVoltageControlled)
                 .anyMatch(bus -> getControlledBusVoltageLimits(bus).isPresent());
     }
