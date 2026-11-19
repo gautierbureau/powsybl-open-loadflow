@@ -28,11 +28,14 @@ import java.util.Objects;
  *
  * <p>A solve that starts from the previous values reads them from the network. They are the ones kept, as long as
  * nothing else wrote a bus voltage or angle since ({@link LfNetwork#getStateWriteCount()}): restoring the network
- * after a contingency, or an outer loop that resets a voltage. Otherwise the network is read. A voltage is kept as the
- * network gives it back, which multiplies it by the nominal voltage when it is written and divides it when it is
- * read; the GPU keeps the voltage itself. The other variables are read from the network as before.
+ * after a contingency, or an outer loop that resets a voltage. Otherwise the network is read. The voltage kept is the
+ * one the solve converged to, as the GPU keeps it: the network multiplies it by the nominal voltage when it is
+ * written and divides it when it is read, which can change its last bit. The flows of the zero impedance branches
+ * are kept too, where OLF starts them from 0 at each solve. The taps, phase shifts and susceptances are read from the
+ * network as before: an outer loop may have changed them there.
  *
- * <p>With assertions enabled, each start from the kept state is compared with the network read.
+ * <p>With assertions enabled, each start from the kept state is compared with the network read: the network holds
+ * each kept voltage, and each kept angle, as it was written.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -41,6 +44,8 @@ final class AcKeptState {
     private static final byte OTHER = 0;
     private static final byte VOLTAGE = 1;
     private static final byte ANGLE = 2;
+    /** A flow of a zero impedance branch: OLF starts it from 0 at each solve, the GPU from where it converged. */
+    private static final byte DUMMY = 3;
 
     private final LfNetwork network;
 
@@ -48,8 +53,6 @@ final class AcKeptState {
     private FixedStructure<AcVariableType, AcEquationType> structure;
     /** For each position: whether its variable is a bus voltage, a bus angle, or another one. */
     private byte[] kind;
-    /** For each position of a bus voltage: the nominal voltage of the bus. */
-    private double[] nominalV;
     /** For each position: the value kept, where {@link #kept} is set. */
     private double[] value;
     private boolean[] kept;
@@ -69,16 +72,16 @@ final class AcKeptState {
         this.structure = structure;
         int variableCount = structure.getVariableCount();
         kind = new byte[variableCount];
-        nominalV = new double[variableCount];
         value = new double[variableCount];
         kept = new boolean[variableCount];
         for (int position = 0; position < variableCount; position++) {
             Variable<AcVariableType> variable = structure.getVariable(position);
             if (variable.getType() == AcVariableType.BUS_V) {
                 kind[position] = VOLTAGE;
-                nominalV[position] = network.getBus(variable.getElementNum()).getNominalV();
             } else if (variable.getType() == AcVariableType.BUS_PHI) {
                 kind[position] = ANGLE;
+            } else if (variable.getType() == AcVariableType.DUMMY_P || variable.getType() == AcVariableType.DUMMY_Q) {
+                kind[position] = DUMMY;
             }
         }
     }
@@ -96,8 +99,7 @@ final class AcKeptState {
             int row = structure.getVariable(position).getRow();
             kept[position] = row >= 0 && kind[position] != OTHER;
             if (kept[position]) {
-                // as the network gives it back: AbstractLfBus.setV and getV
-                value[position] = kind[position] == VOLTAGE ? state[row] * nominalV[position] / nominalV[position] : state[row];
+                value[position] = state[row];
             }
         }
         valid = true;
@@ -136,16 +138,26 @@ final class AcKeptState {
                 x[row] = AcStateVectorUtil.initValue(network, variables.get(row), initializer);
             }
         }
-        assert sameAsNetworkRead(x, variables, initializer);
+        assert sameAsNetworkRead(x, variables, initializer, written);
         startCount++;
         equationSystem.getStateVector().set(x);
         return true;
     }
 
-    private boolean sameAsNetworkRead(double[] x, List<Variable<AcVariableType>> variables, VoltageInitializer initializer) {
+    private boolean sameAsNetworkRead(double[] x, List<Variable<AcVariableType>> variables, VoltageInitializer initializer, boolean[] written) {
         for (int row = 0; row < x.length; row++) {
-            double read = AcStateVectorUtil.initValue(network, variables.get(row), initializer);
-            if (Double.doubleToLongBits(read) != Double.doubleToLongBits(x[row])) {
+            Variable<AcVariableType> variable = variables.get(row);
+            double read = AcStateVectorUtil.initValue(network, variable, initializer);
+            double expected = x[row];
+            if (written[row] && (variable.getType() == AcVariableType.DUMMY_P || variable.getType() == AcVariableType.DUMMY_Q)) {
+                continue; // the network holds no value for them
+            }
+            if (written[row] && variable.getType() == AcVariableType.BUS_V) {
+                // the network holds the voltage multiplied by the nominal voltage: AbstractLfBus.setV and getV
+                double nominal = network.getBus(variable.getElementNum()).getNominalV();
+                expected = x[row] * nominal / nominal;
+            }
+            if (Double.doubleToLongBits(read) != Double.doubleToLongBits(expected)) {
                 throw new AssertionError("Kept state of " + variables.get(row) + " is " + x[row] + ", read from the network " + read);
             }
         }
