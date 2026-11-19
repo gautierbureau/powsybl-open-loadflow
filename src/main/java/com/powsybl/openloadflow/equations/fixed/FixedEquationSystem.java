@@ -63,6 +63,12 @@ import java.util.Set;
 public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity>
         implements EquationSystemListener<V, E>, AutoCloseable {
 
+    /** The mode of a slot that holds no equation: its variable keeps its value. */
+    public static final int MODE_NONE = -1;
+
+    /** The mode of a slot that holds an equation outside its alternatives: one the placement moved to a free slot. */
+    public static final int MODE_OTHER = -2;
+
     /** Which equations have their entries in the pattern from the start. */
     public enum Scope {
         /** Every equation OLF created, on the slot it is paired with and on its candidates. */
@@ -133,6 +139,10 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     private boolean lastPlacementValid;
     private int placementCount;
 
+    /** For each slot, the position of the equation it holds among its alternatives, as of the last placement. */
+    private int[] modes;
+    private boolean modesValid;
+
     private double[] values;
     private double[] balance;
     private double[] equationValues;
@@ -192,6 +202,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
         if (!placementValid) {
             place();
             placementValid = true;
+            modesValid = false;
         }
         if (!patternValid) {
             structure.buildPattern(placedEquations, placedSlots);
@@ -898,6 +909,33 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     public int getSlotOfEquation(int equation) {
         update();
         return slotOfEquation[equation];
+    }
+
+    /**
+     * For each slot, which equation it holds, as an index in {@link FixedStructure#getAlternatives(int)}: the GPU's row
+     * mode, given by the placement of the CPU. {@link #MODE_NONE} when it holds none, {@link #MODE_OTHER} when it
+     * holds an equation outside its alternatives. A switch of an outer loop, or a contingency, changes the modes of
+     * the slots it touches and nothing else.
+     */
+    public int[] getModes() {
+        update();
+        if (modes == null || modes.length != equationOfSlot.length) {
+            modes = new int[equationOfSlot.length];
+            modesValid = false;
+        }
+        if (!modesValid) {
+            for (int slot = 0; slot < modes.length; slot++) {
+                int equation = equationOfSlot[slot];
+                if (equation < 0) {
+                    modes[slot] = MODE_NONE;
+                } else {
+                    int position = Arrays.binarySearch(structure.getAlternatives(slot), equation);
+                    modes[slot] = position >= 0 ? position : MODE_OTHER;
+                }
+            }
+            modesValid = true;
+        }
+        return modes;
     }
 
     /** The equation a slot holds, -1 when it holds none: its variable is then fixed. */
