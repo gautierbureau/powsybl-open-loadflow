@@ -248,6 +248,37 @@ class FixedEquationSystemTest {
     }
 
     /**
+     * The generator bus of the Eurostag example stops holding its voltage, as when it reaches a reactive limit: the slot
+     * of its voltage switches from its voltage target to its reactive balance, and no other slot changes mode. Both
+     * are alternatives of the slot from the start.
+     */
+    @Test
+    void aSwitchToPqChangesTheModeOfOneSlot() {
+        Network network = EurostagTutorialExample1Factory.create();
+        AcLoadFlowParameters acParameters = acParameters(network, new LoadFlowParameters(), false, true);
+        LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
+        try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
+             FixedEquationSystem<AcVariableType, AcEquationType> fixed =
+                     new FixedEquationSystem<>(context.getEquationSystem(), AcPlacement.INSTANCE, FixedEquationSystem.Scope.ALL)) {
+            LfBus generatorBus = lfNetwork.getBusById("VLGEN_0");
+            FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
+            int slot = structure.getSlot(context.getEquationSystem().getVariable(generatorBus.getNum(), AcVariableType.BUS_V));
+            int[] before = fixed.getModes().clone();
+            assertEquals(AcEquationType.BUS_TARGET_V, structure.getType(structure.getAlternatives(slot)[before[slot]]));
+
+            generatorBus.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(false);
+            int[] after = fixed.getModes();
+            assertEquals(AcEquationType.BUS_TARGET_Q, structure.getType(structure.getAlternatives(slot)[after[slot]]));
+            for (int other = 0; other < after.length; other++) {
+                if (other != slot) {
+                    assertEquals(before[other], after[other], "slot " + other);
+                }
+            }
+            assertEquals(1, fixed.getPatternBuildCount());
+        }
+    }
+
+    /**
      * A bus at an end of a zero impedance branch is off before the equation system is created, like the far side of an
      * open switch that is kept for an action. Its slots hold nothing, and those of the branch hold the two equations
      * that fix its flows to zero. The two equations that tie the buses together are off, and they cannot be evaluated:
@@ -681,6 +712,17 @@ class FixedEquationSystemTest {
         fixed.fill();
         FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
         int slotCount = structure.getSlotCount();
+        // the mode of each slot names the equation it holds among its alternatives
+        int[] modes = fixed.getModes();
+        for (int slot = 0; slot < slotCount; slot++) {
+            int equation = fixed.getEquationOfSlot(slot);
+            int[] alternatives = structure.getAlternatives(slot);
+            switch (modes[slot]) {
+                case FixedEquationSystem.MODE_NONE -> assertEquals(-1, equation, state + ", slot " + slot);
+                case FixedEquationSystem.MODE_OTHER -> assertTrue(equation >= 0 && Arrays.binarySearch(alternatives, equation) < 0, state + ", slot " + slot);
+                default -> assertEquals(alternatives[modes[slot]], equation, state + ", slot " + slot);
+            }
+        }
         double[][] column = new double[slotCount][slotCount];
         for (int slot = 0; slot < slotCount; slot++) {
             for (int i = structure.getColumnStart()[slot]; i < structure.getColumnStart()[slot + 1]; i++) {

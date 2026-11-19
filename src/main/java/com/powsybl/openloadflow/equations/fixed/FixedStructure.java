@@ -244,6 +244,8 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private final boolean[] fixesVariable;
     /** For each equation, the slots it may take besides its own, sorted: empty for most. */
     private final int[][] candidates;
+    /** For each slot, the equations that can hold it, built when first asked for. */
+    private int[][] alternatives;
     /** For each equation, the terms it holds as objects: null when it has none. */
     private final List<ObjectTerms<V, E>> objectTerms;
     /**
@@ -1029,6 +1031,38 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
      */
     int[] getCandidates(int equation) {
         return candidates[equation];
+    }
+
+    /**
+     * For each slot, the equations that can hold it, in the order of their numbers: those whose own slot it is and
+     * those that have it among their candidates. Built once with the structure: it is the table a mode of a slot
+     * indexes ({@link FixedEquationSystem#getModes()}).
+     */
+    public int[] getAlternatives(int slot) {
+        if (alternatives == null) {
+            TIntArrayList[] lists = new TIntArrayList[getSlotCount()];
+            for (int equation = 0; equation < getEquationCount(); equation++) {
+                if (ownSlot[equation] >= 0) {
+                    alternativesOf(lists, ownSlot[equation]).add(equation);
+                }
+                for (int candidate : candidates[equation]) {
+                    alternativesOf(lists, candidate).add(equation);
+                }
+            }
+            int[][] built = new int[lists.length][];
+            for (int s = 0; s < lists.length; s++) {
+                built[s] = lists[s] == null ? new int[0] : sortedDistinct(lists[s]);
+            }
+            alternatives = built;
+        }
+        return alternatives[slot];
+    }
+
+    private static TIntArrayList alternativesOf(TIntArrayList[] lists, int slot) {
+        if (lists[slot] == null) {
+            lists[slot] = new TIntArrayList(2);
+        }
+        return lists[slot];
     }
 
     /** The slots of the variables the equation depends on, sorted. */
