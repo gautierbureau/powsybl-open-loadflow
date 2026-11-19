@@ -30,14 +30,20 @@ public class LfBranchImpl extends AbstractImpedantLfBranch {
 
     private final Ref<Branch<?>> branchRef;
 
+    // structural, computed once: checked for all branches after each contingency (phase tap changers results)
+    private final boolean phaseControllerCapability;
+
     protected LfBranchImpl(LfNetwork network, LfBus bus1, LfBus bus2, PiModel piModel, Branch<?> branch, LfNetworkParameters parameters) {
         super(network, bus1, bus2, piModel, parameters);
         this.branchRef = Ref.create(branch, parameters.isCacheEnabled());
+        this.phaseControllerCapability = branch.getType() == IdentifiableType.TWO_WINDINGS_TRANSFORMER
+                && ((TwoWindingsTransformer) branch).getPhaseTapChanger() != null;
     }
 
     private LfBranchImpl(LfBranchImpl other, LfNetwork network, LfBus bus1, LfBus bus2) {
         super(other, network, bus1, bus2);
         this.branchRef = other.branchRef;
+        this.phaseControllerCapability = other.phaseControllerCapability;
     }
 
     @Override
@@ -219,9 +225,7 @@ public class LfBranchImpl extends AbstractImpedantLfBranch {
 
     @Override
     public boolean hasPhaseControllerCapability() {
-        var branch = getBranch();
-        return branch.getType() == IdentifiableType.TWO_WINDINGS_TRANSFORMER
-                && ((TwoWindingsTransformer) branch).getPhaseTapChanger() != null;
+        return phaseControllerCapability;
     }
 
     @Override
