@@ -63,8 +63,16 @@ public class AcBranchVector {
     final double[] p2;
     final double[] q1;
     final double[] q2;
-    final double[] i1;
-    final double[] i2;
+    /*
+     * The currents are computed when they are read, from the flows and the voltage of the last update of the
+     * branch: they are read for the results and the limit violations only, and most updates are Newton iterations.
+     * The voltage each side was last computed with is kept, and whether it was ever computed (a current never
+     * computed is 0, as the array of a current computed at each update starts).
+     */
+    final double[] v1OfI;
+    final double[] v2OfI;
+    final boolean[] i1Computed;
+    final boolean[] i2Computed;
 
     final double[] dp1dv1;
     final double[] dp1dv2;
@@ -150,8 +158,10 @@ public class AcBranchVector {
         p2 = new double[size];
         q1 = new double[size];
         q2 = new double[size];
-        i1 = new double[size];
-        i2 = new double[size];
+        v1OfI = new double[size];
+        v2OfI = new double[size];
+        i1Computed = new boolean[size];
+        i2Computed = new boolean[size];
 
         dp1dv1 = new double[size];
         dp1dv2 = new double[size];
@@ -265,10 +275,10 @@ public class AcBranchVector {
     }
 
     public Evaluable getI1(int branchNum) {
-        return () -> i1[branchNum];
+        return () -> i1Computed[branchNum] ? FastMath.hypot(p1[branchNum], q1[branchNum]) / v1OfI[branchNum] : 0;
     }
 
     public Evaluable getI2(int branchNum) {
-        return () -> i2[branchNum];
+        return () -> i2Computed[branchNum] ? FastMath.hypot(p2[branchNum], q2[branchNum]) / v2OfI[branchNum] : 0;
     }
 }
