@@ -88,8 +88,18 @@ public final class ReactiveLimitsDecisions {
      */
     public static int pqBusDecision(int qLimitType, double controlledV, double targetV, boolean canSwitchToPv,
                                     double minQ, double maxQ, double frozenTargetQ, double tol) {
+        return pqBusDecision(qLimitType, controlledV, targetV, canSwitchToPv, minQ, maxQ, frozenTargetQ, tol, 0);
+    }
+
+    /**
+     * The same, the controlled voltage having to miss its target by more than {@code voltageDeadband} (per unit) for
+     * the switch back: a group of controllers all at their limit, the controlled voltage a hair from its target, would
+     * otherwise switch back and forth.
+     */
+    public static int pqBusDecision(int qLimitType, double controlledV, double targetV, boolean canSwitchToPv,
+                                    double minQ, double maxQ, double frozenTargetQ, double tol, double voltageDeadband) {
         boolean atMin = isMinLimit(qLimitType);
-        boolean wantsBack = atMin ? controlledV < targetV : controlledV > targetV;
+        boolean wantsBack = atMin ? controlledV < targetV - voltageDeadband : controlledV > targetV + voltageDeadband;
         double limit = atMin ? minQ : maxQ;
         boolean limitMoved = (qLimitType == LIMIT_MIN_Q || qLimitType == LIMIT_MAX_Q) && Math.abs(limit - frozenTargetQ) > tol;
         return wantsBack && canSwitchToPv ? DECISION_TO_PV
@@ -108,6 +118,12 @@ public final class ReactiveLimitsDecisions {
 
     /** The decision of entry {@code i}, from its inputs alone. */
     public static void decideEntry(ReactiveLimitsVector r, int i, double tol, boolean robust, double vLow, double vHigh) {
+        decideEntry(r, i, tol, robust, vLow, vHigh, 0);
+    }
+
+    /** The decision of entry {@code i}, from its inputs alone, with a voltage deadband on the switch back to PV. */
+    public static void decideEntry(ReactiveLimitsVector r, int i, double tol, boolean robust, double vLow, double vHigh,
+                                   double voltageDeadband) {
         if (r.controlEnabled[i]) {
             boolean robustRemote = robust && r.remoteController[i];
             int decision = pvBusDecision(r.q[i], r.minQ[i], r.maxQ[i], tol, robustRemote, r.v[i], vLow, vHigh);
@@ -116,7 +132,7 @@ public final class ReactiveLimitsDecisions {
             r.qLimit[i] = frozenQ(decision, r.minQ[i], r.maxQ[i], r.initialTargetQ[i]);
         } else if (r.qLimitType[i] != LIMIT_NONE) {
             r.decision[i] = pqBusDecision(r.qLimitType[i], r.controlledV[i], r.targetV[i], r.canSwitchToPv[i],
-                                          r.minQ[i], r.maxQ[i], r.frozenTargetQ[i], tol);
+                                          r.minQ[i], r.maxQ[i], r.frozenTargetQ[i], tol, voltageDeadband);
             r.resetV[i] = false;
             r.qLimit[i] = isMinLimit(r.qLimitType[i]) ? r.minQ[i] : r.maxQ[i];
         } else {

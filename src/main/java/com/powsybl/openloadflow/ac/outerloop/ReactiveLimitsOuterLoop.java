@@ -36,19 +36,31 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
 
     public static final int MAX_SWITCH_PQ_PV_DEFAULT_VALUE = 3;
 
+    public static final double PQ_PV_SWITCH_VOLTAGE_DEADBAND_DEFAULT_VALUE = 0;
+
     private final int maxPqPvSwitch;
     private final double maxReactivePowerMismatch;
     private final double minRealisticVoltage;
     private final double maxRealisticVoltage;
     private final boolean robustMode;
+    private final double pqPvSwitchVoltageDeadband;
 
     public ReactiveLimitsOuterLoop(int maxPqPvSwitch, double maxReactivePowerMismatch, boolean robustMode, double minRealisticVoltage, double maxRealisticVoltage) {
+        this(maxPqPvSwitch, maxReactivePowerMismatch, robustMode, minRealisticVoltage, maxRealisticVoltage, PQ_PV_SWITCH_VOLTAGE_DEADBAND_DEFAULT_VALUE);
+    }
+
+    /**
+     * @param pqPvSwitchVoltageDeadband how far, in per unit, the controlled voltage must be from its target for a bus
+     *                                  at a reactive limit to switch back from PQ to PV
+     */
+    public ReactiveLimitsOuterLoop(int maxPqPvSwitch, double maxReactivePowerMismatch, boolean robustMode, double minRealisticVoltage, double maxRealisticVoltage,
+                                   double pqPvSwitchVoltageDeadband) {
         this.maxPqPvSwitch = maxPqPvSwitch;
         this.maxReactivePowerMismatch = maxReactivePowerMismatch;
         this.minRealisticVoltage = minRealisticVoltage;
         this.maxRealisticVoltage = maxRealisticVoltage;
         this.robustMode = robustMode;
-
+        this.pqPvSwitchVoltageDeadband = pqPvSwitchVoltageDeadband;
     }
 
     /** What the loop keeps from one check to the next, and the arrays its checks work on. */
@@ -407,7 +419,7 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
                 gatherPqBus(voltageControllers, i, bus);
             }
             voltageControllers.pvPqSwitchCount[i] = contextData.pvPqSwitchCount[bus.getNum()];
-            ReactiveLimitsDecisions.decideEntry(voltageControllers, i, maxReactivePowerMismatch, robustMode, minRealisticV, maxRealisticV);
+            ReactiveLimitsDecisions.decideEntry(voltageControllers, i, maxReactivePowerMismatch, robustMode, minRealisticV, maxRealisticV, pqPvSwitchVoltageDeadband);
             if (applyBeforeSwitches(voltageControllers, i, bus)) {
                 busesWithUpdatedQLimitsCount++;
             }
@@ -426,7 +438,7 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
         for (int i = 0; i < reactivePowerControllers.count; i++) {
             LfBus bus = reactivePowerControllerBuses.get(i);
             gatherControllerBus(reactivePowerControllers, i, bus);
-            ReactiveLimitsDecisions.decideEntry(reactivePowerControllers, i, maxReactivePowerMismatch, robustMode, minRealisticV, maxRealisticV);
+            ReactiveLimitsDecisions.decideEntry(reactivePowerControllers, i, maxReactivePowerMismatch, robustMode, minRealisticV, maxRealisticV, pqPvSwitchVoltageDeadband);
             applyBeforeSwitches(reactivePowerControllers, i, bus);
         }
         int reactiveControllerBusToPqCount = ReactiveLimitsDecisions.countSwitchesToPq(reactivePowerControllers);
