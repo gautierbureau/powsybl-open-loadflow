@@ -103,6 +103,10 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private final boolean[] bound;
     private final List<EquationArray<V, E>> arrays;
     private final int[] arrayFirstEquation;
+    /** For each equation that is an element of an equation array: the index of its array; -1 for a single equation. */
+    private final int[] arrayIndexOfEquation;
+    /** For each equation that is an element of an equation array: its element number; -1 for a single equation. */
+    private final int[] elementNumOfEquation;
     private final int equationCount;
     private final int[][] rows;
     private final int[] ownSlot;
@@ -148,6 +152,16 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             count += arrays.get(a).getElementCount();
         }
         equationCount = count;
+        arrayIndexOfEquation = new int[equationCount];
+        elementNumOfEquation = new int[equationCount];
+        Arrays.fill(arrayIndexOfEquation, 0, singleEquations.size(), -1);
+        Arrays.fill(elementNumOfEquation, 0, singleEquations.size(), -1);
+        for (int a = 0; a < arrays.size(); a++) {
+            for (int element = 0; element < arrays.get(a).getElementCount(); element++) {
+                arrayIndexOfEquation[arrayFirstEquation[a] + element] = a;
+                elementNumOfEquation[arrayFirstEquation[a] + element] = element;
+            }
+        }
 
         SortedSet<Variable<V>> sorted = new TreeSet<>();
         for (int equation = 0; equation < equationCount; equation++) {
@@ -684,11 +698,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     }
 
     private int getArrayIndex(int equation) {
-        int a = arrays.size() - 1;
-        while (arrayFirstEquation[a] > equation) {
-            a--;
-        }
-        return a;
+        return arrayIndexOfEquation[equation];
     }
 
     private EquationArray<V, E> getArray(int equation) {
@@ -740,7 +750,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         if (equation < singleEquations.size()) {
             return bound[equation] ? singleEquations.get(equation).getColumn() : -1;
         }
-        return getArray(equation).getElementNumToColumn(getElementNum(equation));
+        return arrays.get(arrayIndexOfEquation[equation]).getElementNumToColumn(elementNumOfEquation[equation]);
     }
 
     /** The terms held as objects: all the terms of a single equation, the additional terms of an array element. */
