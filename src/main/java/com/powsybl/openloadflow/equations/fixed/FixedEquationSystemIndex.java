@@ -109,8 +109,6 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     /** For the search of a pairing: the positions already tried for the equation being paired. */
     private int[] visited;
     private int stamp;
-    /** For an equation that took a unpaired position: the position, kept as long as it is free, so that the matrix structure stops growing. */
-    private int[] movedTo;
 
     /*
      * The first pass of the pairing, kept from one pairing to the next: each equation on its own position when it
@@ -171,8 +169,6 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
             structure = new FixedStructure<>(equationSystem, pairing);
             structureBuildCount++;
             positionOfEquation = new int[structure.getEquationCount()];
-            movedTo = new int[structure.getEquationCount()];
-            Arrays.fill(movedTo, -1);
             equationOfPosition = new int[structure.getVariableCount()];
             rowOfPosition = new int[structure.getVariableCount()];
             visited = new int[structure.getVariableCount()];
@@ -318,13 +314,10 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
                 throw new PowsyblException("More variables than active equations: no equation for " + structure.getVariable(position));
             }
         }
-        // an equation on the position it had at the last pairing already has its matrix element indices, its entries in the matrix structure and its move noted
+        // an equation on the position it had at the last pairing already has its matrix element indices and its entries in the matrix structure
         for (int equation = 0; equation < positionOfEquation.length; equation++) {
             int position = positionOfEquation[equation];
             if (position >= 0 && (!lastPairingValid || position != lastPositionOfEquation[equation])) {
-                if (position != structure.getOwnPosition(equation)) {
-                    movedTo[equation] = position;
-                }
                 structure.setPairedPosition(equation, position);
                 addToMatrixStructure(equation, position);
             }
@@ -447,8 +440,7 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
      */
     private boolean move(int equation, boolean dependent) {
         int own = structure.getOwnPosition(equation);
-        if (own >= 0 && moveTo(equation, own, dependent)
-                || movedTo[equation] >= 0 && moveTo(equation, movedTo[equation], dependent)) {
+        if (own >= 0 && moveTo(equation, own, dependent)) {
             return true;
         }
         for (int position : structure.getControllerPositions(equation)) {
@@ -486,9 +478,6 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     }
 
     private int findUnpairedPosition(int equation) {
-        if (movedTo[equation] >= 0 && isUnpaired(movedTo[equation])) {
-            return movedTo[equation];
-        }
         for (int position : structure.getControllerPositions(equation)) {
             if (isUnpaired(position)) {
                 return position;
