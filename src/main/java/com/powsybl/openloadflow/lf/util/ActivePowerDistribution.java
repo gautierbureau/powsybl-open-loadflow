@@ -83,6 +83,33 @@ public final class ActivePowerDistribution {
         List<ParticipatingElement> getParticipatingElements(Collection<LfBus> participatingBuses, double mismatch);
 
         double run(List<ParticipatingElement> participatingElements, int iteration, double remainingMismatch);
+
+        /**
+         * Distributes an active power mismatch over the participating buses: resets the participating elements to their
+         * initial target, then distributes the mismatch and what the reset undid, iteration after iteration, until it
+         * is below {@link #P_RESIDUE_EPS} or no element can take more.
+         */
+        default Result distribute(LfGenerator referenceGenerator, Collection<LfBus> participatingBuses, double activePowerMismatch) {
+            PreviousStateInfo previousStateInfo = resetToInitialState(participatingBuses, referenceGenerator);
+            double remainingMismatch = activePowerMismatch + previousStateInfo.previousMismatch();
+            List<ParticipatingElement> participatingElements = getParticipatingElements(participatingBuses, remainingMismatch);
+
+            int iteration = 0;
+
+            while (!participatingElements.isEmpty()
+                    && Math.abs(remainingMismatch) > P_RESIDUE_EPS) {
+
+                if (ParticipatingElement.participationFactorNorm(participatingElements) > 0.0) {
+                    double done = run(participatingElements, iteration, remainingMismatch);
+                    remainingMismatch -= done;
+                } else {
+                    break;
+                }
+                iteration++;
+            }
+
+            return new Result(iteration, remainingMismatch, previousStateInfo.moved());
+        }
     }
 
     public record Result(int iteration, double remainingMismatch, boolean movedBuses) { }
@@ -102,26 +129,7 @@ public final class ActivePowerDistribution {
     }
 
     public Result run(LfGenerator referenceGenerator, Collection<LfBus> buses, double activePowerMismatch) {
-        var participatingBuses = filterParticipatingBuses(buses);
-        PreviousStateInfo previousStateInfo = step.resetToInitialState(participatingBuses, referenceGenerator);
-        double remainingMismatch = activePowerMismatch + previousStateInfo.previousMismatch();
-        List<ParticipatingElement> participatingElements = step.getParticipatingElements(participatingBuses, remainingMismatch);
-
-        int iteration = 0;
-
-        while (!participatingElements.isEmpty()
-                && Math.abs(remainingMismatch) > P_RESIDUE_EPS) {
-
-            if (ParticipatingElement.participationFactorNorm(participatingElements) > 0.0) {
-                double done = step.run(participatingElements, iteration, remainingMismatch);
-                remainingMismatch -= done;
-            } else {
-                break;
-            }
-            iteration++;
-        }
-
-        return new Result(iteration, remainingMismatch, previousStateInfo.moved());
+        return step.distribute(referenceGenerator, filterParticipatingBuses(buses), activePowerMismatch);
     }
 
     public static ActivePowerDistribution create(LoadFlowParameters.BalanceType balanceType, boolean loadPowerFactorConstant, boolean useActiveLimits) {
