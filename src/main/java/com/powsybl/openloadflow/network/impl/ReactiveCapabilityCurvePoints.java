@@ -28,8 +28,6 @@ final class ReactiveCapabilityCurvePoints {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ReactiveCapabilityCurvePoints.class);
 
-    private final ReactiveCapabilityCurve curve;
-
     private final double[] p;
 
     private final double[] minQ;
@@ -37,7 +35,7 @@ final class ReactiveCapabilityCurvePoints {
     private final double[] maxQ;
 
     private ReactiveCapabilityCurvePoints(ReactiveCapabilityCurve curve) {
-        this.curve = Objects.requireNonNull(curve);
+        Objects.requireNonNull(curve);
         int count = curve.getPointCount();
         if (count < 2) {
             throw new IllegalStateException("points size should be >= 2");
@@ -56,13 +54,6 @@ final class ReactiveCapabilityCurvePoints {
 
     static ReactiveCapabilityCurvePoints of(ReactiveCapabilityCurve curve) {
         return new ReactiveCapabilityCurvePoints(curve);
-    }
-
-    /**
-     * Whether these points were read from this curve. A curve does not change once built.
-     */
-    boolean isOf(ReactiveCapabilityCurve curve) {
-        return this.curve == curve;
     }
 
     /**

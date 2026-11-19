@@ -59,7 +59,7 @@ class LfNetworkCopyFieldGuardTest {
         expected.put(AbstractLfDcBranch.class, Set.of("numDCC", "dcBus1", "dcBus2", "p1", "i1", "p2", "i2", "r"));
         expected.put(AbstractLfGenerator.class, Set.of("network", "bus", "calculatedQ", "targetV", "switchedToLocalVoltageRegulation", "generatorControlType",
                 "controlledBusId", "controlledBranchId", "controlledBranchSide", "remoteTargetQ", "disabled", "asym", "referencePriority", "reference", "extrapolateReactiveLimits",
-                "curvePoints", "activePowerBitsOfReadQ", "readMinQ", "readMaxQ"));
+                "limitsKind", "fixedMinQ", "fixedMaxQ", "curvePoints", "curveLimitsRead", "activePowerBitsOfReadQ", "readMinQ", "readMaxQ"));
         expected.put(AbstractLfInjection.class, Set.of("initialTargetP", "targetP"));
         expected.put(AbstractLfShunt.class, Set.of("q", "p"));
         expected.put(AbstractPropertyBag.class, Set.of("properties"));
