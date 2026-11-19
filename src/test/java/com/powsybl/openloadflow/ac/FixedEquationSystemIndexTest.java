@@ -242,6 +242,37 @@ class FixedEquationSystemIndexTest {
     }
 
     /**
+     * The generator bus of the Eurostag example stops holding its voltage, as when it reaches a reactive limit: the position
+     * of its voltage switches from its voltage target to its reactive balance, and no other position changes mode. Both
+     * are alternatives of the position from the start.
+     */
+    @Test
+    void aSwitchToPqChangesTheModeOfOnePosition() {
+        Network network = EurostagTutorialExample1Factory.create();
+        AcLoadFlowParameters acParameters = acParameters(network, new LoadFlowParameters(), false, true);
+        LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
+        try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
+             FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed =
+                     new FixedEquationSystemIndex<>(context.getEquationSystem(), AcVariablePairing.INSTANCE, FixedEquationSystemIndex.Scope.ALL)) {
+            LfBus generatorBus = lfNetwork.getBusById("VLGEN_0");
+            FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
+            int position = structure.getPosition(context.getEquationSystem().getVariable(generatorBus.getNum(), AcVariableType.BUS_V));
+            int[] before = fixed.getModes().clone();
+            assertEquals(AcEquationType.BUS_TARGET_V, structure.getType(structure.getAlternatives(position)[before[position]]));
+
+            generatorBus.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(false);
+            int[] after = fixed.getModes();
+            assertEquals(AcEquationType.BUS_TARGET_Q, structure.getType(structure.getAlternatives(position)[after[position]]));
+            for (int other = 0; other < after.length; other++) {
+                if (other != position) {
+                    assertEquals(before[other], after[other], "position " + other);
+                }
+            }
+            assertEquals(1, fixed.getMatrixStructureBuildCount());
+        }
+    }
+
+    /**
      * A bus at an end of a zero impedance branch is off before the equation system is created, like the far side of an
      * open switch that is kept for an action. Its positions hold nothing, and those of the branch hold the two equations
      * that fix its flows to zero. The two equations that tie the buses together are off, and they cannot be evaluated:
@@ -515,6 +546,17 @@ class FixedEquationSystemIndexTest {
         fixed.updateDer();
         FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
         int variableCount = structure.getVariableCount();
+        // the mode of each position names the equation it holds among its alternatives
+        int[] modes = fixed.getModes();
+        for (int position = 0; position < variableCount; position++) {
+            int equation = fixed.getEquationOfPosition(position);
+            int[] alternatives = structure.getAlternatives(position);
+            switch (modes[position]) {
+                case FixedEquationSystemIndex.MODE_NONE -> assertEquals(-1, equation, state + ", position " + position);
+                case FixedEquationSystemIndex.MODE_OTHER -> assertTrue(equation >= 0 && Arrays.binarySearch(alternatives, equation) < 0, state + ", position " + position);
+                default -> assertEquals(alternatives[modes[position]], equation, state + ", position " + position);
+            }
+        }
         double[][] column = new double[variableCount][variableCount];
         for (int position = 0; position < variableCount; position++) {
             for (int i = structure.getColumnStart()[position]; i < structure.getColumnStart()[position + 1]; i++) {

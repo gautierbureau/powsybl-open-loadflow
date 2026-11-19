@@ -244,6 +244,8 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private final boolean[] fixesVariable;
     /** For each equation, the positions it may take besides its own, sorted: empty for most. */
     private final int[][] controllerPositions;
+    /** For each position, the equations that can hold it, built when first asked for. */
+    private int[][] alternatives;
     /** For each equation, the terms it holds as objects: null when it has none. */
     private final List<ObjectTerms<V, E>> objectTerms;
     /**
@@ -1029,6 +1031,38 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
      */
     int[] getControllerPositions(int equation) {
         return controllerPositions[equation];
+    }
+
+    /**
+     * For each position, the equations that can hold it, in the order of their numbers: those whose own position it is and
+     * those that have it among their controller positions. Built once with the structure: it is the table a mode of a position
+     * indexes ({@link FixedEquationSystemIndex#getModes()}).
+     */
+    public int[] getAlternatives(int position) {
+        if (alternatives == null) {
+            TIntArrayList[] lists = new TIntArrayList[getVariableCount()];
+            for (int equation = 0; equation < getEquationCount(); equation++) {
+                if (ownPosition[equation] >= 0) {
+                    alternativesOf(lists, ownPosition[equation]).add(equation);
+                }
+                for (int candidate : controllerPositions[equation]) {
+                    alternativesOf(lists, candidate).add(equation);
+                }
+            }
+            int[][] built = new int[lists.length][];
+            for (int s = 0; s < lists.length; s++) {
+                built[s] = lists[s] == null ? new int[0] : sortedDistinct(lists[s]);
+            }
+            alternatives = built;
+        }
+        return alternatives[position];
+    }
+
+    private static TIntArrayList alternativesOf(TIntArrayList[] lists, int position) {
+        if (lists[position] == null) {
+            lists[position] = new TIntArrayList(2);
+        }
+        return lists[position];
     }
 
     /** The positions of the variables the equation depends on, sorted. */

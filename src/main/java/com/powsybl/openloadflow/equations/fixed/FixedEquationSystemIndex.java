@@ -63,6 +63,12 @@ import java.util.Set;
 public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity>
         implements EquationSystemListener<V, E>, AutoCloseable {
 
+    /** The mode of a position that holds no equation: its variable keeps its value. */
+    public static final int MODE_NONE = -1;
+
+    /** The mode of a position that holds an equation outside its alternatives: one the pairing moved to a unpaired position. */
+    public static final int MODE_OTHER = -2;
+
     /** Which equations have their entries in the matrix structure from the start. */
     public enum Scope {
         /** Every equation OLF created, on the position it is paired with and on its controller positions. */
@@ -133,6 +139,10 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     private boolean lastPairingValid;
     private int pairingCount;
 
+    /** For each position, the index of the equation it holds among its alternatives, as of the last pairing. */
+    private int[] modes;
+    private boolean modesValid;
+
     private double[] values;
     private double[] balance;
     private double[] equationValues;
@@ -192,6 +202,7 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
         if (!pairingValid) {
             place();
             pairingValid = true;
+            modesValid = false;
         }
         if (!matrixStructureValid) {
             structure.buildMatrixStructure(pairedEquations, pairedPositions);
@@ -898,6 +909,33 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     public int getPositionOfEquation(int equation) {
         update();
         return positionOfEquation[equation];
+    }
+
+    /**
+     * For each position, which equation it holds, as an index in {@link FixedStructure#getAlternatives(int)}: the GPU's row
+     * mode, given by the pairing of the CPU. {@link #MODE_NONE} when it holds none, {@link #MODE_OTHER} when it
+     * holds an equation outside its alternatives. A switch of an outer loop, or a contingency, changes the modes of
+     * the positions it touches and nothing else.
+     */
+    public int[] getModes() {
+        update();
+        if (modes == null || modes.length != equationOfPosition.length) {
+            modes = new int[equationOfPosition.length];
+            modesValid = false;
+        }
+        if (!modesValid) {
+            for (int position = 0; position < modes.length; position++) {
+                int equation = equationOfPosition[position];
+                if (equation < 0) {
+                    modes[position] = MODE_NONE;
+                } else {
+                    int alternativeIndex = Arrays.binarySearch(structure.getAlternatives(position), equation);
+                    modes[position] = alternativeIndex >= 0 ? alternativeIndex : MODE_OTHER;
+                }
+            }
+            modesValid = true;
+        }
+        return modes;
     }
 
     /** The equation a position holds, -1 when it holds none: its variable is then fixed. */
