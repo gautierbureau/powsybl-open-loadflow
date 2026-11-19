@@ -80,6 +80,11 @@ class ReactiveLimitsDecisionsTest {
         assertEquals(DECISION_TO_PV, pqBusDecision(LIMIT_MAX_Q, 1.01, 1, true, -1, 1, 1, TOL));
         assertEquals(DECISION_NONE, pqBusDecision(LIMIT_MAX_Q, 1, 1, true, -1, 1, 1, TOL));
         assertEquals(DECISION_NONE, pqBusDecision(LIMIT_MAX_Q, 0.99, 1, true, -1, 1, 1, TOL));
+        // with a voltage deadband, the controlled voltage must miss its target by more than it
+        assertEquals(DECISION_NONE, pqBusDecision(LIMIT_MIN_Q, 0.99, 1, true, -1, 1, -1, TOL, 0.02));
+        assertEquals(DECISION_TO_PV, pqBusDecision(LIMIT_MIN_Q, 0.97, 1, true, -1, 1, -1, TOL, 0.02));
+        assertEquals(DECISION_NONE, pqBusDecision(LIMIT_MAX_Q, 1.01, 1, true, -1, 1, 1, TOL, 0.02));
+        assertEquals(DECISION_TO_PV, pqBusDecision(LIMIT_MAX_Q, 1.03, 1, true, -1, 1, 1, TOL, 0.02));
         // a realistic-voltage switch reads like the limit of its side
         assertEquals(DECISION_TO_PV, pqBusDecision(LIMIT_MIN_REALISTIC_V, 0.99, 1, true, -1, 1, 0.3, TOL));
         assertEquals(DECISION_TO_PV, pqBusDecision(LIMIT_MAX_REALISTIC_V, 1.01, 1, true, -1, 1, 0.3, TOL));
