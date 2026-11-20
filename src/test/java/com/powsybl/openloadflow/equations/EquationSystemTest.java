@@ -286,6 +286,53 @@ class EquationSystemTest {
     }
 
     @Test
+    void writeVectorizedAcSystemWithLoadModelsTest() {
+        Network network = EurostagTutorialExample1Factory.create();
+        // two loads that follow the voltage, each with its model, at the bus of the load that does not
+        network.getVoltageLevel("VLLOAD").newLoad()
+                .setId("ZIPLOAD")
+                .setBus("NLOAD")
+                .setP0(50)
+                .setQ0(30)
+                .newZipModel()
+                    .setC0p(0.5)
+                    .setC0q(0.55)
+                    .setC1p(0.3)
+                    .setC1q(0.35)
+                    .setC2p(0.2)
+                    .setC2q(0.1)
+                    .add()
+                .add();
+        network.getVoltageLevel("VLLOAD").newLoad()
+                .setId("EXPLOAD")
+                .setBus("NLOAD")
+                .setP0(40)
+                .setQ0(20)
+                .newExponentialModel()
+                    .setNp(0.8)
+                    .setNq(0.9)
+                    .add()
+                .add();
+        LfNetworkParameters networkParameters = new LfNetworkParameters().setSlackBusSelector(new FirstSlackBusSelector())
+                .setUseLoadModel(true);
+        LfNetwork lfNetwork = Networks.load(network, networkParameters, ReportNode.NO_OP).getFirst();
+
+        EquationSystem<AcVariableType, AcEquationType> equationSystem = new AcVectorizedEquationSystemCreator(lfNetwork).create();
+        String ref = String.join(System.lineSeparator(),
+                "bus_target_v0 = v0",
+                "bus_target_φ0 = φ0",
+                "bus_target_p[1] = ac_p_array_closed_1(v1, v2, φ1, φ2) + ac_p_array_closed_1(v1, v2, φ1, φ2) + ac_p_array_closed_2(v0, v1, φ0, φ1)",
+                "bus_target_p[2] = ac_p_array_closed_1(v2, v3, φ2, φ3) + ac_p_array_closed_2(v1, v2, φ1, φ2) + ac_p_array_closed_2(v1, v2, φ1, φ2)",
+                // one element of the term array for the two loads of the bus
+                "bus_target_p[3] = ac_p_array_closed_2(v2, v3, φ2, φ3) + ac_load_p_array(v3)",
+                "bus_target_q[1] = ac_q_array_closed_1(v1, v2, φ1, φ2) + ac_q_array_closed_1(v1, v2, φ1, φ2) + ac_q_array_closed_2(v0, v1, φ0, φ1)",
+                "bus_target_q[2] = ac_q_array_closed_1(v2, v3, φ2, φ3) + ac_q_array_closed_2(v1, v2, φ1, φ2) + ac_q_array_closed_2(v1, v2, φ1, φ2)",
+                "bus_target_q[3] = ac_q_array_closed_2(v2, v3, φ2, φ3) + ac_load_q_array(v3)")
+                + System.lineSeparator();
+        assertEquals(ref, equationSystem.writeToString());
+    }
+
+    @Test
     void writeAllEquationsAcSystemTest() {
         List<LfNetwork> lfNetworks = Networks.load(EurostagTutorialExample1Factory.create(), new FirstSlackBusSelector());
         LfNetwork network = lfNetworks.get(0);

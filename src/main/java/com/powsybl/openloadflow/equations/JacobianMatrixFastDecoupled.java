@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.ac.equations.vector.ClosedBranchSide1ActiveFlowE
 import com.powsybl.openloadflow.ac.equations.vector.ClosedBranchSide1ReactiveFlowEquationTermArrayEvaluator;
 import com.powsybl.openloadflow.ac.equations.vector.ClosedBranchSide2ActiveFlowEquationTermArrayEvaluator;
 import com.powsybl.openloadflow.ac.equations.vector.ClosedBranchSide2ReactiveFlowEquationTermArrayEvaluator;
+import com.powsybl.openloadflow.ac.equations.vector.LoadModelReactiveFlowEquationTermArrayEvaluator;
 import com.powsybl.openloadflow.ac.equations.vector.OpenBranchSide1ReactiveFlowEquationTermArrayEvaluator;
 import com.powsybl.openloadflow.ac.equations.vector.OpenBranchSide2ReactiveFlowEquationTermArrayEvaluator;
 import com.powsybl.openloadflow.ac.equations.vector.ShuntCompensatorReactiveFlowEquationTermArrayEvaluator;
@@ -86,7 +87,8 @@ public class JacobianMatrixFastDecoupled
             ClosedBranchSide2ReactiveFlowEquationTermArrayEvaluator.class.getName(),
             OpenBranchSide1ReactiveFlowEquationTermArrayEvaluator.class.getName(),
             OpenBranchSide2ReactiveFlowEquationTermArrayEvaluator.class.getName(),
-            ShuntCompensatorReactiveFlowEquationTermArrayEvaluator.class.getName()
+            ShuntCompensatorReactiveFlowEquationTermArrayEvaluator.class.getName(),
+            LoadModelReactiveFlowEquationTermArrayEvaluator.class.getName()
     );
 
     // Checks if the term provided has a dedicated derivative
@@ -137,6 +139,8 @@ public class JacobianMatrixFastDecoupled
                     new OpenBranchSide2ReactiveFlowFastDecoupledEquationTerm(openQ1Evaluator, termElementNum);
                 case ShuntCompensatorReactiveFlowEquationTermArrayEvaluator shuntQEvaluator ->
                     new ShuntCompensatorReactiveFlowFastDecoupledEquationTerm(shuntQEvaluator, termElementNum);
+                case LoadModelReactiveFlowEquationTermArrayEvaluator loadQEvaluator ->
+                    new LoadModelReactiveFlowFastDecoupledEquationTerm(loadQEvaluator, termElementNum);
                 default -> throw new IllegalStateException("Unexpected term array class: " + term.getClass());
             };
         }
