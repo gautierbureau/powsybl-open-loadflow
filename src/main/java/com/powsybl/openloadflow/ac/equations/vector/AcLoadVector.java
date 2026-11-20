@@ -33,24 +33,24 @@ public class AcLoadVector {
 
     /** The buses that have such loads. */
     final TIntArrayList busNums = new TIntArrayList();
+
+    // The arrays by bus number are created with the first load that follows a model: they are null in a network that
+    // has no such load.
+
     /** By bus number: the first of the loads of the bus in {@link #loads}, -1 when it has none, and their count. */
-    final int[] firstLoad;
-    final int[] loadCount;
+    int[] firstLoad;
+    int[] loadCount;
 
     /** By bus number: the power the loads of the bus take at the current state, and its derivative to the voltage. */
-    final double[] busP;
-    final double[] busDpdv;
-    final double[] busQ;
-    final double[] busDqdv;
+    double[] busP;
+    double[] busDpdv;
+    double[] busQ;
+    double[] busDqdv;
+
+    private final int busCount;
 
     public AcLoadVector(int busCount) {
-        firstLoad = new int[busCount];
-        Arrays.fill(firstLoad, -1);
-        loadCount = new int[busCount];
-        busP = new double[busCount];
-        busDpdv = new double[busCount];
-        busQ = new double[busCount];
-        busDqdv = new double[busCount];
+        this.busCount = busCount;
     }
 
     /**
@@ -58,6 +58,15 @@ public class AcLoadVector {
      * added one after the other.
      */
     int add(LfBus bus, LfLoad load) {
+        if (firstLoad == null) {
+            firstLoad = new int[busCount];
+            Arrays.fill(firstLoad, -1);
+            loadCount = new int[busCount];
+            busP = new double[busCount];
+            busDpdv = new double[busCount];
+            busQ = new double[busCount];
+            busDqdv = new double[busCount];
+        }
         int busNum = bus.getNum();
         int loadNum = loads.size();
         if (firstLoad[busNum] < 0) {
@@ -75,7 +84,7 @@ public class AcLoadVector {
 
     /** The loads of a bus that follow a model. */
     public List<LfLoad> getLoads(int busNum) {
-        return firstLoad[busNum] < 0 ? List.of() : loads.subList(firstLoad[busNum], firstLoad[busNum] + loadCount[busNum]);
+        return firstLoad == null || firstLoad[busNum] < 0 ? List.of() : loads.subList(firstLoad[busNum], firstLoad[busNum] + loadCount[busNum]);
     }
 
     public Evaluable getP(int loadNum) {
