@@ -49,6 +49,8 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     private boolean valid;
 
     private int[] rowOfSlot;
+    /** The placement {@link #rowOfSlot} and {@link #columnOfSlot} are of. */
+    private int placementOfSlots = -1;
     private int[] columnOfSlot;
     private double[] bySlot;
 
@@ -70,6 +72,17 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     /** To call when the state, an activation or a constant of the equation system changes. */
     public void invalidate() {
         valid = false;
+    }
+
+    private boolean slotsAreCurrent(FixedStructure<V, E> structure) {
+        for (int slot = 0; slot < rowOfSlot.length; slot++) {
+            int equation = fixed.getEquationOfSlot(slot);
+            if (rowOfSlot[slot] != structure.getVariable(slot).getRow()
+                    || columnOfSlot[slot] != (equation < 0 ? -1 : structure.getColumnInEquationSystem(equation))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void update() {
@@ -101,11 +114,12 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
             closeLu();
             throw e;
         }
-        for (int slot = 0; slot < bySlot.length; slot++) {
-            int equation = fixed.getEquationOfSlot(slot);
-            rowOfSlot[slot] = structure.getVariable(slot).getRow();
-            columnOfSlot[slot] = equation < 0 ? -1 : structure.getColumnInEquationSystem(equation);
+        // the rows and the columns of the slots change only with a placement
+        if (fixed.getPlacementCount() != placementOfSlots) {
+            fixed.getRowsAndColumnsOfSlots(rowOfSlot, columnOfSlot);
+            placementOfSlots = fixed.getPlacementCount();
         }
+        assert slotsAreCurrent(structure) : "The rows and columns of the slots kept from the last placement are not those of OLF's index";
         valid = true;
     }
 
@@ -146,6 +160,7 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         patternRowIndices = rowIndices;
         rowOfSlot = new int[slotCount];
         columnOfSlot = new int[slotCount];
+        placementOfSlots = -1;
         bySlot = new double[slotCount];
     }
 
