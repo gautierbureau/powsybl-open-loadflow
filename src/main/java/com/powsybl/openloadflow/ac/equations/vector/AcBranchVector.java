@@ -13,6 +13,7 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.PiModel;
 import com.powsybl.openloadflow.util.Evaluable;
+import gnu.trove.list.array.TIntArrayList;
 import net.jafama.FastMath;
 
 import java.util.List;
@@ -92,6 +93,31 @@ public class AcBranchVector {
     final double[] dq2dph2;
     final double[] dq2da1;
     final double[] dq2dr1;
+
+    // The arrays of the branches open at one side are as long as the others, by branch number. Those of a side are
+    // created with the first branch that has terms for when it is open at that side: they are null in a network that
+    // has no such branch.
+
+    /** True for a branch that has terms for when it is open at side 1, and the numbers of these branches. */
+    boolean[] openableSide1;
+    final TIntArrayList openableSide1Nums = new TIntArrayList();
+
+    /** True for a branch that has terms for when it is open at side 2, and the numbers of these branches. */
+    boolean[] openableSide2;
+    final TIntArrayList openableSide2Nums = new TIntArrayList();
+
+    /** The flow at side 2 of a branch open at side 1, and its derivative. */
+    double[] openP2;
+    double[] openDp2dv2;
+    double[] openQ2;
+    double[] openDq2dv2;
+
+    /** The flow at side 1 of a branch open at side 2, its derivative, and the ratio of the branch they were computed with. */
+    double[] openP1;
+    double[] openDp1dv1;
+    double[] openQ1;
+    double[] openDq1dv1;
+    double[] openR1;
 
     public AcBranchVector(List<LfBranch> branches, AcEquationSystemCreationParameters creationParameters) {
         int size = branches.size();
@@ -188,6 +214,45 @@ public class AcBranchVector {
 
     public int getSize() {
         return disabled.length;
+    }
+
+    /**
+     * Says that a branch has terms for when it is open at side 1, when they are created: its flow at side 2 is then
+     * computed at each state update.
+     */
+    void setOpenableSide1(int branchNum) {
+        if (openableSide1 == null) {
+            int size = getSize();
+            openableSide1 = new boolean[size];
+            openP2 = new double[size];
+            openDp2dv2 = new double[size];
+            openQ2 = new double[size];
+            openDq2dv2 = new double[size];
+        }
+        if (!openableSide1[branchNum]) {
+            openableSide1[branchNum] = true;
+            openableSide1Nums.add(branchNum);
+        }
+    }
+
+    /**
+     * Says that a branch has terms for when it is open at side 2, when they are created: its flow at side 1 is then
+     * computed at each state update.
+     */
+    void setOpenableSide2(int branchNum) {
+        if (openableSide2 == null) {
+            int size = getSize();
+            openableSide2 = new boolean[size];
+            openP1 = new double[size];
+            openDp1dv1 = new double[size];
+            openQ1 = new double[size];
+            openDq1dv1 = new double[size];
+            openR1 = new double[size];
+        }
+        if (!openableSide2[branchNum]) {
+            openableSide2[branchNum] = true;
+            openableSide2Nums.add(branchNum);
+        }
     }
 
     public Evaluable getP1(int branchNum) {
