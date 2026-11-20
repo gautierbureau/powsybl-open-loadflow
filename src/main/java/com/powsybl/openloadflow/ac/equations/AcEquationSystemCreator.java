@@ -82,7 +82,7 @@ public class AcEquationSystemCreator {
         }
     }
 
-    private void createLoadEquations(LfBus bus, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+    protected void createLoadEquations(LfBus bus, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
         for (LfLoad load : bus.getLoads()) {
             load.getLoadModel().ifPresent(loadModel -> {
                 var p = new LoadModelActiveFlowEquationTerm(bus, load, loadModel, equationSystem.getVariableSet());
