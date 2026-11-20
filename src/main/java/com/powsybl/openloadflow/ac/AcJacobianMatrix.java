@@ -58,12 +58,26 @@ public class AcJacobianMatrix extends JacobianMatrix<AcVariableType, AcEquationT
 
     public AcJacobianMatrix(EquationSystem<AcVariableType, AcEquationType> equationSystem, MatrixFactory matrixFactory,
                             LfNetwork network) {
+        this(equationSystem, matrixFactory, network, AcJacobianStructure.FIXED);
+    }
+
+    public AcJacobianMatrix(EquationSystem<AcVariableType, AcEquationType> equationSystem, MatrixFactory matrixFactory,
+                            LfNetwork network, AcJacobianStructure structure) {
         super(equationSystem, matrixFactory);
         this.network = Objects.requireNonNull(network);
-        fixedJacobian = new FixedJacobian<>(equationSystem, new AcPlacement(network), matrixFactory);
+        fixedJacobian = Objects.requireNonNull(structure) == AcJacobianStructure.FIXED
+                ? new FixedJacobian<>(equationSystem, new AcPlacement(network), matrixFactory)
+                : null;
         network.addListener(networkListener);
     }
 
+    public boolean isFixed() {
+        return fixedJacobian != null;
+    }
+
+    /**
+     * The fixed matrix the solves run on, or null with the {@link AcJacobianStructure#INDEXED} structure.
+     */
     public FixedJacobian<AcVariableType, AcEquationType> getFixedJacobian() {
         return fixedJacobian;
     }
@@ -71,29 +85,47 @@ public class AcJacobianMatrix extends JacobianMatrix<AcVariableType, AcEquationT
     @Override
     protected void updateStatus(Status status) {
         super.updateStatus(status);
-        fixedJacobian.invalidate();
+        if (fixedJacobian != null) {
+            fixedJacobian.invalidate();
+        }
     }
 
     @Override
     public void solve(double[] b) {
+        if (fixedJacobian == null) {
+            super.solve(b);
+            return;
+        }
         checkSquare();
         fixedJacobian.solve(b);
     }
 
     @Override
     public void solveTransposed(double[] b) {
+        if (fixedJacobian == null) {
+            super.solveTransposed(b);
+            return;
+        }
         checkSquare();
         fixedJacobian.solveTransposed(b);
     }
 
     @Override
     public void solve(DenseMatrix b) {
+        if (fixedJacobian == null) {
+            super.solve(b);
+            return;
+        }
         checkSquare();
         fixedJacobian.solve(b);
     }
 
     @Override
     public void solveTransposed(DenseMatrix b) {
+        if (fixedJacobian == null) {
+            super.solveTransposed(b);
+            return;
+        }
         checkSquare();
         fixedJacobian.solveTransposed(b);
     }
@@ -101,7 +133,9 @@ public class AcJacobianMatrix extends JacobianMatrix<AcVariableType, AcEquationT
     @Override
     public void close() {
         super.close();
-        fixedJacobian.close();
+        if (fixedJacobian != null) {
+            fixedJacobian.close();
+        }
         network.removeListener(networkListener);
     }
 }

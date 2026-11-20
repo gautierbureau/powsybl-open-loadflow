@@ -130,7 +130,12 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
     }
 
     private static FixedEquationSystem<AcVariableType, AcEquationType> fixed(AcLoadFlowContext context) {
-        return ((AcJacobianMatrix) context.getJacobianMatrix()).getFixedJacobian().getFixedEquationSystem();
+        AcJacobianMatrix j = (AcJacobianMatrix) context.getJacobianMatrix();
+        if (!j.isFixed()) {
+            throw new IllegalStateException("A contingency is recorded in the terms of the fixed structure: the AC Jacobian structure must be "
+                    + AcJacobianStructure.FIXED);
+        }
+        return j.getFixedJacobian().getFixedEquationSystem();
     }
 
     /**

@@ -44,7 +44,7 @@ public class NewtonRaphson extends AbstractAcSolver {
                          boolean detailedReport) {
         super(network, equationSystem, j, targetVector, equationVector, detailedReport);
         this.parameters = Objects.requireNonNull(parameters);
-        keptState = j instanceof AcJacobianMatrix ? new AcKeptState(network) : null;
+        keptState = j instanceof AcJacobianMatrix acJ && acJ.isFixed() ? new AcKeptState(network) : null;
     }
 
     /** The state of the last solve, by slot, that the next one starts from (null when the Jacobian is not on a fixed system). */
