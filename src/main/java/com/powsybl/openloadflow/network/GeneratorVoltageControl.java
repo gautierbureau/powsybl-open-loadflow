@@ -8,7 +8,6 @@
 package com.powsybl.openloadflow.network;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.function.ToDoubleFunction;
 
@@ -77,19 +76,18 @@ public class GeneratorVoltageControl extends VoltageControl<LfBus> implements Lf
 
         double[] reactiveKeys = createReactiveKeys(controllerBuses, LfGenerator.GeneratorControlType.VOLTAGE);
 
-        // no reactive dispatch on PQ buses, so we set the key to 0
+        // no reactive dispatch on PQ buses, so their key is 0
+        boolean[] active = new boolean[controllerBuses.size()];
         for (int i = 0; i < controllerBuses.size(); i++) {
             LfBus controllerBus = controllerBuses.get(i);
-            if (controllerBus.isDisabled() || !controllerBus.isGeneratorVoltageControlEnabled()) {
-                reactiveKeys[i] = 0d;
-            }
+            active[i] = !controllerBus.isDisabled() && controllerBus.isGeneratorVoltageControlEnabled();
         }
 
         // update bus reactive keys for remote voltage control
-        double reactiveKeysSum = Arrays.stream(reactiveKeys).sum();
+        double[] shares = new double[controllerBuses.size()];
+        distribute(reactiveKeys, active, shares);
         for (int i = 0; i < controllerBuses.size(); i++) {
-            LfBus controllerBus = controllerBuses.get(i);
-            controllerBus.setRemoteControlReactivePercent(reactiveKeysSum == 0 ? 0 : reactiveKeys[i] / reactiveKeysSum);
+            controllerBuses.get(i).setRemoteControlReactivePercent(shares[i]);
         }
     }
 
