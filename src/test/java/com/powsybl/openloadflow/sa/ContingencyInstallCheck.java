@@ -30,7 +30,8 @@ import java.util.*;
  * Checks that installing a contingency's record ({@link AcContingencyDelta#install}) on the base state leaves the
  * network as OLF's rules leave it: {@link LfContingency#apply} then the spreading of the loss, as a security analysis
  * does. For each contingency: apply, save the state of every bus and branch, record, restore, install, compare.
- * Arguments: the network, the load flow parameters (.json), the contingencies (.json), how many (0: all).
+ * Arguments: the network, the load flow parameters (.json), the contingencies (.json), how many (0: all), and
+ * optionally a file to write the flat records to ({@link AcContingencyRecords#write}).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -84,6 +85,7 @@ public final class ContingencyInstallCheck {
                 new AcloadFlowEngine(context).run();
                 FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed = ((AcFixedJacobianMatrix) context.getJacobianMatrix()).getFixedJacobian().getFixedEquationSystemIndex();
                 AcContingencyDelta.Baseline base = AcContingencyDelta.baseline(context);
+                AcContingencyRecords.Builder records = new AcContingencyRecords.Builder(base);
                 NetworkState state = NetworkState.save(net);
                 // what each contingency touches, as the security analysis collects it
                 ModifiedElementsCollector touched = new ModifiedElementsCollector(net);
@@ -117,6 +119,7 @@ public final class ContingencyInstallCheck {
                     int[] modes = modesOrNull(fixed);
                     double[] targets = context.getTargetVector().getArray().clone();
                     AcContingencyDelta d = AcContingencyDelta.record(c.get(), context, base, spread, touched.getBuses(), touched.getBranches());
+                    records.add(d);
                     touched.setEnabled(false);
                     state.restore();
                     if (!d.onBaseStructure()) {
@@ -175,6 +178,15 @@ public final class ContingencyInstallCheck {
                     }
                 }
                 System.out.printf("%d contingencies checked, %d installed exactly, %d with positions off the base structure%n", checked, exact, recompiled); // NOSONAR
+                AcContingencyRecords flat = records.build();
+                System.out.printf("flat records: %d contingencies, %d positions, %d generators, %d loads, %d control buses, %d reactive keys, %d disabled buses, %d disabled branches%n", // NOSONAR
+                        flat.size(), flat.getPositions().length, flat.getGenerators().length, flat.getLoads().length, flat.getControlBuses().length,
+                        flat.getReactivePercentBuses().length, flat.getDisabledBuses().length, flat.getDisabledBranches().length);
+                if (args.length > 4) {
+                    try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(Path.of(args[4]))) {
+                        flat.write(w);
+                    }
+                }
                 categories.forEach((k, v) -> System.out.printf("  %5d  %s   (e.g. %s)%n", v, k, examples.get(k))); // NOSONAR
             }
         }

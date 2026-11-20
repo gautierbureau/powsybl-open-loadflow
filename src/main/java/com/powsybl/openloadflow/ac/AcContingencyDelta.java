@@ -189,6 +189,20 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
             return modes.clone();
         }
 
+        /** The generator of the given number: bus by bus, in the order of each bus. */
+        LfGenerator getGenerator(int num) {
+            return generators.get(num);
+        }
+
+        /** The load of the given number: bus by bus, in the order of each bus. */
+        LfLoad getLoad(int num) {
+            return loads.get(num);
+        }
+
+        boolean hasExcludedSlackBuses(int[] buses) {
+            return Arrays.equals(buses, excludedSlackBuses);
+        }
+
         public double[] getTargets() {
             return targets.clone();
         }
@@ -531,89 +545,9 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
      * numbered in the order of the baseline: bus by bus, in the order of each bus.
      */
     public void install(LfNetwork network, Baseline baseline) {
-        // the slack bus moves before the buses it was on are disabled, as PropagatedContingency.toLfContingency does it
-        if (!Arrays.equals(excludedSlackBuses, baseline.excludedSlackBuses)) {
-            java.util.Set<LfBus> excluded = new java.util.HashSet<>();
-            for (int num : excludedSlackBuses) {
-                excluded.add(network.getBus(num));
-            }
-            network.getSynchronousNetworks().forEach(synchronousNetwork -> synchronousNetwork.setExcludedSlackBuses(excluded));
-            // and is chosen at once, among buses none of which is disabled yet: the choice depends on the branches they have
-            network.getSynchronousNetworks().getFirst().getSlackBuses();
-        }
-        // in the order of DisabledNetwork.apply
-        for (int num : disabledBranches) {
-            network.getBranch(num).setDisabled(true);
-        }
-        for (int num : side1OpenBranches) {
-            network.getBranch(num).setConnectedSide1(false);
-        }
-        for (int num : side2OpenBranches) {
-            network.getBranch(num).setConnectedSide2(false);
-        }
-        for (int num : disabledHvdcs) {
-            network.getHvdc(num).setDisabled(true);
-        }
-        for (int num : disabledBuses) {
-            network.getBus(num).setDisabled(true);
-        }
-        for (int i = 0; i < shunts.length; i++) {
-            LfShunt shunt = network.getShunt(shunts[i]);
-            // only what changed: the standby automaton shunt of a static var compensator has no conductance to set
-            if (differs(shunt.getG(), shuntG[i])) {
-                shunt.setG(shuntG[i]);
-            }
-            if (differs(shunt.getB(), shuntB[i])) {
-                shunt.setB(shuntB[i]);
-            }
-        }
-        for (int i = 0; i < loads.length; i++) {
-            LfLoad load = baseline.loads.get(loads[i]);
-            load.setTargetP(loadTargetP[i]);
-            load.setTargetQ(loadTargetQ[i]);
-            load.setAbsVariableTargetP(loadAbsVariableTargetP[i]);
-            for (String originalId : loadDisabledOriginalIds[i]) {
-                load.setOriginalLoadDisabled(originalId, true);
-            }
-        }
-        for (int i = 0; i < generators.length; i++) {
-            LfGenerator generator = baseline.generators.get(generators[i]);
-            generator.setTargetP(generatorTargetP[i]);
-            generator.setInitialTargetP(generatorInitialTargetP[i]);
-            generator.setParticipating(generatorParticipating[i]);
-            generator.setDisabled(generatorDisabled[i]);
-            generator.setGeneratorControlType(generatorControlTypes[i]);
-        }
-        // as OLF's rules: the bus of a lost generator left with none controlling its voltage has its voltage control
-        // set off, which marks its reactive target to be computed again without the lost generator
-        for (int num : reactiveTargetBuses) {
-            network.getBus(num).setGeneratorVoltageControlEnabledAndRecomputeTargetQ(false);
-        }
-        for (int i = 0; i < controlBuses.length; i++) {
-            LfBus bus = network.getBus(controlBuses[i]);
-            // setting the voltage control marks the reactive target of the bus to be computed again from its
-            // generators, and frees it when it was frozen
-            if (bus.isGeneratorVoltageControlEnabled() != busVoltageControlEnabled[i]
-                    || bus.isGenerationTargetQFrozen() && !busGenerationTargetQFrozen[i]) {
-                bus.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(busVoltageControlEnabled[i]);
-            }
-            if (busGenerationTargetQFrozen[i]
-                    && (!bus.isGenerationTargetQFrozen() || differs(bus.getGenerationTargetQ(), busFrozenGenerationTargetQ[i]))) {
-                bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(busFrozenGenerationTargetQ[i]);
-            }
-            if (bus.isGeneratorReactivePowerControlEnabled() != busReactivePowerControlEnabled[i]) {
-                bus.setGeneratorReactivePowerControlEnabled(busReactivePowerControlEnabled[i]);
-            }
-        }
-        for (int i = 0; i < reactivePercentBuses.length; i++) {
-            network.getBus(reactivePercentBuses[i]).setRemoteControlReactivePercent(reactivePercents[i]);
-        }
-        for (int i = 0; i < tapBranches.length; i++) {
-            PiModel piModel = network.getBranch(tapBranches[i]).getPiModel();
-            piModel.setTapPosition(tapPositions[i]);
-            piModel.setA1(tapA1[i]);
-            piModel.setR1(tapR1[i]);
-        }
+        AcContingencyRecords.Builder records = new AcContingencyRecords.Builder(baseline);
+        records.add(this);
+        records.build().install(0, network, baseline);
     }
 
     /** Writes the delta over the modes and the targets of the base state: those of the contingency. */
