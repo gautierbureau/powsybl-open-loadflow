@@ -41,15 +41,16 @@ public class AcLoadFlowContext extends AbstractLoadFlowContext<AcVariableType, A
      * here would create it earlier than the load flow does.
      */
     public void forgetPivots() {
-        if (jacobianMatrix != null) {
-            ((AcJacobianMatrix) jacobianMatrix).getFixedJacobian().forgetPivots();
+        if (jacobianMatrix instanceof AcJacobianMatrix acJacobianMatrix && acJacobianMatrix.isFixed()) {
+            acJacobianMatrix.getFixedJacobian().forgetPivots();
         }
     }
 
     @Override
     public JacobianMatrix<AcVariableType, AcEquationType> getJacobianMatrix() {
         if (jacobianMatrix == null) {
-            jacobianMatrix = new AcJacobianMatrix(getEquationSystem(), parameters.getMatrixFactory(), network);
+            jacobianMatrix = new AcJacobianMatrix(getEquationSystem(), parameters.getMatrixFactory(), network,
+                                                  parameters.getJacobianStructure());
         }
         return jacobianMatrix;
     }
@@ -79,9 +80,13 @@ public class AcLoadFlowContext extends AbstractLoadFlowContext<AcVariableType, A
 
     public EquationVector<AcVariableType, AcEquationType> getEquationVector() {
         if (equationVector == null) {
-            // computed from the structure the Jacobian is filled from
-            equationVector = new FixedEquationVector<>(getEquationSystem(),
-                () -> ((AcJacobianMatrix) getJacobianMatrix()).getFixedJacobian().getFixedEquationSystem());
+            if (parameters.getJacobianStructure() == AcJacobianStructure.FIXED) {
+                // computed from the structure the Jacobian is filled from
+                equationVector = new FixedEquationVector<>(getEquationSystem(),
+                    () -> ((AcJacobianMatrix) getJacobianMatrix()).getFixedJacobian().getFixedEquationSystem());
+            } else {
+                equationVector = new EquationVector<>(getEquationSystem());
+            }
         }
         return equationVector;
     }
