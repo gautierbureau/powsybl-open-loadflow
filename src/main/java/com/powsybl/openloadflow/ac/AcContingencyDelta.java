@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.equations.fixed.FixedEquationSystem;
 import com.powsybl.openloadflow.equations.fixed.FixedStructure;
 import com.powsybl.openloadflow.network.DisabledBranchStatus;
+import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfContingency;
@@ -106,6 +107,9 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
         private final int[] modes;
         private final double[] targets;
         private final List<LfGenerator> generators;
+        /** For each bus, the number of its first generator and of its first load. */
+        private final int[] firstGenerator;
+        private final int[] firstLoad;
         private final double[] generatorTargetP;
         private final double[] generatorInitialTargetP;
         private final boolean[] generatorDisabled;
@@ -127,6 +131,8 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
         /** The branches whose ratio and phase shift are from a table of taps: OLF's rules change only their position. */
         private final List<LfBranch> tapBranches;
         private final int[] tapPositionBase;
+        /** For each branch, its index among {@link #tapBranches}, -1 when it has no table of taps. */
+        private final int[] tapIndex;
 
         private Baseline(FixedStructure<AcVariableType, AcEquationType> structure, int[] modes, double[] targets, LfNetwork network) {
             this.structure = structure;
@@ -134,7 +140,11 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
             this.targets = targets;
             generators = new ArrayList<>();
             loads = new ArrayList<>();
+            firstGenerator = new int[network.getBuses().size()];
+            firstLoad = new int[network.getBuses().size()];
             for (LfBus bus : network.getBuses()) {
+                firstGenerator[bus.getNum()] = generators.size();
+                firstLoad[bus.getNum()] = loads.size();
                 generators.addAll(bus.getGenerators());
                 loads.addAll(bus.getLoads());
             }
@@ -168,6 +178,11 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
             shuntBBase = network.getShunts().stream().mapToDouble(LfShunt::getB).toArray();
             tapBranches = network.getBranches().stream().filter(b -> b.getPiModel() instanceof PiModelArray).toList();
             tapPositionBase = tapBranches.stream().mapToInt(b -> b.getPiModel().getTapPosition()).toArray();
+            tapIndex = new int[network.getBranches().size()];
+            Arrays.fill(tapIndex, -1);
+            for (int b = 0; b < tapBranches.size(); b++) {
+                tapIndex[tapBranches.get(b).getNum()] = b;
+            }
         }
 
         public int[] getModes() {
@@ -227,7 +242,23 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
      */
     public static AcContingencyDelta record(LfContingency contingency, AcLoadFlowContext context, Baseline baseline,
                                             double preDistributedActivePower) {
+        LfNetwork network = context.getNetwork();
+        return record(contingency, context, baseline, preDistributedActivePower, network.getBuses(), network.getBranches());
+    }
+
+    /**
+     * The same, looking only at what the contingency touched, as a device's planning does: the buses and the branches
+     * OLF's rules changed ({@code ModifiedElementsCollector}: the buses of its lost generators and loads, those it
+     * disabled, those whose targets or controls the rules or the spreading of the loss changed, and the branches it
+     * opened or whose tap changed), and the controller buses of the voltage and reactive power controls of these
+     * buses, whose reactive keys the loss of a controller changes.
+     */
+    public static AcContingencyDelta record(LfContingency contingency, AcLoadFlowContext context, Baseline baseline,
+                                            double preDistributedActivePower, Collection<LfBus> touchedBuses,
+                                            Collection<LfBranch> touchedBranches) {
         Objects.requireNonNull(contingency);
+        LfNetwork network = context.getNetwork();
+        int[] scope = scope(network, touchedBuses);
         FixedEquationSystem<AcVariableType, AcEquationType> fixed = fixed(context);
         double[] targetVector = context.getTargetVector().getArray();
         // the slots, when the contingency's equations are on the base structure
@@ -267,15 +298,19 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
         List<String> generatorIds = new ArrayList<>();
         List<Double> generatorTargets = new ArrayList<>();
         List<Double> generatorAnchors = new ArrayList<>();
-        for (int g = 0; g < baseline.generators.size(); g++) {
-            LfGenerator generator = baseline.generators.get(g);
-            if (differs(generator.getTargetP(), baseline.generatorTargetP[g]) || differs(generator.getInitialTargetP(), baseline.generatorInitialTargetP[g])
-                    || generator.isDisabled() != baseline.generatorDisabled[g] || generator.isParticipating() != baseline.generatorParticipating[g]
-                    || generator.getGeneratorControlType() != baseline.generatorControlTypes[g]) {
-                generatorNums.add(g);
-                generatorIds.add(generator.getId());
-                generatorTargets.add(generator.getTargetP());
-                generatorAnchors.add(generator.getInitialTargetP());
+        for (int busNum : scope) {
+            List<LfGenerator> busGenerators = network.getBus(busNum).getGenerators();
+            for (int k = 0; k < busGenerators.size(); k++) {
+                int g = baseline.firstGenerator[busNum] + k;
+                LfGenerator generator = busGenerators.get(k);
+                if (differs(generator.getTargetP(), baseline.generatorTargetP[g]) || differs(generator.getInitialTargetP(), baseline.generatorInitialTargetP[g])
+                        || generator.isDisabled() != baseline.generatorDisabled[g] || generator.isParticipating() != baseline.generatorParticipating[g]
+                        || generator.getGeneratorControlType() != baseline.generatorControlTypes[g]) {
+                    generatorNums.add(g);
+                    generatorIds.add(generator.getId());
+                    generatorTargets.add(generator.getTargetP());
+                    generatorAnchors.add(generator.getInitialTargetP());
+                }
             }
         }
         boolean[] generatorDisabled = new boolean[generatorNums.size()];
@@ -290,14 +325,18 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
         List<Integer> loadNums = new ArrayList<>();
         List<String> loadIds = new ArrayList<>();
         List<Double> loadTargets = new ArrayList<>();
-        for (int l = 0; l < baseline.loads.size(); l++) {
-            LfLoad load = baseline.loads.get(l);
-            if (differs(load.getTargetP(), baseline.loadTargetP[l]) || differs(load.getTargetQ(), baseline.loadTargetQ[l])
-                    || differs(load.getAbsVariableTargetP(), baseline.loadAbsVariableTargetP[l])
-                    || contingency.getLostLoads().containsKey(load) && disabledOriginalCount(load) != baseline.loadDisabledOriginalCount[l]) {
-                loadNums.add(l);
-                loadIds.add(load.getId());
-                loadTargets.add(load.getTargetP());
+        for (int busNum : scope) {
+            List<LfLoad> busLoads = network.getBus(busNum).getLoads();
+            for (int k = 0; k < busLoads.size(); k++) {
+                int l = baseline.firstLoad[busNum] + k;
+                LfLoad load = busLoads.get(k);
+                if (differs(load.getTargetP(), baseline.loadTargetP[l]) || differs(load.getTargetQ(), baseline.loadTargetQ[l])
+                        || differs(load.getAbsVariableTargetP(), baseline.loadAbsVariableTargetP[l])
+                        || contingency.getLostLoads().containsKey(load) && disabledOriginalCount(load) != baseline.loadDisabledOriginalCount[l]) {
+                    loadNums.add(l);
+                    loadIds.add(load.getId());
+                    loadTargets.add(load.getTargetP());
+                }
             }
         }
         double[] loadTargetQ = new double[loadNums.size()];
@@ -309,13 +348,13 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
             loadAbsVariableTargetP[i] = load.getAbsVariableTargetP();
             loadDisabledOriginalIds[i] = disabledOriginalIds(load).toArray(new String[0]);
         }
-        LfNetwork network = context.getNetwork();
         LfSynchronousNetwork main = network.getSynchronousNetworks().getFirst();
         int[] slackBuses = main.getSlackBuses().stream().mapToInt(LfBus::getNum).toArray();
         int[] excludedSlackBuses = excludedSlackBuses(network);
         int referenceBus = main.getReferenceBus() != null ? main.getReferenceBus().getNum() : -1;
         List<Integer> controlBuses = new ArrayList<>();
-        for (LfBus bus : network.getBuses()) {
+        for (int busNum : scope) {
+            LfBus bus = network.getBus(busNum);
             if (bus.isGeneratorVoltageControlEnabled() != baseline.busVoltageControlEnabled[bus.getNum()]
                     || bus.isGeneratorReactivePowerControlEnabled() != baseline.busReactivePowerControlEnabled[bus.getNum()]
                     || bus.isGenerationTargetQFrozen() != baseline.busGenerationTargetQFrozen[bus.getNum()]
@@ -335,7 +374,8 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
         }
         List<Integer> percentBuses = new ArrayList<>();
         List<Double> percents = new ArrayList<>();
-        for (LfBus bus : network.getBuses()) {
+        for (int busNum : scope) {
+            LfBus bus = network.getBus(busNum);
             if (differs(bus.getRemoteControlReactivePercent(), baseline.reactivePercent[bus.getNum()])) {
                 percentBuses.add(bus.getNum());
                 percents.add(bus.getRemoteControlReactivePercent());
@@ -344,7 +384,7 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
         List<Integer> shunts = new ArrayList<>();
         List<Double> shuntG = new ArrayList<>();
         List<Double> shuntB = new ArrayList<>();
-        for (LfShunt shunt : network.getShunts()) {
+        for (LfShunt shunt : shuntsOf(network, scope)) {
             if (differs(shunt.getG(), baseline.shuntGBase[shunt.getNum()]) || differs(shunt.getB(), baseline.shuntBBase[shunt.getNum()])) {
                 shunts.add(shunt.getNum());
                 shuntG.add(shunt.getG());
@@ -355,7 +395,10 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
         List<Integer> taps = new ArrayList<>();
         List<Double> r1 = new ArrayList<>();
         List<Double> a1 = new ArrayList<>();
-        for (int b = 0; b < baseline.tapBranches.size(); b++) {
+        int[] touchedTapBranches = touchedBranches.stream().mapToInt(LfBranch::getNum)
+                .filter(num -> baseline.tapIndex[num] >= 0).sorted().distinct().toArray();
+        for (int num : touchedTapBranches) {
+            int b = baseline.tapIndex[num];
             LfBranch branch = baseline.tapBranches.get(b);
             PiModel piModel = branch.getPiModel();
             if (piModel.getTapPosition() != baseline.tapPositionBase[b]) {
@@ -383,6 +426,48 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
                 shunts.stream().mapToInt(Integer::intValue).toArray(), unbox(shuntG), unbox(shuntB),
                 tapBranches.stream().mapToInt(Integer::intValue).toArray(), taps.stream().mapToInt(Integer::intValue).toArray(),
                 unbox(r1), unbox(a1));
+    }
+
+    /**
+     * The buses a record looks at, in increasing order: the touched ones and the controller buses of their voltage and
+     * reactive power controls.
+     */
+    private static int[] scope(LfNetwork network, Collection<LfBus> touchedBuses) {
+        boolean[] in = new boolean[network.getBuses().size()];
+        for (LfBus bus : touchedBuses) {
+            in[bus.getNum()] = true;
+            bus.getGeneratorVoltageControl().ifPresent(vc -> vc.<GeneratorVoltageControl>getMainVoltageControl()
+                    .getMergedControllerElements().forEach(controller -> in[controller.getNum()] = true));
+            bus.getGeneratorReactivePowerControl().ifPresent(rpc -> rpc.getControllerBuses()
+                    .forEach(controller -> in[controller.getNum()] = true));
+        }
+        int count = 0;
+        for (boolean b : in) {
+            if (b) {
+                count++;
+            }
+        }
+        int[] scope = new int[count];
+        int i = 0;
+        for (int num = 0; num < in.length; num++) {
+            if (in[num]) {
+                scope[i++] = num;
+            }
+        }
+        return scope;
+    }
+
+    /** The shunts of the given buses, in increasing number. */
+    private static List<LfShunt> shuntsOf(LfNetwork network, int[] scope) {
+        List<LfShunt> shunts = new ArrayList<>();
+        for (int busNum : scope) {
+            LfBus bus = network.getBus(busNum);
+            bus.getShunt().ifPresent(shunts::add);
+            bus.getControllerShunt().ifPresent(shunts::add);
+            bus.getSvcShunt().ifPresent(shunts::add);
+        }
+        shunts.sort(java.util.Comparator.comparingInt(LfShunt::getNum));
+        return shunts;
     }
 
     private static boolean differs(double a, double b) {
