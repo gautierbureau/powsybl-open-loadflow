@@ -46,18 +46,17 @@ public class GeneratorReactivePowerControl extends ReactivePowerControl implemen
         double[] reactiveKeys = createReactiveKeys(controllerBuses, LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER);
 
         // key is 0 only on disabled controllers
+        boolean[] active = new boolean[controllerBuses.size()];
         for (int i = 0; i < controllerBuses.size(); i++) {
             LfBus controllerBus = controllerBuses.get(i);
-            if (controllerBus.isDisabled() || !controllerBus.isGeneratorReactivePowerControlEnabled()) {
-                reactiveKeys[i] = 0d;
-            }
+            active[i] = !controllerBus.isDisabled() && controllerBus.isGeneratorReactivePowerControlEnabled();
         }
 
         // update bus reactive keys for remote reactive power control
-        double reactiveKeysSum = Arrays.stream(reactiveKeys).sum();
+        double[] shares = new double[controllerBuses.size()];
+        distribute(reactiveKeys, active, shares);
         for (int i = 0; i < controllerBuses.size(); i++) {
-            LfBus controllerBus = controllerBuses.get(i);
-            controllerBus.setRemoteControlReactivePercent(reactiveKeysSum == 0 ? 0 : reactiveKeys[i] / reactiveKeysSum);
+            controllerBuses.get(i).setRemoteControlReactivePercent(shares[i]);
         }
     }
 }
