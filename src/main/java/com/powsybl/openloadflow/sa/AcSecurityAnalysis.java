@@ -12,6 +12,9 @@ import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
+import com.powsybl.openloadflow.ac.AcContingencyDelta;
+import com.powsybl.openloadflow.ac.AcContingencyRecords;
+import com.powsybl.openloadflow.ac.AcJacobianStructure;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowResult;
@@ -32,6 +35,7 @@ import com.powsybl.openloadflow.sa.extensions.ContingencyLoadFlowParameters;
 import com.powsybl.security.PostContingencyComputationStatus;
 import com.powsybl.security.monitor.StateMonitor;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.function.Consumer;
 
@@ -93,6 +97,57 @@ public class AcSecurityAnalysis extends AbstractSecurityAnalysis<AcVariableType,
     @Override
     protected AcLoadFlowContext createLoadFlowContext(LfNetwork lfNetwork, AcLoadFlowParameters parameters) {
         return new AcLoadFlowContext(lfNetwork, parameters);
+    }
+
+    @Override
+    protected ContingencyRecorder createContingencyRecorder(AcLoadFlowContext context) {
+        AcLoadFlowParameters parameters = context.getParameters();
+        if (parameters.getJacobianStructure() != AcJacobianStructure.FIXED || parameters.isAsymmetrical()) {
+            return null;
+        }
+        return new Recorder(context);
+    }
+
+    /**
+     * Records the contingencies of the plan as the flat tables a device reads ({@link AcContingencyRecords}), and
+     * installs each one from there.
+     */
+    private static final class Recorder implements ContingencyRecorder {
+
+        private final AcLoadFlowContext context;
+        private final AcContingencyDelta.Baseline baseline;
+        private final AcContingencyRecords.Builder builder;
+        private AcContingencyRecords records;
+
+        private Recorder(AcLoadFlowContext context) {
+            this.context = context;
+            baseline = AcContingencyDelta.baseline(context);
+            builder = new AcContingencyRecords.Builder(baseline);
+        }
+
+        @Override
+        public RecordedContingency record(LfContingency lfContingency, double preDistributedActivePower,
+                                          Collection<LfBus> touchedBuses, Collection<LfBranch> touchedBranches) {
+            if (records != null) {
+                throw new IllegalStateException("A contingency is recorded once the simulations have started");
+            }
+            int k = builder.add(AcContingencyDelta.record(lfContingency, context, baseline, preDistributedActivePower,
+                    touchedBuses, touchedBranches));
+            return new RecordedContingency() {
+                @Override
+                public void install() {
+                    if (records == null) {
+                        records = builder.build();
+                    }
+                    records.install(k, context.getNetwork(), baseline);
+                }
+
+                @Override
+                public double getPreDistributedActivePower() {
+                    return preDistributedActivePower;
+                }
+            };
+        }
     }
 
     @Override
