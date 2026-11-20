@@ -49,6 +49,8 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     private boolean valid;
 
     private int[] rowOfPosition;
+    /** The pairing {@link #rowOfPosition} and {@link #columnOfPosition} are of. */
+    private int pairingOfPositions = -1;
     private int[] columnOfPosition;
     private double[] byPosition;
 
@@ -81,6 +83,17 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         invalidate();
     }
 
+    private boolean positionsAreCurrent(FixedStructure<V, E> structure) {
+        for (int position = 0; position < rowOfPosition.length; position++) {
+            int equation = fixed.getEquationOfPosition(position);
+            if (rowOfPosition[position] != structure.getVariable(position).getRow()
+                    || columnOfPosition[position] != (equation < 0 ? -1 : structure.getColumnInEquationSystem(equation))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private void factorise() {
         if (valid) {
             return;
@@ -110,11 +123,12 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
             closeLu();
             throw e;
         }
-        for (int position = 0; position < byPosition.length; position++) {
-            int equation = fixed.getEquationOfPosition(position);
-            rowOfPosition[position] = structure.getVariable(position).getRow();
-            columnOfPosition[position] = equation < 0 ? -1 : structure.getColumnInEquationSystem(equation);
+        // the rows and the columns of the positions change only with a pairing
+        if (fixed.getPairingCount() != pairingOfPositions) {
+            fixed.getRowsAndColumnsOfPositions(rowOfPosition, columnOfPosition);
+            pairingOfPositions = fixed.getPairingCount();
         }
+        assert positionsAreCurrent(structure) : "The rows and columns of the positions kept from the last pairing are not those of OLF's index";
         valid = true;
     }
 
@@ -155,6 +169,7 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         structureRowIndices = rowIndices;
         rowOfPosition = new int[variableCount];
         columnOfPosition = new int[variableCount];
+        pairingOfPositions = -1;
         byPosition = new double[variableCount];
     }
 

@@ -196,10 +196,12 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
 
     private final LfNetwork network;
 
-    /** For each equation type, the target of each element, valid where {@link #computed} is set. */
-    private final EnumMap<AcEquationType, double[]> targets = new EnumMap<>(AcEquationType.class);
+    private static final int TYPE_COUNT = AcEquationType.values().length;
 
-    private final EnumMap<AcEquationType, BitSet> computed = new EnumMap<>(AcEquationType.class);
+    /** For each equation type, by ordinal, the target of each element, valid where {@link #computed} is set. */
+    private final double[][] targets = new double[TYPE_COUNT][];
+    /** For each equation type, by ordinal, whether the target of each element is kept; as long as its row of targets. */
+    private final boolean[][] computed = new boolean[TYPE_COUNT][];
 
     private int computedCount;
 
@@ -339,34 +341,48 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
     }
 
     private void forget(AcEquationType type, int elementNum) {
-        BitSet c = computed.get(type);
-        if (c != null) {
-            c.clear(elementNum);
+        boolean[] c = computed[type.ordinal()];
+        if (c != null && elementNum < c.length) {
+            c[elementNum] = false;
         }
     }
 
     private void forget(AcEquationType type) {
-        BitSet c = computed.get(type);
+        boolean[] c = computed[type.ordinal()];
         if (c != null) {
-            c.clear();
+            Arrays.fill(c, false);
         }
     }
 
     private void forgetAll() {
-        computed.values().forEach(BitSet::clear);
+        for (boolean[] c : computed) {
+            if (c != null) {
+                Arrays.fill(c, false);
+            }
+        }
         invalidateValues();
     }
 
-    private double target(AcEquationType type, int elementNum) {
-        BitSet c = computed.computeIfAbsent(type, k -> new BitSet());
-        double[] t = targets.get(type);
+    /** Makes the rows of a type long enough for the given element. */
+    private void ensureCapacity(int type, int elementNum) {
+        double[] t = targets[type];
         if (t == null || elementNum >= t.length) {
-            t = t == null ? new double[Math.max(16, elementNum + 1)] : Arrays.copyOf(t, Math.max(2 * t.length, elementNum + 1));
-            targets.put(type, t);
+            int length = t == null ? Math.max(16, elementNum + 1) : Math.max(2 * t.length, elementNum + 1);
+            targets[type] = t == null ? new double[length] : Arrays.copyOf(t, length);
+            computed[type] = t == null ? new boolean[length] : Arrays.copyOf(computed[type], length);
         }
-        if (!c.get(elementNum)) {
+    }
+
+    private double target(AcEquationType type, int elementNum) {
+        int ordinal = type.ordinal();
+        ensureCapacity(ordinal, elementNum);
+        return target(type, elementNum, computed[ordinal], targets[ordinal]);
+    }
+
+    private double target(AcEquationType type, int elementNum, boolean[] c, double[] t) {
+        if (!c[elementNum]) {
             init(type, elementNum, elementNum, network, t);
-            c.set(elementNum);
+            c[elementNum] = true;
             computedCount++;
         }
         return t[elementNum];
@@ -380,9 +396,19 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
         }
         for (EquationArray<AcVariableType, AcEquationType> equationArray : equationSystem.getEquationArrays()) {
             AcEquationType type = equationArray.getType();
-            for (int elementNum = 0; elementNum < equationArray.getElementCount(); elementNum++) {
+            int elementCount = equationArray.getElementCount();
+            if (elementCount == 0) {
+                continue;
+            }
+            // the rows of the type, read once for all its elements
+            int ordinal = type.ordinal();
+            ensureCapacity(ordinal, elementCount - 1);
+            boolean[] c = computed[ordinal];
+            double[] t = targets[ordinal];
+            int[] columns = equationArray.getElementNumToColumn();
+            for (int elementNum = 0; elementNum < elementCount; elementNum++) {
                 if (equationArray.isElementActive(elementNum)) {
-                    array[equationArray.getElementNumToColumn(elementNum)] = target(type, elementNum);
+                    array[columns[elementNum]] = target(type, elementNum, c, t);
                 }
             }
         }

@@ -22,14 +22,13 @@ import com.powsybl.openloadflow.equations.Variable;
 import gnu.trove.iterator.TIntIterator;
 import gnu.trove.list.array.TIntArrayList;
 import gnu.trove.set.hash.TIntHashSet;
+import gnu.trove.set.hash.TLongHashSet;
 
 import java.io.IOException;
 import java.io.Writer;
 import java.util.Arrays;
 import java.util.BitSet;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 /**
  * OLF's equation system seen as a matrix whose shape does not change: one position per variable, and each active equation
@@ -88,7 +87,7 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     private final TIntArrayList pairedPositions = new TIntArrayList();
     /** The pairings the matrix structure holds: the equations on their own position as a bit set, the others as pairs. */
     private final BitSet inStructureAtOwnPosition = new BitSet();
-    private final Set<Long> paired = new HashSet<>();
+    private final TLongHashSet paired = new TLongHashSet();
     private boolean matrixStructureValid;
     private boolean pairingValid;
     /** The single equations that have other terms than when their rows were computed. */
@@ -164,7 +163,10 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
         if (structure != null && !changedTerms.isEmpty() && !addRows()) {
             invalidate(true);
         }
-        changedTerms.clear();
+        if (!changedTerms.isEmpty()) {
+            // a trove set clears its whole table, even when it is empty
+            changedTerms.clear();
+        }
         if (structure == null) {
             structure = new FixedStructure<>(equationSystem, pairing);
             structureBuildCount++;
@@ -199,6 +201,14 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
             place();
             pairingValid = true;
             modesValid = false;
+        }
+        if (pairedAgain || columnOfEquation == null || columnOfEquation.length != structure.getEquationCount()) {
+            // the columns of OLF's index change only with an activation, which calls for a pairing: they are read
+            // once by pairing, not at each evaluation
+            columnOfEquation = new int[structure.getEquationCount()];
+            for (int equation = 0; equation < columnOfEquation.length; equation++) {
+                columnOfEquation[equation] = structure.getColumnInEquationSystem(equation);
+            }
         }
         if (!matrixStructureValid) {
             structure.buildMatrixStructure(pairedEquations, pairedPositions);
@@ -509,12 +519,7 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
         Arrays.fill(values, 0);
         state = equationSystem.getStateVector().get();
         int equationCount = structure.getEquationCount();
-        if (columnOfEquation == null || columnOfEquation.length != equationCount) {
-            columnOfEquation = new int[equationCount];
-        }
-        for (int equation = 0; equation < equationCount; equation++) {
-            columnOfEquation[equation] = structure.getColumnInEquationSystem(equation);
-        }
+        assert columnsAreCurrent() : "The columns of the equations kept from the last pairing are not those of OLF's index";
         for (FixedStructure.ArrayTerms<V, E> terms : structure.getArrayTerms()) {
             double[] termValues = terms.termArray.eval();
             for (int term = 0; term < terms.equation.length; term++) {
@@ -925,6 +930,29 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
             modesValid = true;
         }
         return modes;
+    }
+
+    /** Whether the columns kept from the last pairing are those of OLF's index now. */
+    private boolean columnsAreCurrent() {
+        for (int equation = 0; equation < columnOfEquation.length; equation++) {
+            if (columnOfEquation[equation] != structure.getColumnInEquationSystem(equation)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Writes, for each position, the row of its variable in OLF's state vector and the column of the equation it holds in
+     * OLF's index, -1 where it has none. They change only with a pairing ({@link #getPairingCount()}).
+     */
+    public void getRowsAndColumnsOfPositions(int[] rows, int[] columns) {
+        update();
+        for (int position = 0; position < equationOfPosition.length; position++) {
+            int equation = equationOfPosition[position];
+            rows[position] = rowOfPosition[position];
+            columns[position] = equation < 0 ? -1 : columnOfEquation[equation];
+        }
     }
 
     /** The equation a position holds, -1 when it holds none: its variable is then fixed. */
