@@ -699,6 +699,13 @@ AC load flow solver engine. Currently, it can be one of:
 
 The default value is `NEWTON_RAPHSON`.
 
+#### acJacobianStructure
+The structure the AC Jacobian matrix is solved on, by the `NEWTON_RAPHSON` solver and by the AC sensitivity analysis (`NEWTON_KRYLOV` and `FAST_DECOUPLED` do not solve on it). It can be one of:
+- `FIXED`: the matrix has a pattern that holds every place the voltage, reactive power and other controls can use. It is analysed once, then only filled and factorised again on the pivots of the previous factorisation, including when a bus switches between PV and PQ, when a control is switched and in each contingency of a security analysis. The equation vector is computed from that structure, and a solve starts from the state the last one kept;
+- `INDEXED`: the matrix of the equation system's index, created and analysed again each time the equations to solve change.
+
+The two structures give the same results to the solver's precision, not to the last bit. The default value is `FIXED`.
+
 ### TransformerVoltageControl
 (param-lf-generator-voltage-control-min-nominal-voltage)=
 #### generatorVoltageControlMinNominalVoltage
