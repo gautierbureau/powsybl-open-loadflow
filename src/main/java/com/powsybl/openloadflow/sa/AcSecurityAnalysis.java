@@ -12,6 +12,8 @@ import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
+import com.powsybl.openloadflow.ac.AcContingencyDelta;
+import com.powsybl.openloadflow.ac.AcJacobianStructure;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowResult;
@@ -93,6 +95,29 @@ public class AcSecurityAnalysis extends AbstractSecurityAnalysis<AcVariableType,
     @Override
     protected AcLoadFlowContext createLoadFlowContext(LfNetwork lfNetwork, AcLoadFlowParameters parameters) {
         return new AcLoadFlowContext(lfNetwork, parameters);
+    }
+
+    @Override
+    protected ContingencyRecorder createContingencyRecorder(AcLoadFlowContext context) {
+        AcLoadFlowParameters parameters = context.getParameters();
+        if (parameters.getJacobianStructure() != AcJacobianStructure.FIXED || parameters.isAsymmetrical()) {
+            return null;
+        }
+        AcContingencyDelta.Baseline baseline = AcContingencyDelta.baseline(context);
+        return (lfContingency, preDistributedActivePower) -> {
+            AcContingencyDelta delta = AcContingencyDelta.record(lfContingency, context, baseline, preDistributedActivePower);
+            return new RecordedContingency() {
+                @Override
+                public void install() {
+                    delta.install(context.getNetwork(), baseline);
+                }
+
+                @Override
+                public double getPreDistributedActivePower() {
+                    return delta.preDistributedActivePower();
+                }
+            };
+        };
     }
 
     @Override

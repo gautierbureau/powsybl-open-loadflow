@@ -114,7 +114,7 @@ public final class AcContingencyDeltaExport {
                     c.get().apply(parameters.getBalanceType());
                     double spread = lossDistribution.run(net, c.get(), pc.getContingency(), saParameters, null, ReportNode.NO_OP);
                     AcContingencyDelta d = AcContingencyDelta.record(c.get(), context, base, spread);
-                    if (d == null) {
+                    if (!d.onBaseStructure()) {
                         out.println("C\t" + pc.getContingency().getId() + "\tRECOMPILED");
                     } else {
                         out.println("C\t" + pc.getContingency().getId() + "\t" + Double.toHexString(d.activePowerLoss()));

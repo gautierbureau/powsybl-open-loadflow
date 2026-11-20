@@ -28,6 +28,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.function.ToIntFunction;
 
@@ -54,7 +55,7 @@ import java.util.function.ToIntFunction;
  *     {@code DISTR_Q} terms) changed, with their new share: a controller lost, or cut off, leaves the others a larger
  *     one;</li>
  * <li>the shunts whose admittance changed, with their new one, and the branches whose ratio or phase shift changed,
- *     with their new tap (-1 for a branch without a table of taps), ratio and phase shift.</li>
+ *     with their new tap, ratio and phase shift (OLF's rules change only the position of a table of taps).</li>
  * </ul>
  *
  * <p>The delta is taken between the state recorded in a {@link Baseline} before the contingency and the state after
@@ -64,10 +65,15 @@ import java.util.function.ToIntFunction;
  */
 public record AcContingencyDelta(String contingencyId, double activePowerLoss, double preDistributedActivePower,
                                  int[] disabledBuses, int[] disabledBranches, int[] side1OpenBranches, int[] side2OpenBranches,
-                                 int[] disabledHvdcs, int[] positions, int[] modes, double[] targets,
-                                 String[] generatorIds, double[] generatorTargetP, double[] generatorInitialTargetP,
-                                 String[] loadIds, double[] loadTargetP,
-                                 int[] slackBuses, int referenceBus,
+                                 int[] disabledHvdcs, boolean onBaseStructure, int[] positions, int[] modes, double[] targets,
+                                 int[] generators, String[] generatorIds, double[] generatorTargetP, double[] generatorInitialTargetP,
+                                 boolean[] generatorDisabled, boolean[] generatorParticipating, LfGenerator.GeneratorControlType[] generatorControlTypes,
+                                 int[] loads, String[] loadIds, double[] loadTargetP, double[] loadTargetQ, double[] loadAbsVariableTargetP,
+                                 String[][] loadDisabledOriginalIds,
+                                 int[] controlBuses, boolean[] busVoltageControlEnabled, boolean[] busReactivePowerControlEnabled,
+                                 boolean[] busGenerationTargetQFrozen, double[] busFrozenGenerationTargetQ,
+                                 int[] reactiveTargetBuses,
+                                 int[] excludedSlackBuses, int[] slackBuses, int referenceBus,
                                  int[] reactivePercentBuses, double[] reactivePercents,
                                  int[] shunts, double[] shuntG, double[] shuntB,
                                  int[] tapBranches, int[] tapPositions, double[] tapR1, double[] tapA1) {
@@ -77,9 +83,19 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
         if (positions.length != modes.length || positions.length != targets.length) {
             throw new IllegalArgumentException("One mode and one target by position");
         }
-        if (generatorIds.length != generatorTargetP.length || generatorIds.length != generatorInitialTargetP.length
-                || loadIds.length != loadTargetP.length) {
-            throw new IllegalArgumentException("One target by generator and by load");
+        int g = generators.length;
+        if (generatorIds.length != g || generatorTargetP.length != g || generatorInitialTargetP.length != g
+                || generatorDisabled.length != g || generatorParticipating.length != g || generatorControlTypes.length != g) {
+            throw new IllegalArgumentException("One state by generator");
+        }
+        int l = loads.length;
+        if (loadIds.length != l || loadTargetP.length != l || loadTargetQ.length != l || loadAbsVariableTargetP.length != l
+                || loadDisabledOriginalIds.length != l) {
+            throw new IllegalArgumentException("One state by load");
+        }
+        if (busVoltageControlEnabled.length != controlBuses.length || busReactivePowerControlEnabled.length != controlBuses.length
+                || busGenerationTargetQFrozen.length != controlBuses.length || busFrozenGenerationTargetQ.length != controlBuses.length) {
+            throw new IllegalArgumentException("One control state by bus");
         }
     }
 
@@ -92,13 +108,25 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
         private final List<LfGenerator> generators;
         private final double[] generatorTargetP;
         private final double[] generatorInitialTargetP;
+        private final boolean[] generatorDisabled;
+        private final boolean[] generatorParticipating;
+        private final LfGenerator.GeneratorControlType[] generatorControlTypes;
         private final List<LfLoad> loads;
         private final double[] loadTargetP;
+        private final double[] loadTargetQ;
+        private final double[] loadAbsVariableTargetP;
+        private final int[] loadDisabledOriginalCount;
+        private final boolean[] busVoltageControlEnabled;
+        private final boolean[] busReactivePowerControlEnabled;
+        private final boolean[] busGenerationTargetQFrozen;
+        private final double[] busFrozenGenerationTargetQ;
         private final double[] reactivePercent;
+        private final int[] excludedSlackBuses;
         private final double[] shuntGBase;
         private final double[] shuntBBase;
-        private final double[] r1Base;
-        private final double[] a1Base;
+        /** The branches whose ratio and phase shift are from a table of taps: OLF's rules change only their position. */
+        private final List<LfBranch> tapBranches;
+        private final int[] tapPositionBase;
 
         private Baseline(FixedStructure<AcVariableType, AcEquationType> structure, int[] modes, double[] targets, LfNetwork network) {
             this.structure = structure;
@@ -112,12 +140,34 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
             }
             generatorTargetP = generators.stream().mapToDouble(LfGenerator::getTargetP).toArray();
             generatorInitialTargetP = generators.stream().mapToDouble(LfGenerator::getInitialTargetP).toArray();
+            generatorDisabled = new boolean[generators.size()];
+            generatorParticipating = new boolean[generators.size()];
+            generatorControlTypes = new LfGenerator.GeneratorControlType[generators.size()];
+            for (int g = 0; g < generators.size(); g++) {
+                generatorDisabled[g] = generators.get(g).isDisabled();
+                generatorParticipating[g] = generators.get(g).isParticipating();
+                generatorControlTypes[g] = generators.get(g).getGeneratorControlType();
+            }
             loadTargetP = loads.stream().mapToDouble(LfLoad::getTargetP).toArray();
+            loadTargetQ = loads.stream().mapToDouble(LfLoad::getTargetQ).toArray();
+            loadAbsVariableTargetP = loads.stream().mapToDouble(LfLoad::getAbsVariableTargetP).toArray();
+            loadDisabledOriginalCount = loads.stream().mapToInt(AcContingencyDelta::disabledOriginalCount).toArray();
+            busVoltageControlEnabled = new boolean[network.getBuses().size()];
+            busReactivePowerControlEnabled = new boolean[network.getBuses().size()];
+            busGenerationTargetQFrozen = new boolean[network.getBuses().size()];
+            busFrozenGenerationTargetQ = new double[network.getBuses().size()];
+            for (LfBus bus : network.getBuses()) {
+                busVoltageControlEnabled[bus.getNum()] = bus.isGeneratorVoltageControlEnabled();
+                busReactivePowerControlEnabled[bus.getNum()] = bus.isGeneratorReactivePowerControlEnabled();
+                busGenerationTargetQFrozen[bus.getNum()] = bus.isGenerationTargetQFrozen();
+                busFrozenGenerationTargetQ[bus.getNum()] = frozenGenerationTargetQ(bus);
+            }
             reactivePercent = network.getBuses().stream().mapToDouble(LfBus::getRemoteControlReactivePercent).toArray();
+            excludedSlackBuses = excludedSlackBuses(network);
             shuntGBase = network.getShunts().stream().mapToDouble(LfShunt::getG).toArray();
             shuntBBase = network.getShunts().stream().mapToDouble(LfShunt::getB).toArray();
-            r1Base = network.getBranches().stream().mapToDouble(b -> b.getPiModel().getR1()).toArray();
-            a1Base = network.getBranches().stream().mapToDouble(b -> b.getPiModel().getA1()).toArray();
+            tapBranches = network.getBranches().stream().filter(b -> b.getPiModel() instanceof PiModelArray).toList();
+            tapPositionBase = tapBranches.stream().mapToInt(b -> b.getPiModel().getTapPosition()).toArray();
         }
 
         public int[] getModes() {
@@ -161,9 +211,10 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
     }
 
     /**
-     * The delta of a contingency OLF has just applied, against the base state; null when it cannot be expressed on
-     * the base structure: the contingency made OLF create an equation the structure did not hold, and compile it
-     * again.
+     * The delta of a contingency OLF has just applied, against the base state. Its positions are left empty, and
+     * {@code onBaseStructure} false, when they cannot be expressed on the base structure: the contingency made OLF create
+     * an equation the structure did not hold, and compile it again, or its equations cannot be paired. The rest of the
+     * record, which {@link #install} writes, does not depend on the structure.
      */
     public static AcContingencyDelta record(LfContingency contingency, AcLoadFlowContext context, Baseline baseline) {
         return record(contingency, context, baseline, 0);
@@ -178,51 +229,109 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
         Objects.requireNonNull(contingency);
         FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed = fixed(context);
         double[] targetVector = context.getTargetVector().getArray();
-        int[] modes = fixed.getModes();
-        FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
-        if (structure != baseline.structure) {
-            return null;
+        // the positions, when the contingency's equations are on the base structure
+        int[] modes = null;
+        FixedStructure<AcVariableType, AcEquationType> structure = null;
+        try {
+            modes = fixed.getModes();
+            structure = fixed.getStructure();
+        } catch (com.powsybl.commons.PowsyblException e) {
+            // they cannot be paired (a bus left with no voltage control and nothing to hold its reactive balance): the
+            // solve of the contingency fails as it does when OLF applies it
         }
-        double[] targets = targetsByPosition(fixed, structure, targetVector);
+        // a contingency that moves the slack bus makes OLF compile the structure again: its positions are not on the base one
+        boolean onBaseStructure = modes != null && structure == baseline.structure;
         int count = 0;
-        int[] changed = new int[modes.length];
-        for (int position = 0; position < modes.length; position++) {
-            if (modes[position] != baseline.modes[position]
-                    || Double.doubleToLongBits(targets[position]) != Double.doubleToLongBits(baseline.targets[position])) {
-                changed[count++] = position;
+        int[] positions = new int[0];
+        int[] deltaModes = new int[0];
+        double[] deltaTargets = new double[0];
+        if (onBaseStructure) {
+            double[] targets = targetsByPosition(fixed, structure, targetVector);
+            int[] changed = new int[modes.length];
+            for (int position = 0; position < modes.length; position++) {
+                if (modes[position] != baseline.modes[position]
+                        || Double.doubleToLongBits(targets[position]) != Double.doubleToLongBits(baseline.targets[position])) {
+                    changed[count++] = position;
+                }
+            }
+            positions = Arrays.copyOf(changed, count);
+            deltaModes = new int[count];
+            deltaTargets = new double[count];
+            for (int i = 0; i < count; i++) {
+                deltaModes[i] = modes[positions[i]];
+                deltaTargets[i] = targets[positions[i]];
             }
         }
-        int[] positions = Arrays.copyOf(changed, count);
-        int[] deltaModes = new int[count];
-        double[] deltaTargets = new double[count];
-        for (int i = 0; i < count; i++) {
-            deltaModes[i] = modes[positions[i]];
-            deltaTargets[i] = targets[positions[i]];
-        }
+        List<Integer> generatorNums = new ArrayList<>();
         List<String> generatorIds = new ArrayList<>();
         List<Double> generatorTargets = new ArrayList<>();
         List<Double> generatorAnchors = new ArrayList<>();
         for (int g = 0; g < baseline.generators.size(); g++) {
             LfGenerator generator = baseline.generators.get(g);
-            if (differs(generator.getTargetP(), baseline.generatorTargetP[g]) || differs(generator.getInitialTargetP(), baseline.generatorInitialTargetP[g])) {
+            if (differs(generator.getTargetP(), baseline.generatorTargetP[g]) || differs(generator.getInitialTargetP(), baseline.generatorInitialTargetP[g])
+                    || generator.isDisabled() != baseline.generatorDisabled[g] || generator.isParticipating() != baseline.generatorParticipating[g]
+                    || generator.getGeneratorControlType() != baseline.generatorControlTypes[g]) {
+                generatorNums.add(g);
                 generatorIds.add(generator.getId());
                 generatorTargets.add(generator.getTargetP());
                 generatorAnchors.add(generator.getInitialTargetP());
             }
         }
+        boolean[] generatorDisabled = new boolean[generatorNums.size()];
+        boolean[] generatorParticipating = new boolean[generatorNums.size()];
+        LfGenerator.GeneratorControlType[] generatorControlTypes = new LfGenerator.GeneratorControlType[generatorNums.size()];
+        for (int i = 0; i < generatorNums.size(); i++) {
+            LfGenerator generator = baseline.generators.get(generatorNums.get(i));
+            generatorDisabled[i] = generator.isDisabled();
+            generatorParticipating[i] = generator.isParticipating();
+            generatorControlTypes[i] = generator.getGeneratorControlType();
+        }
+        List<Integer> loadNums = new ArrayList<>();
         List<String> loadIds = new ArrayList<>();
         List<Double> loadTargets = new ArrayList<>();
         for (int l = 0; l < baseline.loads.size(); l++) {
             LfLoad load = baseline.loads.get(l);
-            if (differs(load.getTargetP(), baseline.loadTargetP[l])) {
+            if (differs(load.getTargetP(), baseline.loadTargetP[l]) || differs(load.getTargetQ(), baseline.loadTargetQ[l])
+                    || differs(load.getAbsVariableTargetP(), baseline.loadAbsVariableTargetP[l])
+                    || contingency.getLostLoads().containsKey(load) && disabledOriginalCount(load) != baseline.loadDisabledOriginalCount[l]) {
+                loadNums.add(l);
                 loadIds.add(load.getId());
                 loadTargets.add(load.getTargetP());
             }
         }
+        double[] loadTargetQ = new double[loadNums.size()];
+        double[] loadAbsVariableTargetP = new double[loadNums.size()];
+        String[][] loadDisabledOriginalIds = new String[loadNums.size()][];
+        for (int i = 0; i < loadNums.size(); i++) {
+            LfLoad load = baseline.loads.get(loadNums.get(i));
+            loadTargetQ[i] = load.getTargetQ();
+            loadAbsVariableTargetP[i] = load.getAbsVariableTargetP();
+            loadDisabledOriginalIds[i] = disabledOriginalIds(load).toArray(new String[0]);
+        }
         LfNetwork network = context.getNetwork();
         LfSynchronousNetwork main = network.getSynchronousNetworks().getFirst();
         int[] slackBuses = main.getSlackBuses().stream().mapToInt(LfBus::getNum).toArray();
+        int[] excludedSlackBuses = excludedSlackBuses(network);
         int referenceBus = main.getReferenceBus() != null ? main.getReferenceBus().getNum() : -1;
+        List<Integer> controlBuses = new ArrayList<>();
+        for (LfBus bus : network.getBuses()) {
+            if (bus.isGeneratorVoltageControlEnabled() != baseline.busVoltageControlEnabled[bus.getNum()]
+                    || bus.isGeneratorReactivePowerControlEnabled() != baseline.busReactivePowerControlEnabled[bus.getNum()]
+                    || bus.isGenerationTargetQFrozen() != baseline.busGenerationTargetQFrozen[bus.getNum()]
+                    || differs(frozenGenerationTargetQ(bus), baseline.busFrozenGenerationTargetQ[bus.getNum()])) {
+                controlBuses.add(bus.getNum());
+            }
+        }
+        boolean[] busVoltageControlEnabled = new boolean[controlBuses.size()];
+        boolean[] busReactivePowerControlEnabled = new boolean[controlBuses.size()];
+        boolean[] busGenerationTargetQFrozen = new boolean[controlBuses.size()];
+        double[] busFrozenGenerationTargetQ = new double[controlBuses.size()];
+        for (int i = 0; i < controlBuses.size(); i++) {
+            busGenerationTargetQFrozen[i] = network.getBus(controlBuses.get(i)).isGenerationTargetQFrozen();
+            busFrozenGenerationTargetQ[i] = frozenGenerationTargetQ(network.getBus(controlBuses.get(i)));
+            busVoltageControlEnabled[i] = network.getBus(controlBuses.get(i)).isGeneratorVoltageControlEnabled();
+            busReactivePowerControlEnabled[i] = network.getBus(controlBuses.get(i)).isGeneratorReactivePowerControlEnabled();
+        }
         List<Integer> percentBuses = new ArrayList<>();
         List<Double> percents = new ArrayList<>();
         for (LfBus bus : network.getBuses()) {
@@ -245,12 +354,12 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
         List<Integer> taps = new ArrayList<>();
         List<Double> r1 = new ArrayList<>();
         List<Double> a1 = new ArrayList<>();
-        for (LfBranch branch : network.getBranches()) {
+        for (int b = 0; b < baseline.tapBranches.size(); b++) {
+            LfBranch branch = baseline.tapBranches.get(b);
             PiModel piModel = branch.getPiModel();
-            if (differs(piModel.getR1(), baseline.r1Base[branch.getNum()]) || differs(piModel.getA1(), baseline.a1Base[branch.getNum()])) {
+            if (piModel.getTapPosition() != baseline.tapPositionBase[b]) {
                 tapBranches.add(branch.getNum());
-                // a branch whose ratio is not a tap of a table has no position
-                taps.add(piModel instanceof PiModelArray ? piModel.getTapPosition() : -1);
+                taps.add(piModel.getTapPosition());
                 r1.add(piModel.getR1());
                 a1.add(piModel.getA1());
             }
@@ -262,10 +371,13 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
                 branches(disabledNetwork.getBranchesStatus(), DisabledBranchStatus.SIDE_1),
                 branches(disabledNetwork.getBranchesStatus(), DisabledBranchStatus.SIDE_2),
                 nums(disabledNetwork.getHvdcs(), LfElement::getNum),
-                positions, deltaModes, deltaTargets,
-                generatorIds.toArray(new String[0]), unbox(generatorTargets), unbox(generatorAnchors),
-                loadIds.toArray(new String[0]), unbox(loadTargets),
-                slackBuses, referenceBus,
+                onBaseStructure, positions, deltaModes, deltaTargets,
+                ints(generatorNums), generatorIds.toArray(new String[0]), unbox(generatorTargets), unbox(generatorAnchors),
+                generatorDisabled, generatorParticipating, generatorControlTypes,
+                ints(loadNums), loadIds.toArray(new String[0]), unbox(loadTargets), loadTargetQ, loadAbsVariableTargetP, loadDisabledOriginalIds,
+                ints(controlBuses), busVoltageControlEnabled, busReactivePowerControlEnabled, busGenerationTargetQFrozen, busFrozenGenerationTargetQ,
+                reactiveTargetBuses(contingency),
+                excludedSlackBuses, slackBuses, referenceBus,
                 percentBuses.stream().mapToInt(Integer::intValue).toArray(), unbox(percents),
                 shunts.stream().mapToInt(Integer::intValue).toArray(), unbox(shuntG), unbox(shuntB),
                 tapBranches.stream().mapToInt(Integer::intValue).toArray(), taps.stream().mapToInt(Integer::intValue).toArray(),
@@ -280,12 +392,143 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
         return values.stream().mapToDouble(Double::doubleValue).toArray();
     }
 
+    /** The buses the slack bus may not be chosen among: those a contingency cuts off with the slack bus. */
+    private static int[] excludedSlackBuses(LfNetwork network) {
+        return network.getSynchronousNetworks().getFirst().getExcludedSlackBuses().stream().mapToInt(LfBus::getNum).sorted().toArray();
+    }
+
+    /**
+     * The buses whose reactive target OLF computes again from their generators, once they are applied
+     * ({@code LfContingency.processLostGenerators}): those of a lost generator that keep none controlling their voltage.
+     * The target is computed when it is next read; a record does not read it, as OLF has not yet.
+     */
+    private static int[] reactiveTargetBuses(LfContingency contingency) {
+        return contingency.getLostGenerators().stream().map(LfGenerator::getBus).distinct()
+                .filter(bus -> bus.getGenerators().stream().noneMatch(g -> g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE))
+                .mapToInt(LfBus::getNum).sorted().toArray();
+    }
+
+    /** The reactive target a bus has frozen, NaN when it has none. */
+    private static double frozenGenerationTargetQ(LfBus bus) {
+        return bus.isGenerationTargetQFrozen() ? bus.getGenerationTargetQ() : Double.NaN;
+    }
+
+    /** The original loads of a load that are disabled, in the order of its original ids. */
+    private static int disabledOriginalCount(LfLoad load) {
+        int count = 0;
+        for (boolean disabled : load.getOriginalLoadsDisablingStatus().values()) {
+            if (disabled) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static List<String> disabledOriginalIds(LfLoad load) {
+        return load.getOriginalLoadsDisablingStatus().entrySet().stream().filter(Map.Entry::getValue).map(Map.Entry::getKey).toList();
+    }
+
+    private static int[] ints(List<Integer> values) {
+        return values.stream().mapToInt(Integer::intValue).toArray();
+    }
+
     private static <T> int[] nums(Collection<T> elements, ToIntFunction<T> num) {
         return elements.stream().mapToInt(num).sorted().toArray();
     }
 
     private static int[] branches(java.util.Map<? extends LfElement, DisabledBranchStatus> status, DisabledBranchStatus kind) {
         return status.entrySet().stream().filter(e -> e.getValue() == kind).mapToInt(e -> e.getKey().getNum()).sorted().toArray();
+    }
+
+    /**
+     * Writes the contingency on a network in its base state, from this record alone, without OLF's rules: the network
+     * is then as {@link LfContingency#apply} and the spreading of the loss leave it. The generators and the loads are
+     * numbered in the order of the baseline: bus by bus, in the order of each bus.
+     */
+    public void install(LfNetwork network, Baseline baseline) {
+        // the slack bus moves before the buses it was on are disabled, as PropagatedContingency.toLfContingency does it
+        if (!Arrays.equals(excludedSlackBuses, baseline.excludedSlackBuses)) {
+            java.util.Set<LfBus> excluded = new java.util.HashSet<>();
+            for (int num : excludedSlackBuses) {
+                excluded.add(network.getBus(num));
+            }
+            network.getSynchronousNetworks().forEach(synchronousNetwork -> synchronousNetwork.setExcludedSlackBuses(excluded));
+            // and is chosen at once, among buses none of which is disabled yet: the choice depends on the branches they have
+            network.getSynchronousNetworks().getFirst().getSlackBuses();
+        }
+        // in the order of DisabledNetwork.apply
+        for (int num : disabledBranches) {
+            network.getBranch(num).setDisabled(true);
+        }
+        for (int num : side1OpenBranches) {
+            network.getBranch(num).setConnectedSide1(false);
+        }
+        for (int num : side2OpenBranches) {
+            network.getBranch(num).setConnectedSide2(false);
+        }
+        for (int num : disabledHvdcs) {
+            network.getHvdc(num).setDisabled(true);
+        }
+        for (int num : disabledBuses) {
+            network.getBus(num).setDisabled(true);
+        }
+        for (int i = 0; i < shunts.length; i++) {
+            LfShunt shunt = network.getShunt(shunts[i]);
+            // only what changed: the standby automaton shunt of a static var compensator has no conductance to set
+            if (differs(shunt.getG(), shuntG[i])) {
+                shunt.setG(shuntG[i]);
+            }
+            if (differs(shunt.getB(), shuntB[i])) {
+                shunt.setB(shuntB[i]);
+            }
+        }
+        for (int i = 0; i < loads.length; i++) {
+            LfLoad load = baseline.loads.get(loads[i]);
+            load.setTargetP(loadTargetP[i]);
+            load.setTargetQ(loadTargetQ[i]);
+            load.setAbsVariableTargetP(loadAbsVariableTargetP[i]);
+            for (String originalId : loadDisabledOriginalIds[i]) {
+                load.setOriginalLoadDisabled(originalId, true);
+            }
+        }
+        for (int i = 0; i < generators.length; i++) {
+            LfGenerator generator = baseline.generators.get(generators[i]);
+            generator.setTargetP(generatorTargetP[i]);
+            generator.setInitialTargetP(generatorInitialTargetP[i]);
+            generator.setParticipating(generatorParticipating[i]);
+            generator.setDisabled(generatorDisabled[i]);
+            generator.setGeneratorControlType(generatorControlTypes[i]);
+        }
+        // as OLF's rules: the bus of a lost generator left with none controlling its voltage has its voltage control
+        // set off, which marks its reactive target to be computed again without the lost generator
+        for (int num : reactiveTargetBuses) {
+            network.getBus(num).setGeneratorVoltageControlEnabledAndRecomputeTargetQ(false);
+        }
+        for (int i = 0; i < controlBuses.length; i++) {
+            LfBus bus = network.getBus(controlBuses[i]);
+            // setting the voltage control marks the reactive target of the bus to be computed again from its
+            // generators, and frees it when it was frozen
+            if (bus.isGeneratorVoltageControlEnabled() != busVoltageControlEnabled[i]
+                    || bus.isGenerationTargetQFrozen() && !busGenerationTargetQFrozen[i]) {
+                bus.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(busVoltageControlEnabled[i]);
+            }
+            if (busGenerationTargetQFrozen[i]
+                    && (!bus.isGenerationTargetQFrozen() || differs(bus.getGenerationTargetQ(), busFrozenGenerationTargetQ[i]))) {
+                bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(busFrozenGenerationTargetQ[i]);
+            }
+            if (bus.isGeneratorReactivePowerControlEnabled() != busReactivePowerControlEnabled[i]) {
+                bus.setGeneratorReactivePowerControlEnabled(busReactivePowerControlEnabled[i]);
+            }
+        }
+        for (int i = 0; i < reactivePercentBuses.length; i++) {
+            network.getBus(reactivePercentBuses[i]).setRemoteControlReactivePercent(reactivePercents[i]);
+        }
+        for (int i = 0; i < tapBranches.length; i++) {
+            PiModel piModel = network.getBranch(tapBranches[i]).getPiModel();
+            piModel.setTapPosition(tapPositions[i]);
+            piModel.setA1(tapA1[i]);
+            piModel.setR1(tapR1[i]);
+        }
     }
 
     /** Writes the delta over the modes and the targets of the base state: those of the contingency. */
