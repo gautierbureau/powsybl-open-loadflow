@@ -209,6 +209,55 @@ class EquationSystemTest {
     }
 
     @Test
+    void writeVectorizedAcSystemWithOpenBranchesTest() {
+        Network network = EurostagTutorialExample1Factory.create();
+        // one line is connected at one end only, the other one can be opened at each end
+        network.getLine("NHV1_NHV2_2").getTerminal2().disconnect();
+        LfNetwork lfNetwork = Networks.load(network, new FirstSlackBusSelector()).getFirst();
+        LfBranch line = lfNetwork.getBranchById("NHV1_NHV2_1");
+        line.setDisconnectionAllowedSide1(true);
+        line.setDisconnectionAllowedSide2(true);
+
+        EquationSystem<AcVariableType, AcEquationType> equationSystem = new AcVectorizedEquationSystemCreator(lfNetwork).create();
+        String ref = String.join(System.lineSeparator(),
+                "bus_target_v0 = v0",
+                "bus_target_φ0 = φ0",
+                "[ bus_target_v1 = v1 ]",
+                "[ bus_target_v2 = v2 ]",
+                "[ bus_target_v3 = v3 ]",
+                "[ bus_target_p[0] = ac_p_array_closed_1(v0, v1, φ0, φ1) ]",
+                // the flow at side 1 of the line that can be opened at side 2, off, and the one of the line that has no side 2
+                "bus_target_p[1] = ac_p_array_closed_1(v1, v2, φ1, φ2) + ac_p_array_closed_2(v0, v1, φ0, φ1) + [ ac_p_array_open_2(v1) ] + ac_p_array_open_2(v1)",
+                "bus_target_p[2] = ac_p_array_closed_1(v2, v3, φ2, φ3) + ac_p_array_closed_2(v1, v2, φ1, φ2) + [ ac_p_array_open_1(v2) ]",
+                "bus_target_p[3] = ac_p_array_closed_2(v2, v3, φ2, φ3)",
+                "[ bus_target_q[0] = ac_q_array_closed_1(v0, v1, φ0, φ1) ]",
+                "bus_target_q[1] = ac_q_array_closed_1(v1, v2, φ1, φ2) + ac_q_array_closed_2(v0, v1, φ0, φ1) + [ ac_q_array_open_2(v1) ] + ac_q_array_open_2(v1)",
+                "bus_target_q[2] = ac_q_array_closed_1(v2, v3, φ2, φ3) + ac_q_array_closed_2(v1, v2, φ1, φ2) + [ ac_q_array_open_1(v2) ]",
+                "bus_target_q[3] = ac_q_array_closed_2(v2, v3, φ2, φ3)")
+                + System.lineSeparator();
+        assertEquals(ref, equationSystem.writeToString(true));
+
+        // the line opens at side 1: the terms of its flow at side 2 are on, those of the closed line are off
+        line.setConnectedSide1(false);
+        String refOpen = String.join(System.lineSeparator(),
+                "bus_target_v0 = v0",
+                "bus_target_φ0 = φ0",
+                "[ bus_target_v1 = v1 ]",
+                "[ bus_target_v2 = v2 ]",
+                "[ bus_target_v3 = v3 ]",
+                "[ bus_target_p[0] = ac_p_array_closed_1(v0, v1, φ0, φ1) ]",
+                "bus_target_p[1] = [ ac_p_array_closed_1(v1, v2, φ1, φ2) ] + ac_p_array_closed_2(v0, v1, φ0, φ1) + [ ac_p_array_open_2(v1) ] + ac_p_array_open_2(v1)",
+                "bus_target_p[2] = ac_p_array_closed_1(v2, v3, φ2, φ3) + [ ac_p_array_closed_2(v1, v2, φ1, φ2) ] + ac_p_array_open_1(v2)",
+                "bus_target_p[3] = ac_p_array_closed_2(v2, v3, φ2, φ3)",
+                "[ bus_target_q[0] = ac_q_array_closed_1(v0, v1, φ0, φ1) ]",
+                "bus_target_q[1] = [ ac_q_array_closed_1(v1, v2, φ1, φ2) ] + ac_q_array_closed_2(v0, v1, φ0, φ1) + [ ac_q_array_open_2(v1) ] + ac_q_array_open_2(v1)",
+                "bus_target_q[2] = ac_q_array_closed_1(v2, v3, φ2, φ3) + [ ac_q_array_closed_2(v1, v2, φ1, φ2) ] + ac_q_array_open_1(v2)",
+                "bus_target_q[3] = ac_q_array_closed_2(v2, v3, φ2, φ3)")
+                + System.lineSeparator();
+        assertEquals(refOpen, equationSystem.writeToString(true));
+    }
+
+    @Test
     void writeAllEquationsAcSystemTest() {
         List<LfNetwork> lfNetworks = Networks.load(EurostagTutorialExample1Factory.create(), new FirstSlackBusSelector());
         LfNetwork network = lfNetworks.get(0);

@@ -222,12 +222,53 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         }
     }
 
+    /**
+     * Update the flow left at the connected side of the branches that have terms for when they are open at one side,
+     * and its derivative: also of a branch that is closed, whose terms are off, so that opening it only switches them
+     * on. As a term held as an object does, the ratio is read from the branch each time, and is not a variable.
+     */
+    public void updateOpenBranches() {
+        for (int i = 0; i < branchVector.openableSide1Nums.size(); i++) {
+            int branchNum = branchVector.openableSide1Nums.getQuick(i);
+            double y = branchVector.y[branchNum];
+            double cosKsi = branchVector.cosKsi[branchNum];
+            double sinKsi = branchVector.sinKsi[branchNum];
+            double g1 = branchVector.g1[branchNum];
+            double b1 = branchVector.b1[branchNum];
+            double g2 = branchVector.g2[branchNum];
+            double b2 = branchVector.b2[branchNum];
+            double v2 = busVector.v[branchVector.bus2Num[branchNum]];
+            branchVector.openP2[branchNum] = OpenBranchSide1ActiveFlowEquationTerm.p2(y, cosKsi, sinKsi, g1, b1, g2, v2);
+            branchVector.openDp2dv2[branchNum] = OpenBranchSide1ActiveFlowEquationTerm.dp2dv2(y, cosKsi, sinKsi, g1, b1, g2, v2);
+            branchVector.openQ2[branchNum] = OpenBranchSide1ReactiveFlowEquationTerm.q2(y, cosKsi, sinKsi, g1, b1, b2, v2);
+            branchVector.openDq2dv2[branchNum] = OpenBranchSide1ReactiveFlowEquationTerm.dq2dv2(y, cosKsi, sinKsi, g1, b1, b2, v2);
+        }
+        for (int i = 0; i < branchVector.openableSide2Nums.size(); i++) {
+            int branchNum = branchVector.openableSide2Nums.getQuick(i);
+            double y = branchVector.y[branchNum];
+            double cosKsi = branchVector.cosKsi[branchNum];
+            double sinKsi = branchVector.sinKsi[branchNum];
+            double g1 = branchVector.g1[branchNum];
+            double b1 = branchVector.b1[branchNum];
+            double g2 = branchVector.g2[branchNum];
+            double b2 = branchVector.b2[branchNum];
+            double v1 = busVector.v[branchVector.bus1Num[branchNum]];
+            double r1 = network.getBranch(branchNum).getPiModel().getR1();
+            branchVector.openR1[branchNum] = r1;
+            branchVector.openP1[branchNum] = OpenBranchSide2ActiveFlowEquationTerm.p1(y, cosKsi, sinKsi, g1, g2, b2, v1, r1);
+            branchVector.openDp1dv1[branchNum] = OpenBranchSide2ActiveFlowEquationTerm.dp1dv1(y, cosKsi, sinKsi, g1, g2, b2, v1, r1);
+            branchVector.openQ1[branchNum] = OpenBranchSide2ReactiveFlowEquationTerm.q1(y, cosKsi, sinKsi, b1, g2, b2, v1, r1);
+            branchVector.openDq1dv1[branchNum] = OpenBranchSide2ReactiveFlowEquationTerm.dq1dv1(y, cosKsi, sinKsi, b1, g2, b2, v1, r1);
+        }
+    }
+
     public void updateNetworkState() {
         Stopwatch stopwatch = Stopwatch.createStarted();
 
         double[] state = equationSystem.getStateVector().get();
         updateBuses(state);
         updateClosedBranches(state);
+        updateOpenBranches();
         stopwatch.stop();
         LOGGER.debug("AC network vector update in {} us", stopwatch.elapsed(TimeUnit.MICROSECONDS));
     }
