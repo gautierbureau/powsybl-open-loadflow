@@ -67,6 +67,8 @@ class ContingencyInstallTest {
         try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters)) {
             new AcloadFlowEngine(context).run();
             NetworkState state = NetworkState.save(lfNetwork);
+            ModifiedElementsCollector touched = new ModifiedElementsCollector(lfNetwork);
+            lfNetwork.addListener(touched);
             List<LfBus> baseSlackBuses = List.copyOf(lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses());
             AcContingencyDelta.Baseline base = AcContingencyDelta.baseline(context);
             for (PropagatedContingency contingency : propagated) {
@@ -75,14 +77,20 @@ class ContingencyInstallTest {
                     continue;
                 }
                 String id = contingency.getContingency().getId();
+                touched.reset();
+                touched.setEnabled(true);
                 lfContingency.get().apply(parameters.getBalanceType());
+                touched.add(lfContingency.get());
                 double spread = new DefaultContingencyActivePowerLossDistribution().run(lfNetwork, lfContingency.get(),
                         contingency.getContingency(), saParameters, null, ReportNode.NO_OP);
                 List<BusState> buses = ElementState.save(lfNetwork.getBuses(), BusState::save);
                 List<BranchState> branches = ElementState.save(lfNetwork.getBranches(), BranchState::save);
                 double[] generationTargetQ = generationTargetQ(lfNetwork);
                 List<LfBus> slackBuses = List.copyOf(lfNetwork.getSynchronousNetworks().getFirst().getSlackBuses());
-                AcContingencyDelta delta = AcContingencyDelta.record(lfContingency.get(), context, base, spread);
+                // recorded from what the contingency touched, as the security analysis does
+                AcContingencyDelta delta = AcContingencyDelta.record(lfContingency.get(), context, base, spread,
+                        touched.getBuses(), touched.getBranches());
+                touched.setEnabled(false);
                 state.restore();
                 delta.install(lfNetwork, base);
                 for (BusState bus : buses) {

@@ -464,7 +464,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
     /** Records a contingency applied on the base state; null when it cannot be recorded. */
     protected interface ContingencyRecorder {
 
-        RecordedContingency record(LfContingency lfContingency, double preDistributedActivePower);
+        /** Records a contingency from the buses and the branches it touched (a {@link ModifiedElementsCollector}'s). */
+        RecordedContingency record(LfContingency lfContingency, double preDistributedActivePower,
+                                   Collection<LfBus> touchedBuses, Collection<LfBranch> touchedBranches);
     }
 
     /**
@@ -845,7 +847,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             double preDistributedActivePower = contingencyActivePowerLossDistribution.run(lfNetwork, lfContingency,
                     propagatedContingency.getContingency(), securityAnalysisParameters,
                     propagatedContingency.getContingency().getExtension(ContingencyLoadFlowParameters.class), postContSimReportNode);
-            RecordedContingency recorded = recorder.record(lfContingency, preDistributedActivePower);
+            RecordedContingency recorded = recorder.record(lfContingency, preDistributedActivePower,
+                    modifiedElements.getBuses(), modifiedElements.getBranches());
             restoreBaseState(networkState, modifiedElements, false);
             plannedContingencies.add(new PlannedContingency(propagatedContingency, lfContingency, postContSimReportNode, recorded, true));
         }

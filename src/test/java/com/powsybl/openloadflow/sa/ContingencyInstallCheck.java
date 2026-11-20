@@ -85,6 +85,9 @@ public final class ContingencyInstallCheck {
                 FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed = ((AcFixedJacobianMatrix) context.getJacobianMatrix()).getFixedJacobian().getFixedEquationSystemIndex();
                 AcContingencyDelta.Baseline base = AcContingencyDelta.baseline(context);
                 NetworkState state = NetworkState.save(net);
+                // what each contingency touches, as the security analysis collects it
+                ModifiedElementsCollector touched = new ModifiedElementsCollector(net);
+                net.addListener(touched);
                 var saParameters = new com.powsybl.security.SecurityAnalysisParameters().setLoadFlowParameters(parameters);
                 var lossDistribution = new com.powsybl.openloadflow.sa.DefaultContingencyActivePowerLossDistribution();
                 Map<String, Integer> categories = new TreeMap<>();
@@ -98,7 +101,10 @@ public final class ContingencyInstallCheck {
                         continue;
                     }
                     // OLF's rules
+                    touched.reset();
+                    touched.setEnabled(true);
                     c.get().apply(parameters.getBalanceType());
+                    touched.add(c.get());
                     double spread = lossDistribution.run(net, c.get(), pc.getContingency(), saParameters, null, ReportNode.NO_OP);
                     List<BusState> busStates = ElementState.save(net.getBuses(), BusState::save);
                     List<BranchState> branchStates = ElementState.save(net.getBranches(), BranchState::save);
@@ -110,7 +116,8 @@ public final class ContingencyInstallCheck {
                     LfBus reference = main.getReferenceBus();
                     int[] modes = modesOrNull(fixed);
                     double[] targets = context.getTargetVector().getArray().clone();
-                    AcContingencyDelta d = AcContingencyDelta.record(c.get(), context, base, spread);
+                    AcContingencyDelta d = AcContingencyDelta.record(c.get(), context, base, spread, touched.getBuses(), touched.getBranches());
+                    touched.setEnabled(false);
                     state.restore();
                     if (!d.onBaseStructure()) {
                         recompiled++;

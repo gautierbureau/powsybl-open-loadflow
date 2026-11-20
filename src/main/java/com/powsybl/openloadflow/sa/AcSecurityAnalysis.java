@@ -104,8 +104,9 @@ public class AcSecurityAnalysis extends AbstractSecurityAnalysis<AcVariableType,
             return null;
         }
         AcContingencyDelta.Baseline baseline = AcContingencyDelta.baseline(context);
-        return (lfContingency, preDistributedActivePower) -> {
-            AcContingencyDelta delta = AcContingencyDelta.record(lfContingency, context, baseline, preDistributedActivePower);
+        return (lfContingency, preDistributedActivePower, touchedBuses, touchedBranches) -> {
+            AcContingencyDelta delta = AcContingencyDelta.record(lfContingency, context, baseline, preDistributedActivePower,
+                    touchedBuses, touchedBranches);
             return new RecordedContingency() {
                 @Override
                 public void install() {
