@@ -95,6 +95,8 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     private double[] state;
     /** The linear terms of the structure, with their activity as of the last placement. */
     private FixedStructure.LinearTerms<V, E> linearTerms;
+    /** Its terms that refer to an element of a term array, with their activity as of the last placement. */
+    private FixedStructure.ElementTerms<V, E> elementTerms;
     /** For the search of a placement: the slots already tried for the equation being placed. */
     private int[] visited;
     private int stamp;
@@ -167,12 +169,17 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             patternValid = true;
         }
         structure.updateDestinations();
-        // an activation always calls for a placement: the activity of the linear terms is read again with it
+        // an activation always calls for a placement: the activity of the terms evaluated from arrays is read again with it
         FixedStructure.LinearTerms<V, E> current = structure.getLinearTerms();
         if (placedAgain && current == linearTerms) {
             current.updateActivity();
         }
         linearTerms = current;
+        FixedStructure.ElementTerms<V, E> currentElementTerms = structure.getElementTerms();
+        if (placedAgain && currentElementTerms == elementTerms) {
+            currentElementTerms.updateActivity();
+        }
+        elementTerms = currentElementTerms;
     }
 
     /**
@@ -389,6 +396,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
                 }
             }
         }
+        elementTerms.readTermArrays();
         for (int equation : structure.getArrayElementsWithSingleTerms()) {
             balance[structure.getOwnSlot(equation)] += addSingleTerms(jacobianValues, equation, slotOfEquation[equation]);
         }
@@ -425,7 +433,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
      */
     private double addSingleTerms(double[] jacobianValues, int equation, int column) {
         if (!structure.isMixed(equation)) {
-            return addLinearTerms(jacobianValues, equation, column);
+            return addLinearTerms(jacobianValues, equation, column) + addElementTerms(jacobianValues, equation, column);
         }
         FixedStructure.ObjectTerms<V, E> compiled = structure.getObjectTerms(equation);
         if (compiled == null) {
@@ -474,6 +482,46 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             }
         }
         return value;
+    }
+
+    /**
+     * The same for the terms that refer to an element of a term array: a coefficient times the value the array holds
+     * for the element, and times each of its derivatives. No object is called, unless a term computes its coefficient.
+     */
+    private double addElementTerms(double[] jacobianValues, int equation, int column) {
+        double value = 0;
+        for (int i = elementTerms.start[equation]; i < elementTerms.start[equation + 1]; i++) {
+            if (elementTerms.active[i]) {
+                int[] slot = elementTerms.slot[i];
+                if (column < 0 && !isInSystem(slot)) {
+                    return Double.NaN;
+                }
+                double coefficient = elementTerms.coefficient[i];
+                if (Double.isNaN(coefficient)) {
+                    coefficient = elementTerms.computeCoefficient(i);
+                }
+                int element = elementTerms.element[i];
+                value += coefficient * elementTerms.values[elementTerms.termArray[i]][element];
+                if (column >= 0) {
+                    double[][] derivatives = elementTerms.derivatives[elementTerms.termArray[i]];
+                    int[] localIndex = elementTerms.localIndex[i];
+                    int[] destination = elementTerms.destination[i];
+                    for (int k = 0; k < destination.length; k++) {
+                        jacobianValues[destination[k]] += coefficient * derivatives[localIndex[k]][element];
+                    }
+                }
+            }
+        }
+        return value;
+    }
+
+    private boolean isInSystem(int[] slots) {
+        for (int slot : slots) {
+            if (rowOfSlot[slot] < 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private boolean isInSystem(List<Variable<V>> variables) {

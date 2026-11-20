@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import static com.powsybl.openloadflow.equations.EquationTerm.setActive;
@@ -160,8 +161,10 @@ public class AcEquationSystemCreator {
         if (bus1 != null && bus2 != null) {
             branch.getGeneratorReactivePowerControl().ifPresent(rpc -> {
                 EquationTerm<AcVariableType, AcEquationType> q = rpc.getControlledSide() == TwoSides.ONE
-                        ? new ClosedBranchSide1ReactiveFlowEquationTerm(branch, bus1, bus2, equationSystem.getVariableSet(), deriveA1, deriveR1)
-                        : new ClosedBranchSide2ReactiveFlowEquationTerm(branch, bus1, bus2, equationSystem.getVariableSet(), deriveA1, deriveR1);
+                        ? sameFlow(branch.getClosedQ1(),
+                            () -> new ClosedBranchSide1ReactiveFlowEquationTerm(branch, bus1, bus2, equationSystem.getVariableSet(), deriveA1, deriveR1))
+                        : sameFlow(branch.getClosedQ2(),
+                            () -> new ClosedBranchSide2ReactiveFlowEquationTerm(branch, bus1, bus2, equationSystem.getVariableSet(), deriveA1, deriveR1));
                 equationSystem.createEquation(branch, AcEquationType.branchTargetQ(rpc.getControlledSide()))
                         .addTerm(q);
                 createGeneratorReactivePowerDistributionEquations(rpc, equationSystem, creationParameters);
@@ -398,27 +401,29 @@ public class AcEquationSystemCreator {
                 if (branch.getBus1() == controllerBus) {
                     LfBus otherSideBus = branch.getBus2();
                     if (otherSideBus != null) {
-                        q = new ClosedBranchSide1ReactiveFlowEquationTerm(branch, controllerBus, otherSideBus, variableSet, deriveA1, deriveR1);
+                        q = sameFlow(branch.getClosedQ1(),
+                            () -> new ClosedBranchSide1ReactiveFlowEquationTerm(branch, controllerBus, otherSideBus, variableSet, deriveA1, deriveR1));
                         branch.addAdditionalClosedQ1(q);
                         if (branch.isDisconnectionAllowedSide2()) {
-                            openQ = new OpenBranchSide2ReactiveFlowEquationTerm(branch, controllerBus, variableSet);
+                            openQ = sameFlow(branch.getOpenQ1(), () -> new OpenBranchSide2ReactiveFlowEquationTerm(branch, controllerBus, variableSet));
                             branch.addAdditionalOpenQ1(openQ);
                         }
                     } else {
-                        q = new OpenBranchSide2ReactiveFlowEquationTerm(branch, controllerBus, variableSet);
+                        q = sameFlow(branch.getOpenQ1(), () -> new OpenBranchSide2ReactiveFlowEquationTerm(branch, controllerBus, variableSet));
                         branch.addAdditionalOpenQ1(q);
                     }
                 } else {
                     LfBus otherSideBus = branch.getBus1();
                     if (otherSideBus != null) {
-                        q = new ClosedBranchSide2ReactiveFlowEquationTerm(branch, otherSideBus, controllerBus, variableSet, deriveA1, deriveR1);
+                        q = sameFlow(branch.getClosedQ2(),
+                            () -> new ClosedBranchSide2ReactiveFlowEquationTerm(branch, otherSideBus, controllerBus, variableSet, deriveA1, deriveR1));
                         branch.addAdditionalClosedQ2(q);
                         if (branch.isDisconnectionAllowedSide1()) {
-                            openQ = new OpenBranchSide1ReactiveFlowEquationTerm(branch, controllerBus, variableSet);
+                            openQ = sameFlow(branch.getOpenQ2(), () -> new OpenBranchSide1ReactiveFlowEquationTerm(branch, controllerBus, variableSet));
                             branch.addAdditionalOpenQ2(openQ);
                         }
                     } else {
-                        q = new OpenBranchSide1ReactiveFlowEquationTerm(branch, controllerBus, variableSet);
+                        q = sameFlow(branch.getOpenQ2(), () -> new OpenBranchSide1ReactiveFlowEquationTerm(branch, controllerBus, variableSet));
                         branch.addAdditionalOpenQ2(q);
                     }
                 }
@@ -428,15 +433,27 @@ public class AcEquationSystemCreator {
                 terms.add(openQ);
             }
         }
-        controllerBus.getShunt().ifPresent(shunt -> {
-            ShuntCompensatorReactiveFlowEquationTerm q = new ShuntCompensatorReactiveFlowEquationTerm(shunt, controllerBus, variableSet, false);
-            terms.add(q);
-        });
+        controllerBus.getShunt().ifPresent(shunt ->
+            terms.add(sameFlow(shunt.getQ(), () -> new ShuntCompensatorReactiveFlowEquationTerm(shunt, controllerBus, variableSet, false))));
         controllerBus.getControllerShunt().ifPresent(shunt -> {
-            ShuntCompensatorReactiveFlowEquationTerm q = new ShuntCompensatorReactiveFlowEquationTerm(shunt, controllerBus, variableSet, false);
-            terms.add(q);
+            // the term does not take the susceptance as a variable: it is the flow of the balance only when that one does not either
+            Supplier<EquationTerm<AcVariableType, AcEquationType>> newTerm = () -> new ShuntCompensatorReactiveFlowEquationTerm(shunt, controllerBus, variableSet, false);
+            terms.add(shunt.hasVoltageControlCapability() ? newTerm.get() : sameFlow(shunt.getQ(), newTerm));
         });
         return terms;
+    }
+
+    /**
+     * A flow of a branch or of a shunt for another equation than the balance of its bus. When the balance holds this
+     * flow as an element of a term array, the term refers to that element, so that the flow is computed once. Otherwise
+     * it is a new term, that computes the flow again.
+     */
+    @SuppressWarnings("unchecked")
+    private static EquationTerm<AcVariableType, AcEquationType> sameFlow(Evaluable flowOfTheBalance, Supplier<EquationTerm<AcVariableType, AcEquationType>> newTerm) {
+        if (flowOfTheBalance instanceof EquationTermArray.EquationTermArrayElementImpl<?, ?> element) {
+            return ((EquationTermArray.EquationTermArrayElementImpl<AcVariableType, AcEquationType>) element).createReference();
+        }
+        return newTerm.get();
     }
 
     public static void updateGeneratorVoltageControl(GeneratorVoltageControl voltageControl, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
@@ -551,8 +568,10 @@ public class AcEquationSystemCreator {
                 }
 
                 EquationTerm<AcVariableType, AcEquationType> p = phaseControl.getControlledSide() == TwoSides.ONE
-                        ? new ClosedBranchSide1ActiveFlowEquationTerm(branch, bus1, bus2, equationSystem.getVariableSet(), deriveA1, deriveR1)
-                        : new ClosedBranchSide2ActiveFlowEquationTerm(branch, bus1, bus2, equationSystem.getVariableSet(), deriveA1, deriveR1);
+                        ? sameFlow(branch.getClosedP1(),
+                            () -> new ClosedBranchSide1ActiveFlowEquationTerm(branch, bus1, bus2, equationSystem.getVariableSet(), deriveA1, deriveR1))
+                        : sameFlow(branch.getClosedP2(),
+                            () -> new ClosedBranchSide2ActiveFlowEquationTerm(branch, bus1, bus2, equationSystem.getVariableSet(), deriveA1, deriveR1));
                 equationSystem.createEquation(branch, AcEquationType.branchTargetP(phaseControl.getControlledSide()))
                         .addTerm(p)
                         .setActive(false); // by default BRANCH_TARGET_ALPHA1 is active and the branch active power target inactive
