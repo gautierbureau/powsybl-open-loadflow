@@ -10,7 +10,6 @@ package com.powsybl.openloadflow.ac.solver;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.math.matrix.MatrixException;
 import com.powsybl.openloadflow.ac.AcFixedJacobianMatrix;
-import com.powsybl.openloadflow.ac.AcJacobianMatrix;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcStateVectorUtil;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
@@ -46,7 +45,7 @@ public class NewtonRaphson extends AbstractAcSolver {
                          boolean detailedReport) {
         super(network, equationSystem, j, targetVector, equationVector, detailedReport);
         this.parameters = Objects.requireNonNull(parameters);
-        keptState = j instanceof AcJacobianMatrix ? new AcKeptState(network) : null;
+        keptState = j instanceof AcFixedJacobianMatrix ? new AcKeptState(network) : null;
     }
 
     /** The state of the last solve, by position, that the next one starts from (null when the Jacobian is not on a fixed system). */

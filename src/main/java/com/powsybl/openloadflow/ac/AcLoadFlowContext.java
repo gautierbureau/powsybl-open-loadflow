@@ -41,8 +41,8 @@ public class AcLoadFlowContext extends AbstractLoadFlowContext<AcVariableType, A
      * here would create it earlier than the load flow does.
      */
     public void forgetPivots() {
-        if (jacobianMatrix != null) {
-            ((AcFixedJacobianMatrix) jacobianMatrix).getFixedJacobian().forgetPivots();
+        if (jacobianMatrix instanceof AcFixedJacobianMatrix fixedMatrix) {
+            fixedMatrix.getFixedJacobian().forgetPivots();
         }
     }
 
