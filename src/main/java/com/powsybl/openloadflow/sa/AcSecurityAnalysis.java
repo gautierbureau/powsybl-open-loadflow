@@ -100,12 +100,12 @@ public class AcSecurityAnalysis extends AbstractSecurityAnalysis<AcVariableType,
     }
 
     @Override
-    protected ContingencyRecorder createContingencyRecorder(AcLoadFlowContext context) {
+    protected ContingencyRecorder createContingencyRecorder(AcLoadFlowContext context, boolean oneByOne) {
         AcLoadFlowParameters parameters = context.getParameters();
         if (parameters.getJacobianStructure() != AcJacobianStructure.FIXED || parameters.isAsymmetrical()) {
             return null;
         }
-        return new Recorder(context);
+        return new Recorder(context, oneByOne);
     }
 
     /**
@@ -117,10 +117,13 @@ public class AcSecurityAnalysis extends AbstractSecurityAnalysis<AcVariableType,
         private final AcLoadFlowContext context;
         private final AcContingencyDelta.Baseline baseline;
         private final AcContingencyRecords.Builder builder;
+        private final boolean oneByOne;
         private AcContingencyRecords records;
 
-        private Recorder(AcLoadFlowContext context) {
+        /** One by one: each contingency is simulated right after it is recorded, from a table of its own. */
+        private Recorder(AcLoadFlowContext context, boolean oneByOne) {
             this.context = context;
+            this.oneByOne = oneByOne;
             baseline = AcContingencyDelta.baseline(context);
             builder = new AcContingencyRecords.Builder(baseline);
         }
@@ -128,11 +131,28 @@ public class AcSecurityAnalysis extends AbstractSecurityAnalysis<AcVariableType,
         @Override
         public RecordedContingency record(LfContingency lfContingency, double preDistributedActivePower,
                                           Collection<LfBus> touchedBuses, Collection<LfBranch> touchedBranches) {
+            AcContingencyDelta delta = AcContingencyDelta.record(lfContingency, context, baseline, preDistributedActivePower,
+                    touchedBuses, touchedBranches);
+            if (oneByOne) {
+                AcContingencyRecords.Builder one = new AcContingencyRecords.Builder(baseline);
+                one.add(delta);
+                AcContingencyRecords table = one.build();
+                return new RecordedContingency() {
+                    @Override
+                    public void install() {
+                        table.install(0, context.getNetwork(), baseline);
+                    }
+
+                    @Override
+                    public double getPreDistributedActivePower() {
+                        return preDistributedActivePower;
+                    }
+                };
+            }
             if (records != null) {
                 throw new IllegalStateException("A contingency is recorded once the simulations have started");
             }
-            int k = builder.add(AcContingencyDelta.record(lfContingency, context, baseline, preDistributedActivePower,
-                    touchedBuses, touchedBranches));
+            int k = builder.add(delta);
             return new RecordedContingency() {
                 @Override
                 public void install() {

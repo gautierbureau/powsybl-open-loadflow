@@ -61,8 +61,7 @@ public final class AcContingencyRecords {
 
     private static final LfGenerator.GeneratorControlType[] CONTROL_TYPES = LfGenerator.GeneratorControlType.values();
 
-    private final int[] baseModes;
-    private final double[] baseTargets;
+    private final AcContingencyDelta.Baseline baseline;
 
     // by contingency
     private final String[] contingencyIds;
@@ -149,8 +148,7 @@ public final class AcContingencyRecords {
 
     public static final class Builder {
 
-        private final int[] baseModes;
-        private final double[] baseTargets;
+        private final AcContingencyDelta.Baseline baseline;
         private final List<String> contingencyIds = new ArrayList<>();
         private final TDoubleArrayList activePowerLoss = new TDoubleArrayList();
         private final TDoubleArrayList preDistributedActivePower = new TDoubleArrayList();
@@ -194,8 +192,7 @@ public final class AcContingencyRecords {
 
         /** For the records taken against the given base state. */
         public Builder(AcContingencyDelta.Baseline baseline) {
-            baseModes = baseline.getModes();
-            baseTargets = baseline.getTargets();
+            this.baseline = Objects.requireNonNull(baseline);
         }
 
         /** Appends a record; returns its index. */
@@ -257,8 +254,7 @@ public final class AcContingencyRecords {
     }
 
     private AcContingencyRecords(Builder b) {
-        baseModes = b.baseModes;
-        baseTargets = b.baseTargets;
+        baseline = b.baseline;
         contingencyIds = b.contingencyIds.toArray(new String[0]);
         activePowerLoss = b.activePowerLoss.toArray();
         preDistributedActivePower = b.preDistributedActivePower.toArray();
@@ -470,8 +466,8 @@ public final class AcContingencyRecords {
      */
     public void write(Writer writer) {
         try {
-            writer.append("BASE modes ").append(join(baseModes)).append('\n');
-            writer.append("BASE targets ").append(join(baseTargets)).append('\n');
+            writer.append("BASE modes ").append(join(getBaseModes())).append('\n');
+            writer.append("BASE targets ").append(join(getBaseTargets())).append('\n');
             for (int k = 0; k < size(); k++) {
                 writer.append("C ").append(contingencyIds[k])
                         .append(" loss ").append(Double.toHexString(activePowerLoss[k]))
@@ -552,12 +548,14 @@ public final class AcContingencyRecords {
 
     // The tables, for a device: the offsets of each table, then its values.
 
+    /** The mode of each slot in the base state the records were taken against. */
     public int[] getBaseModes() {
-        return baseModes;
+        return baseline.getModes();
     }
 
+    /** The target of each slot in the base state the records were taken against. */
     public double[] getBaseTargets() {
-        return baseTargets;
+        return baseline.getTargets();
     }
 
     public String getContingencyId(int k) {
