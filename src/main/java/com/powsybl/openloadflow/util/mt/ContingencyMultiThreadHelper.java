@@ -8,6 +8,7 @@
 
 package com.powsybl.openloadflow.util.mt;
 
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.computation.CompletableFutureTask;
 import com.powsybl.contingency.Contingency;
@@ -27,7 +28,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
@@ -83,6 +85,13 @@ public final class ContingencyMultiThreadHelper {
         void mergeReportThreadResults(ReportNode rootReportNode, ReportNode threadReportNode);
     }
 
+    /**
+     * Runs each partition of the contingencies on a network of its own, all the partitions at the same time. Each one
+     * has a thread of its own, created here: the partitions do not depend on the threads of the executor of the
+     * computation manager, which the analysis itself may be running on. With the common pool, which has one thread
+     * less than the processors, the analysis holding one of them, fewer partitions would run at the same time than
+     * asked, and, with an executor of one thread, none.
+     */
     public static <P extends AbstractLoadFlowParameters<P>> void createLFNetworksPerContingencyPartitionAndRunAnalysis(Network network,
                                                                                                                        String workingVariantId,
                                                                                                                        List<List<Contingency>> contingenciesPartitions,
@@ -91,13 +100,16 @@ public final class ContingencyMultiThreadHelper {
                                                                                                                        ParameterProvider<P> parameterProvider,
                                                                                                                        ContingencyRunner<P> contingencyRunner,
                                                                                                                        ReportNode rootReportNode,
-                                                                                                                       ReportMerger reportMerger,
-                                                                                                                       Executor executor) throws ExecutionException {
+                                                                                                                       ReportMerger reportMerger) throws ExecutionException {
 
         List<ReportNode> reportNodes = Collections.synchronizedList(new ArrayList<>(Collections.nCopies(contingenciesPartitions.size(), ReportNode.NO_OP)));
         List<LfNetworkList> lfNetworksList = new ArrayList<>();
         boolean oldAllowVariantMultiThreadAccess = network.getVariantManager().isVariantMultiThreadAccessAllowed();
         network.getVariantManager().allowVariantMultiThreadAccess(true);
+        ExecutorService workers = Executors.newFixedThreadPool(contingenciesPartitions.size(), new ThreadFactoryBuilder()
+                .setNameFormat("olf-contingencies-%d")
+                .setDaemon(true)
+                .build());
         try {
             Lock networkLock = new ReentrantLock();
             List<CompletableFuture<Void>> futures = new ArrayList<>();
@@ -114,7 +126,7 @@ public final class ContingencyMultiThreadHelper {
                     () -> runTask(network, workingVariantId, creationParameters, topoConfig, parameterProvider,
                         contingencyRunner, rootReportNode, contingenciesPartition, lfNetworksList, networkLock, startIndex,
                         partitionNum, reportNodes),
-                    executor));
+                    workers));
                 startIndexMutable += contingenciesPartition.size();
             }
 
@@ -129,6 +141,7 @@ public final class ContingencyMultiThreadHelper {
                 Thread.currentThread().interrupt();
             }
         } finally {
+            workers.shutdownNow();
             network.getVariantManager().allowVariantMultiThreadAccess(oldAllowVariantMultiThreadAccess);
         }
 
