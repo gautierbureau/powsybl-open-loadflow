@@ -147,6 +147,15 @@ public interface LfBus extends LfElement, LfCopyable<LfBus, LfNetwork> {
 
     double getMaxQ();
 
+    /**
+     * The minimum and the maximum reactive power, the values {@link #getMinQ()} and {@link #getMaxQ()} give, in
+     * {@code minMaxQ[0]} and {@code minMaxQ[1]}.
+     */
+    default void getMinMaxQ(double[] minMaxQ) {
+        minMaxQ[0] = getMinQ();
+        minMaxQ[1] = getMaxQ();
+    }
+
     Optional<QLimitType> getQLimitType();
 
     void setQLimitType(QLimitType qLimitType);

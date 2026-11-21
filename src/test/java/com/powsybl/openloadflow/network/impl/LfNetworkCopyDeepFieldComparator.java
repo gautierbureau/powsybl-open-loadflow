@@ -145,6 +145,12 @@ final class LfNetworkCopyDeepFieldComparator {
                 compareMaps(originalMap, (Map<?, ?>) copy, path);
                 return;
             }
+            if (original.getClass().isArray() && original.getClass().getComponentType().isPrimitive()) {
+                // the state the network keeps by element (the voltages and angles of the buses): its own, with the same values
+                assertNotSame(original, copy, path + ": array of the copy graph must not be shared with the original");
+                assertTrue(Objects.deepEquals(original, copy), path + ": array mismatch");
+                return;
+            }
             if (!original.getClass().getName().startsWith(OUR_PACKAGE)) {
                 assertSame(original, copy, path + ": foreign object must be shared");
                 return;
