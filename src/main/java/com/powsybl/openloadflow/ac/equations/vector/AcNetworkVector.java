@@ -353,9 +353,18 @@ public class AcNetworkVector extends AbstractLfNetworkListener
      * and its derivative: also of a branch that is closed, whose terms are off, so that opening it only switches them
      * on. As a term held as an object does, the ratio is read from the branch each time, and is not a variable.
      */
+    /**
+     * Update the flow of the branches open at one side, at their other side. A branch has terms for when it is open
+     * at a side as soon as a contingency of the list may open it there, but their values are read only while it is
+     * open at that side: the flows of the others are not computed. A change of connection is an input change, so
+     * that the flows of a branch that has just been opened are computed before they are read.
+     */
     public void updateOpenBranches() {
         for (int i = 0; i < branchVector.openableSide1Nums.size(); i++) {
             int branchNum = branchVector.openableSide1Nums.getQuick(i);
+            if (branchVector.connected1[branchNum] && branchVector.bus1Num[branchNum] >= 0) {
+                continue;
+            }
             double y = branchVector.y[branchNum];
             double cosKsi = branchVector.cosKsi[branchNum];
             double sinKsi = branchVector.sinKsi[branchNum];
@@ -371,6 +380,9 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         }
         for (int i = 0; i < branchVector.openableSide2Nums.size(); i++) {
             int branchNum = branchVector.openableSide2Nums.getQuick(i);
+            if (branchVector.connected2[branchNum] && branchVector.bus2Num[branchNum] >= 0) {
+                continue;
+            }
             double y = branchVector.y[branchNum];
             double cosKsi = branchVector.cosKsi[branchNum];
             double sinKsi = branchVector.sinKsi[branchNum];
