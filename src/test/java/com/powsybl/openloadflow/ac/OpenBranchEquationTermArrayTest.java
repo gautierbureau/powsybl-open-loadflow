@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac;
 
 import com.powsybl.iidm.network.LineAdder;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
@@ -48,8 +49,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * In a vectorized equation system the flow left at the connected side of a branch open at the other one is an element
- * of a term array. It must be the term held as an object of the other system: same value, same derivative, same
- * activity, whether the branch is open in the network or opened and closed afterwards.
+ * of a term array. It must be the term held as an object of the other system: same activity, and while it is active,
+ * same value and same derivative, whether the branch is open in the network or opened and closed afterwards. The value
+ * of a term that is off is not computed: nothing reads it.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -147,6 +149,9 @@ class OpenBranchEquationTermArrayTest {
         EquationTerm<AcVariableType, AcEquationType> objectTerm = System.term(object);
         EquationTerm<AcVariableType, AcEquationType> arrayTerm = System.term(array);
         assertEquals(objectTerm.isActive(), arrayTerm.isActive());
+        if (!objectTerm.isActive()) {
+            return;
+        }
         assertEquals(objectTerm.eval(), arrayTerm.eval());
         assertNotEquals(0, arrayTerm.eval());
         assertEquals(1, arrayTerm.getVariables().size());
@@ -158,6 +163,10 @@ class OpenBranchEquationTermArrayTest {
     }
 
     private static void assertSameAsTheObjectTerms(System objects, System arrays) {
+        // as a solver does, the state is set before the terms are read: the flows of a branch just opened at one side
+        // are computed then
+        objects.refresh();
+        arrays.refresh();
         for (LfBranch branch : objects.network().getBranches()) {
             LfBranch sameBranch = arrays.network().getBranch(branch.getNum());
             assertSameTerm(OpenBranchSide2ActiveFlowEquationTerm.class, branch.getOpenP1(), arrays, sameBranch.getOpenP1());
@@ -224,7 +233,7 @@ class OpenBranchEquationTermArrayTest {
             LfBranch line = arrays.branch(LINE);
             LfBranch transformer = arrays.branch(TRANSFORMER);
 
-            // closed: the terms for when it is open are there, off, and have the flow that opening it would leave
+            // closed: the terms for when it is open are there, and off
             objects.move(1);
             arrays.move(1);
             assertFalse(isActive(line.getOpenP1()));
@@ -232,8 +241,7 @@ class OpenBranchEquationTermArrayTest {
             assertTrue(isActive(line.getClosedP1()));
             assertSameAsTheObjectTerms(objects, arrays);
 
-            // the line opens at side 1: its flow at side 2 is the one of the terms that were off
-            double openP2 = line.getOpenP2().eval();
+            // the line opens at side 1: its flow at side 2 is the one of the terms that were off, computed with the state
             objects.branch(LINE).setConnectedSide1(false);
             line.setConnectedSide1(false);
             assertTrue(isActive(line.getOpenP2()));
@@ -242,7 +250,9 @@ class OpenBranchEquationTermArrayTest {
             assertFalse(isActive(line.getClosedP1()));
             assertFalse(isActive(line.getClosedP2()));
             assertSame(line.getOpenP2(), line.getP2());
-            assertEquals(openP2, line.getP2().eval());
+            objects.refresh();
+            arrays.refresh();
+            double openP2 = line.getP2().eval();
             assertSameAsTheObjectTerms(objects, arrays);
             objects.move(-2);
             arrays.move(-2);
@@ -356,23 +366,51 @@ class OpenBranchEquationTermArrayTest {
                 int num = branch.getNum();
                 LfBranch sameBranch = arrays.network().getBranch(num);
                 if (branch.getOpenQ2() instanceof OpenBranchSide1ReactiveFlowEquationTerm term) {
+                    // the terms of a closed branch are computed once it is open
+                    boolean closed = !term.isActive();
+                    if (closed) {
+                        setConnected(objects, arrays, branch, sameBranch, TwoSides.ONE, false);
+                    }
                     var evaluator = assertInstanceOf(OpenBranchSide1ReactiveFlowEquationTermArrayEvaluator.class, evaluator(sameBranch.getOpenQ2()));
                     double derivative = new OpenBranchSide1ReactiveFlowFastDecoupledEquationTerm(term).derFastDecoupled(term.getV2Var());
                     assertNotEquals(0, derivative);
                     assertEquals(derivative, new OpenBranchSide1ReactiveFlowFastDecoupledEquationTerm(evaluator, num).derFastDecoupled(evaluator.getV2Var(num)));
+                    if (closed) {
+                        setConnected(objects, arrays, branch, sameBranch, TwoSides.ONE, true);
+                    }
                     count++;
                 }
                 if (branch.getOpenQ1() instanceof OpenBranchSide2ReactiveFlowEquationTerm term) {
+                    boolean closed = !term.isActive();
+                    if (closed) {
+                        setConnected(objects, arrays, branch, sameBranch, TwoSides.TWO, false);
+                    }
                     var evaluator = assertInstanceOf(OpenBranchSide2ReactiveFlowEquationTermArrayEvaluator.class, evaluator(sameBranch.getOpenQ1()));
                     double derivative = new OpenBranchSide2ReactiveFlowFastDecoupledEquationTerm(term).derFastDecoupled(term.getV1Var());
                     assertNotEquals(0, derivative);
                     assertEquals(derivative, new OpenBranchSide2ReactiveFlowFastDecoupledEquationTerm(evaluator, num).derFastDecoupled(evaluator.getV1Var(num)));
+                    if (closed) {
+                        setConnected(objects, arrays, branch, sameBranch, TwoSides.TWO, true);
+                    }
                     count++;
                 }
             }
             // the four branches that can be opened at each side, and the two lines connected at one end only
             assertEquals(10, count);
         }
+    }
+
+    /** Connects or disconnects a side of a branch in both systems, then sets the state again. */
+    private static void setConnected(System objects, System arrays, LfBranch branch, LfBranch sameBranch, TwoSides side, boolean connected) {
+        if (side == TwoSides.ONE) {
+            branch.setConnectedSide1(connected);
+            sameBranch.setConnectedSide1(connected);
+        } else {
+            branch.setConnectedSide2(connected);
+            sameBranch.setConnectedSide2(connected);
+        }
+        objects.refresh();
+        arrays.refresh();
     }
 
     private static EquationTermArray.Evaluator<AcVariableType> evaluator(Evaluable array) {
