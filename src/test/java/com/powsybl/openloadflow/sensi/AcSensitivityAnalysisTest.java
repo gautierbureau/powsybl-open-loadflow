@@ -11,6 +11,7 @@ import com.powsybl.action.Action;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.commons.test.PowsyblTestReportResourceBundle;
+import com.powsybl.computation.ComputationManager;
 import com.powsybl.computation.local.LocalComputationManager;
 import com.powsybl.contingency.BoundaryLineContingency;
 import com.powsybl.contingency.Contingency;
@@ -35,14 +36,18 @@ import com.powsybl.sensitivity.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.Mockito;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -178,6 +183,36 @@ class AcSensitivityAnalysisTest extends AbstractSensitivityAnalysisTest {
 
         assertReportEquals("/sensiMtReport.txt", reportNode);
 
+    }
+
+    @Test
+    void testMultiThreadsWithAnExecutorOfOneThread() {
+        // the analysis runs on the only thread of the executor of the computation manager: its partitions have threads
+        // of their own, they do not wait for it
+        Network network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+        runAcLf(network);
+        SensitivityAnalysisParameters sensiParameters = createParameters(false, "VLLOAD_0");
+        sensiParameters.addExtension(OpenSensitivityAnalysisParameters.class, new OpenSensitivityAnalysisParameters().setThreadCount(2));
+        List<Contingency> contingencies = network.getLineStream().map(l -> new Contingency(l.getId(), new LineContingency(l.getId()))).toList();
+        List<SensitivityFactor> factors = createFactorMatrix(network.getGeneratorStream().collect(Collectors.toList()),
+                network.getLineStream().collect(Collectors.toList()));
+        ExecutorService oneThread = Executors.newSingleThreadExecutor();
+        try {
+            ComputationManager computationManager = Mockito.mock(ComputationManager.class);
+            Mockito.when(computationManager.getExecutor()).thenReturn(oneThread);
+            SensitivityAnalysisRunParameters runParameters = new SensitivityAnalysisRunParameters()
+                    .setParameters(sensiParameters)
+                    .setContingencies(contingencies)
+                    .setComputationManager(computationManager);
+
+            SensitivityAnalysisResult result = assertTimeoutPreemptively(Duration.ofSeconds(60), () -> sensiRunner.run(network, factors, runParameters));
+
+            assertEquals(6, result.getValues().size()); // (base case + 2 contingencies) * 2 factors
+            assertEquals(0.997, result.getBranchFlow1SensitivityValue("NHV1_NHV2_1", "GEN", "NHV1_NHV2_2", SensitivityVariableType.INJECTION_ACTIVE_POWER),
+                    LoadFlowAssert.DELTA_POWER);
+        } finally {
+            oneThread.shutdownNow();
+        }
     }
 
     @Test
