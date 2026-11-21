@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.sa;
 
 import com.google.common.base.Stopwatch;
+import com.google.common.collect.Lists;
 import com.powsybl.action.Action;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.report.ReportNode;
@@ -40,6 +41,7 @@ import com.powsybl.openloadflow.network.action.Actions;
 import com.powsybl.openloadflow.network.action.LfAction;
 import com.powsybl.openloadflow.network.action.LfActionUtils;
 import com.powsybl.openloadflow.network.action.OperatorStrategies;
+import com.powsybl.openloadflow.network.impl.LfNetworkCopier;
 import com.powsybl.openloadflow.network.impl.LfNetworkList;
 import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
@@ -60,6 +62,7 @@ import org.slf4j.event.Level;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -177,17 +180,48 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         SecurityAnalysisResult finalResult;
 
         if (securityAnalysisParametersExt.getThreadCount() == 1) {
+            String extraTopo = System.getProperty("openloadflow.extraTopoContingencies"); // prototype: keep the switches of another list too
+            if (extraTopo != null) {
+                try {
+                    List<Contingency> extra = new com.fasterxml.jackson.databind.ObjectMapper()
+                            .registerModule(new com.powsybl.contingency.json.ContingencyJsonModule())
+                            .readValue(new java.io.File(extraTopo), new com.fasterxml.jackson.core.type.TypeReference<List<Contingency>>() { });
+                    if (Boolean.getBoolean("openloadflow.extraTopoSwitchesOnly")) { // only the switches of the other list
+                        LfTopoConfig extraTopoConfig = new LfTopoConfig();
+                        PropagatedContingency.createList(network, extra, extraTopoConfig, creationParameters);
+                        topoConfig.getSwitchesToOpen().addAll(extraTopoConfig.getSwitchesToOpen());
+                    } else {
+                        PropagatedContingency.createList(network, extra, topoConfig, creationParameters);
+                    }
+                } catch (java.io.IOException e) {
+                    throw new java.io.UncheckedIOException(e);
+                }
+            }
             List<PropagatedContingency> propagatedContingencies = PropagatedContingency.createList(network, contingencies, topoConfig, creationParameters);
+            System.err.printf("[topo] %d switches to open%n", topoConfig.getSwitchesToOpen().size());
 
             var parameters = createParameters(lfParameters, lfParametersExt, topoConfig.isBreaker(), isAreaInterchangeControl(lfParametersExt, contingencies));
 
             // create networks including all necessary switches
             try (LfNetworkList lfNetworks = Networks.loadWithReconnectableElements(network, topoConfig, parameters.getNetworkParameters(), saReportNode)) {
+                for (LfNetwork n : lfNetworks.getList()) {
+                    System.err.printf("[topo] network %s: %d buses, %d branches (%d switches), openable side 1 %d, side 2 %d%n", n, n.getBuses().size(), n.getBranches().size(),
+                            n.getBranches().stream().filter(br -> br.getBranchType() == LfBranch.BranchType.SWITCH).count(),
+                            n.getBranches().stream().filter(LfBranch::isDisconnectionAllowedSide1).count(),
+                            n.getBranches().stream().filter(LfBranch::isDisconnectionAllowedSide2).count());
+                }
                 finalResult = runSimulationsOnAllComponents(lfNetworks, propagatedContingencies, parameters,
                         securityAnalysisParameters, operatorStrategies, actions, limitScalings, lfParameters);
             }
 
+        } else if (getLoadFlowModel() == LoadFlowModel.AC && Boolean.getBoolean("openloadflow.sharedQueue")) { // prototype
+            finalResult = runSharedQueue(network, workingVariantId, contingencies, topoConfig, creationParameters, lfParameters, lfParametersExt,
+                    securityAnalysisParameters, securityAnalysisParametersExt.getThreadCount(), operatorStrategies, actions, limitScalings,
+                    saReportNode);
         } else {
+            if (Boolean.getBoolean("openloadflow.unionTopo")) { // prototype: every part keeps the switches of all the contingencies
+                PropagatedContingency.createList(network, contingencies, topoConfig, creationParameters);
+            }
             var contingenciesPartitions = Lists2.partition(contingencies, securityAnalysisParametersExt.getThreadCount());
 
             OperatorStrategies.check(operatorStrategies, contingencies, actions);
@@ -224,6 +258,102 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         return new SecurityAnalysisReport(finalResult);
     }
 
+    /**
+     * Several workers share one list of contingencies: the networks are built once, with the switches of every
+     * contingency, each worker simulates on its own copy of them ({@link LfNetworkCopier}), and takes the next
+     * contingency from a shared queue when it is done with one, so that no worker waits for the others. The results
+     * are put back in the order of the contingencies. Only one simulated network is supported: with several, the
+     * contingencies are simulated by the calling thread alone.
+     */
+    private SecurityAnalysisResult runSharedQueue(Network network, String workingVariantId, List<Contingency> contingencies,
+                                                  LfTopoConfig topoConfig, PropagatedContingencyCreationParameters creationParameters,
+                                                  LoadFlowParameters lfParameters, OpenLoadFlowParameters lfParametersExt,
+                                                  SecurityAnalysisParameters securityAnalysisParameters, int threadCount,
+                                                  List<OperatorStrategy> operatorStrategies, List<Action> actions,
+                                                  List<LimitScaling> limitScalings, ReportNode saReportNode) throws ExecutionException {
+        List<PropagatedContingency> propagatedContingencies = PropagatedContingency.createList(network, contingencies, topoConfig, creationParameters);
+        boolean areas = isAreaInterchangeControl(lfParametersExt, contingencies);
+        P parameters = createParameters(lfParameters, lfParametersExt, topoConfig.isBreaker(), areas);
+        // the workers have threads of their own, as the partitions do (ContingencyMultiThreadHelper)
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(threadCount,
+                new com.google.common.util.concurrent.ThreadFactoryBuilder().setNameFormat("olf-contingencies-%d").setDaemon(true).build());
+        boolean oldAllowVariantMultiThreadAccess = network.getVariantManager().isVariantMultiThreadAccessAllowed();
+        network.getVariantManager().allowVariantMultiThreadAccess(true);
+        try (LfNetworkList lfNetworks = Networks.loadWithReconnectableElements(network, topoConfig, parameters.getNetworkParameters(), saReportNode)) {
+            List<LfNetwork> networksToSimulate = getNetworksToSimulate(lfNetworks, lfParameters.getComponentMode());
+            if (networksToSimulate.size() != 1) {
+                return runSimulationsOnAllComponents(lfNetworks, propagatedContingencies, parameters, securityAnalysisParameters,
+                        operatorStrategies, actions, limitScalings, lfParameters);
+            }
+            LfNetwork lfNetwork = networksToSimulate.getFirst();
+            String builtVariantId = lfNetworks.getVariantCleaner() != null ? lfNetworks.getVariantCleaner().getTmpVariantId() : workingVariantId;
+            OpenSecurityAnalysisParameters openSecurityAnalysisParameters = OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters);
+            ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution = ContingencyActivePowerLossDistribution.find(
+                    openSecurityAnalysisParameters.getContingencyActivePowerLossDistribution());
+
+            // one copy of the network by worker but the first, made in parallel
+            List<LfNetwork> workerNetworks = Collections.synchronizedList(new ArrayList<>(Collections.nCopies(threadCount, (LfNetwork) null)));
+            workerNetworks.set(0, lfNetwork);
+            List<CompletableFuture<Void>> copies = new ArrayList<>();
+            for (int i = 1; i < threadCount; i++) {
+                final int worker = i;
+                copies.add(CompletableFutureTask.runAsync(() -> {
+                    network.getVariantManager().setWorkingVariant(builtVariantId);
+                    workerNetworks.set(worker, LfNetworkCopier.copy(lfNetwork, getLoadFlowModel(), ReportNode.NO_OP));
+                    return null;
+                }, executor));
+            }
+            waitFor(copies);
+
+            // contiguous batches: consecutive contingencies of a list are often close in the network
+            int batchSize = Math.max(1, Integer.getInteger("openloadflow.sharedQueueBatch", 1)); // prototype
+            Queue<List<PropagatedContingency>> queue = new ConcurrentLinkedQueue<>(Lists.partition(propagatedContingencies, batchSize));
+            List<SecurityAnalysisResult> results = Collections.synchronizedList(new ArrayList<>(Collections.nCopies(threadCount, (SecurityAnalysisResult) null)));
+            List<CompletableFuture<Void>> workers = new ArrayList<>();
+            for (int i = 0; i < threadCount; i++) {
+                final int worker = i;
+                // each worker has parameters of its own: the outer loops keep a state
+                P workerParameters = worker == 0 ? parameters : createParameters(lfParameters, lfParametersExt, topoConfig.isBreaker(), areas);
+                workers.add(CompletableFutureTask.runAsync(() -> {
+                    network.getVariantManager().setWorkingVariant(builtVariantId);
+                    results.set(worker, runSimulations(workerNetworks.get(worker), propagatedContingencies, queue, workerParameters,
+                            securityAnalysisParameters, operatorStrategies, actions, limitScalings, contingencyActivePowerLossDistribution));
+                    return null;
+                }, executor));
+            }
+            waitFor(workers);
+
+            // the results in the order of the contingencies
+            Map<String, Integer> position = new HashMap<>();
+            for (int i = 0; i < propagatedContingencies.size(); i++) {
+                position.put(propagatedContingencies.get(i).getContingency().getId(), i);
+            }
+            List<PostContingencyResult> postContingencyResults = new ArrayList<>();
+            List<OperatorStrategyResult> operatorStrategyResults = new ArrayList<>();
+            for (SecurityAnalysisResult result : results) {
+                postContingencyResults.addAll(result.getPostContingencyResults());
+                operatorStrategyResults.addAll(result.getOperatorStrategyResults());
+            }
+            postContingencyResults.sort(Comparator.comparingInt(r -> position.getOrDefault(r.getContingency().getId(), Integer.MAX_VALUE)));
+            operatorStrategyResults.sort(Comparator.comparingInt(r -> position.getOrDefault(
+                    r.getOperatorStrategy().getContingencyContext().getContingencyId(), Integer.MAX_VALUE)));
+            return new SecurityAnalysisResult(results.getFirst().getPreContingencyResult(), postContingencyResults, operatorStrategyResults);
+        } finally {
+            executor.shutdownNow();
+            network.getVariantManager().setWorkingVariant(workingVariantId);
+            network.getVariantManager().allowVariantMultiThreadAccess(oldAllowVariantMultiThreadAccess);
+        }
+    }
+
+    private static void waitFor(List<CompletableFuture<Void>> futures) throws ExecutionException {
+        try {
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get();
+        } catch (InterruptedException e) {
+            futures.forEach(future -> future.cancel(true));
+            Thread.currentThread().interrupt();
+        }
+    }
+
     SecurityAnalysisResult runSimulationsOnAllComponents(LfNetworkList networks, List<PropagatedContingency> propagatedContingencies, P parameters,
                                                          SecurityAnalysisParameters securityAnalysisParameters, List<OperatorStrategy> operatorStrategies,
                                                          List<Action> actions, List<LimitScaling> limitScalings,
@@ -242,6 +372,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             return createNoResult();
         }
 
+        if (Boolean.getBoolean("openloadflow.simulateOnCopy")) { // prototype: simulate on a copy of each network
+            networkToSimulate.replaceAll(n -> LfNetworkCopier.copy(n, getLoadFlowModel(), n.getReportNode()));
+        }
         // run simulation on first lfNetwork to initialize results structures
         LfNetwork firstNetwork = networkToSimulate.removeFirst();
         SecurityAnalysisResult result = runSimulations(firstNetwork, propagatedContingencies, parameters, securityAnalysisParameters,
@@ -475,7 +608,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
      * The recorder of the contingencies of a simulation, created once its base state is saved; null when the model
      * records none, and its contingencies are applied with OLF's rules.
      */
-    protected ContingencyRecorder createContingencyRecorder(C context) {
+    protected ContingencyRecorder createContingencyRecorder(C context, boolean oneByOne) {
         return null;
     }
 
@@ -536,6 +669,18 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
     }
 
     protected SecurityAnalysisResult runSimulations(LfNetwork lfNetwork, List<PropagatedContingency> propagatedContingencies, P acParameters,
+                                                    SecurityAnalysisParameters securityAnalysisParameters, List<OperatorStrategy> operatorStrategies,
+                                                    List<Action> actions, List<LimitScaling> limitScalings, ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution) {
+        return runSimulations(lfNetwork, propagatedContingencies, null, acParameters, securityAnalysisParameters, operatorStrategies,
+                actions, limitScalings, contingencyActivePowerLossDistribution);
+    }
+
+    /**
+     * The simulations of the contingencies of the list, or, with a queue, of those taken from the queue one by one
+     * until it is empty: several workers then share the list, each on its own copy of the network.
+     */
+    protected SecurityAnalysisResult runSimulations(LfNetwork lfNetwork, List<PropagatedContingency> propagatedContingencies,
+                                                    Queue<List<PropagatedContingency>> queue, P acParameters,
                                                     SecurityAnalysisParameters securityAnalysisParameters, List<OperatorStrategy> operatorStrategies,
                                                     List<Action> actions, List<LimitScaling> limitScalings, ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution) {
         Map<String, Action> actionsById = Actions.indexById(actions);
@@ -603,21 +748,44 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 Consumer<P> contingencyParametersResetter = createParametersResetter(p);
 
                 // plan the contingencies: each one is applied with OLF's rules, recorded and restored
-                List<PlannedContingency> plannedContingencies = planContingencies(lfNetwork, propagatedContingencies, context,
-                        networkReportNode, securityAnalysisParameters, loadFlowParameters, contingencyActivePowerLossDistribution,
-                        networkState, modifiedElements);
+                if (queue == null) {
+                    List<PlannedContingency> plannedContingencies = planContingencies(lfNetwork, propagatedContingencies,
+                            createContingencyRecorder(context, false), networkReportNode, securityAnalysisParameters, loadFlowParameters,
+                            contingencyActivePowerLossDistribution, networkState, modifiedElements);
 
-                // start a simulation for each of the contingency
-                for (int i = 0; i < plannedContingencies.size() && !Thread.currentThread().isInterrupted(); i++) {
-                    processContingency(lfNetwork, securityAnalysisParameters,
-                        limitScalings, contingencyActivePowerLossDistribution,
-                        networkReportNode, plannedContingencies.get(i), p, networkState,
-                        context, lfActionById,
-                        loadFlowParameters, contingencyOpenLoadFlowParameters,
-                        createResultExtension, preContingencyLimitViolationManager,
-                        preContingencyNetworkResult, postContingencyResults,
-                        contingencyParametersResetter, operatorStrategiesByContingencyId,
-                        operatorStrategyResults, i < plannedContingencies.size() - 1, modifiedElements);
+                    // start a simulation for each of the contingency
+                    for (int i = 0; i < plannedContingencies.size() && !Thread.currentThread().isInterrupted(); i++) {
+                        processContingency(lfNetwork, securityAnalysisParameters,
+                            limitScalings, contingencyActivePowerLossDistribution,
+                            networkReportNode, plannedContingencies.get(i), p, networkState,
+                            context, lfActionById,
+                            loadFlowParameters, contingencyOpenLoadFlowParameters,
+                            createResultExtension, preContingencyLimitViolationManager,
+                            preContingencyNetworkResult, postContingencyResults,
+                            contingencyParametersResetter, operatorStrategiesByContingencyId,
+                            operatorStrategyResults, i < plannedContingencies.size() - 1, modifiedElements);
+                    }
+                } else {
+                    // the contingencies other workers have not taken yet, one by one: each planned, then simulated
+                    ContingencyRecorder recorder = createContingencyRecorder(context, true);
+                    List<PropagatedContingency> batch;
+                    while (!Thread.currentThread().isInterrupted() && (batch = queue.poll()) != null) {
+                      for (PropagatedContingency propagatedContingency : batch) {
+                        for (PlannedContingency plannedContingency : planContingencies(lfNetwork, List.of(propagatedContingency), recorder,
+                                networkReportNode, securityAnalysisParameters, loadFlowParameters, contingencyActivePowerLossDistribution,
+                                networkState, modifiedElements)) {
+                            processContingency(lfNetwork, securityAnalysisParameters,
+                                limitScalings, contingencyActivePowerLossDistribution,
+                                networkReportNode, plannedContingency, p, networkState,
+                                context, lfActionById,
+                                loadFlowParameters, contingencyOpenLoadFlowParameters,
+                                createResultExtension, preContingencyLimitViolationManager,
+                                preContingencyNetworkResult, postContingencyResults,
+                                contingencyParametersResetter, operatorStrategiesByContingencyId,
+                                operatorStrategyResults, true, modifiedElements);
+                        }
+                      }
+                    }
                 }
                 lfNetwork.removeListener(modifiedElements);
 
@@ -843,12 +1011,12 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
      * records the result and restores the base state. The spreading reports in the contingency's report node, as it
      * does when the simulation applies the contingency itself.
      */
-    private List<PlannedContingency> planContingencies(LfNetwork lfNetwork, List<PropagatedContingency> propagatedContingencies, C context,
+    private List<PlannedContingency> planContingencies(LfNetwork lfNetwork, List<PropagatedContingency> propagatedContingencies,
+                                                       ContingencyRecorder recorder,
                                                        ReportNode networkReportNode, SecurityAnalysisParameters securityAnalysisParameters,
                                                        LoadFlowParameters loadFlowParameters,
                                                        ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution,
                                                        NetworkState networkState, ModifiedElementsCollector modifiedElements) {
-        ContingencyRecorder recorder = createContingencyRecorder(context);
         List<PlannedContingency> plannedContingencies = new ArrayList<>(propagatedContingencies.size());
         if (recorder == null) {
             // creating an OLF contingency can move the slack bus (PropagatedContingency.toLfContingency): it is done just

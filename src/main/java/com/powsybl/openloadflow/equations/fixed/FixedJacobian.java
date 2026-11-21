@@ -107,6 +107,7 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
             if (lu == null) {
                 lu = matrix.decomposeLU();
                 analysisCount++;
+                PROBE[6].set(matrix.getRowCount());
             } else {
                 updateLu();
             }
@@ -128,18 +129,40 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
      * changed since, values or the equations the slots hold: the decomposition checks their growth and chooses new
      * ones when they are no longer good. When one of them has become zero the update fails, and new ones are asked for.
      */
+    // prototype counters: refactorisations on the previous pivots, factorisations with pivoting, failed refactorisations, and their times
+    static final java.util.concurrent.atomic.AtomicLong[] PROBE = java.util.stream.Stream.generate(java.util.concurrent.atomic.AtomicLong::new)
+            .limit(7).toArray(java.util.concurrent.atomic.AtomicLong[]::new);
+
+    static {
+        if (Boolean.getBoolean("openloadflow.luProbe")) {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> System.err.printf(
+                    "[lu] refactor ok %d (%.1f s), pivoting %d (%.1f s), failed refactor %d (%.1f s), matrix size %d%n",
+                    PROBE[0].get(), PROBE[1].get() / 1e9, PROBE[2].get(), PROBE[3].get() / 1e9, PROBE[4].get(), PROBE[5].get() / 1e9, PROBE[6].get())));
+        }
+    }
+
     private void updateLu() {
+        long t0 = System.nanoTime();
         if (freshPivots) {
             freshPivots = false;
             pivotingCount++;
             lu.update(false);
+            PROBE[2].incrementAndGet();
+            PROBE[3].addAndGet(System.nanoTime() - t0);
             return;
         }
         try {
             lu.update(true);
+            PROBE[0].incrementAndGet();
+            PROBE[1].addAndGet(System.nanoTime() - t0);
         } catch (MatrixException e) {
+            long t1 = System.nanoTime();
+            PROBE[4].incrementAndGet();
+            PROBE[5].addAndGet(t1 - t0);
             pivotingCount++;
             lu.update(false);
+            PROBE[2].incrementAndGet();
+            PROBE[3].addAndGet(System.nanoTime() - t1);
         }
     }
 
