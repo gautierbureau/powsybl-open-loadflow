@@ -18,6 +18,7 @@ import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.util.PreviousValueVoltageInitializer;
 import com.powsybl.openloadflow.network.util.VoltageInitializer;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 
@@ -58,6 +59,9 @@ final class AcKeptState {
     private boolean[] kept;
     private boolean valid;
     private long stateWriteCount;
+
+    /** The rows written from the kept state by the last initialization, kept to be reused. */
+    private boolean[] written;
 
     private int startCount;
 
@@ -124,8 +128,13 @@ final class AcKeptState {
         if (fixed.getStructure() != structure) {
             return false;
         }
-        double[] x = new double[variables.size()];
-        boolean[] written = new boolean[x.length];
+        // the array of the state vector, which this initial state replaces, when it has the size: no allocation
+        double[] x = AcStateVectorUtil.stateArray(equationSystem, variables.size());
+        if (written == null || written.length != x.length) {
+            written = new boolean[x.length];
+        } else {
+            Arrays.fill(written, false);
+        }
         for (int position = 0; position < kind.length; position++) {
             int row = structure.getVariable(position).getRow();
             if (row >= 0 && kept[position]) {

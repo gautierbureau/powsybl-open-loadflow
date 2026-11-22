@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.equations;
 
+import java.util.Arrays;
 import java.util.Objects;
 
 /**
@@ -101,6 +102,19 @@ public abstract class AbstractVector<V extends Enum<V> & Quantity, E extends Enu
                 break;
         }
         return array;
+    }
+
+    /**
+     * An array of the given length for {@link #createArray()}, filled with zeros: the one of the vector when it already
+     * has that length, so that a change of structure that keeps the size does not allocate a new array. Nothing keeps
+     * the array of a vector across a change of its structure.
+     */
+    protected double[] reuseOrCreateArray(int length) {
+        if (array != null && array.length == length) {
+            Arrays.fill(array, 0);
+            return array;
+        }
+        return new double[length];
     }
 
     protected abstract double[] createArray();

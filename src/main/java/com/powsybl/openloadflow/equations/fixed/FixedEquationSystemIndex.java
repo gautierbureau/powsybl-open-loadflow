@@ -205,7 +205,9 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
         if (pairedAgain || columnOfEquation == null || columnOfEquation.length != structure.getEquationCount()) {
             // the columns of OLF's index change only with an activation, which calls for a pairing: they are read
             // once by pairing, not at each evaluation
-            columnOfEquation = new int[structure.getEquationCount()];
+            if (columnOfEquation == null || columnOfEquation.length != structure.getEquationCount()) {
+                columnOfEquation = new int[structure.getEquationCount()];
+            }
             for (int equation = 0; equation < columnOfEquation.length; equation++) {
                 columnOfEquation[equation] = structure.getColumnInEquationSystem(equation);
             }

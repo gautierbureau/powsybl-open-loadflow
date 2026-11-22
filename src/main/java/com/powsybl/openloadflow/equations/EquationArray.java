@@ -36,6 +36,8 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
 
     private int[] elementNumToColumn;
 
+    private boolean elementNumToColumnValid;
+
     private TIntIntMap columnToElementNum;
 
     private int length;
@@ -121,8 +123,12 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     }
 
     public int[] getElementNumToColumn() {
-        if (elementNumToColumn == null) {
-            elementNumToColumn = new int[elementCount];
+        if (!elementNumToColumnValid) {
+            // computed again in the same array when the elements are as many: nothing keeps it across a change
+            if (elementNumToColumn == null || elementNumToColumn.length != elementCount) {
+                elementNumToColumn = new int[elementCount];
+            }
+            elementNumToColumnValid = true;
             int column = firstColumn;
             for (int elementNum = 0; elementNum < elementCount; elementNum++) {
                 if (elementActive[elementNum]) {
@@ -153,7 +159,7 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     }
 
     private void invalidateElementNumToColumn() {
-        elementNumToColumn = null;
+        elementNumToColumnValid = false;
         columnToElementNum = null;
         matrixElementIndexes.reset();
     }
