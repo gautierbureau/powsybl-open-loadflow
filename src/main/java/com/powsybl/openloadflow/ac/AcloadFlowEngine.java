@@ -18,11 +18,11 @@ import com.powsybl.openloadflow.ac.solver.AcSolverFactory;
 import com.powsybl.openloadflow.ac.solver.AcSolverResult;
 import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
 import com.powsybl.openloadflow.equations.EquationSystem;
-import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.lf.LoadFlowEngine;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopResult;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
 import com.powsybl.openloadflow.lf.util.LfReports;
+import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfSynchronousNetwork;
 import com.powsybl.openloadflow.network.util.NetworkReports;
@@ -163,14 +163,17 @@ public class AcloadFlowEngine implements LoadFlowEngine<AcVariableType, AcEquati
         AcLoadFlowParameters parameters = context.getParameters();
         LfNetwork network = context.getNetwork();
         Map<String, Double> busesOutOfNormalVoltageRange = new LinkedHashMap<>();
-        for (Variable<AcVariableType> v : equationSystem.getIndex().getSortedVariablesToFind()) {
-            if (v.getType() == AcVariableType.BUS_V && !network.getBus(v.getElementNum()).isFictitious()) {
-                double value = equationSystem.getStateVector().get(v.getRow());
-                if (value < parameters.getMinRealisticVoltage() || value > parameters.getMaxRealisticVoltage()) {
-                    // only consider unrealistic if nominal voltage high enough
-                    if (network.getBus(v.getElementNum()).getNominalV() >= minNominalVoltageRealisticVoltageCheck) {
-                        busesOutOfNormalVoltageRange.put(network.getBus(v.getElementNum()).getId(), value);
-                    }
+        // the voltage variables, from the rows and element numbers of the index: a bus is read only when out of range
+        double[] state = equationSystem.getStateVector().get();
+        int[] rows = equationSystem.getIndex().getRowsOfType(AcVariableType.BUS_V);
+        int[] busNums = equationSystem.getIndex().getElementNumsOfType(AcVariableType.BUS_V);
+        for (int i = 0; i < rows.length; i++) {
+            double value = state[rows[i]];
+            if (value < parameters.getMinRealisticVoltage() || value > parameters.getMaxRealisticVoltage()) {
+                LfBus bus = network.getBus(busNums[i]);
+                // only consider unrealistic if nominal voltage high enough
+                if (!bus.isFictitious() && bus.getNominalV() >= minNominalVoltageRealisticVoltageCheck) {
+                    busesOutOfNormalVoltageRange.put(bus.getId(), value);
                 }
             }
         }
