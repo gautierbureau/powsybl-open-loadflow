@@ -278,7 +278,16 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(threadCount,
                 new com.google.common.util.concurrent.ThreadFactoryBuilder().setNameFormat("olf-contingencies-%d").setDaemon(true).build());
         boolean oldAllowVariantMultiThreadAccess = network.getVariantManager().isVariantMultiThreadAccessAllowed();
-        network.getVariantManager().allowVariantMultiThreadAccess(true);
+        // an implementation without multi-thread variant access (network-store) keeps one working variant for all
+        // threads: the workers then do not set it
+        boolean variantMultiThreadAccess;
+        try {
+            network.getVariantManager().allowVariantMultiThreadAccess(true);
+            variantMultiThreadAccess = true;
+        } catch (com.powsybl.commons.PowsyblException e) {
+            variantMultiThreadAccess = false;
+        }
+        final boolean setVariantInWorkers = variantMultiThreadAccess;
         try (LfNetworkList lfNetworks = Networks.loadWithReconnectableElements(network, topoConfig, parameters.getNetworkParameters(), saReportNode)) {
             List<LfNetwork> networksToSimulate = getNetworksToSimulate(lfNetworks, lfParameters.getComponentMode());
             if (networksToSimulate.size() != 1) {
@@ -298,7 +307,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             for (int i = 1; i < threadCount; i++) {
                 final int worker = i;
                 copies.add(CompletableFutureTask.runAsync(() -> {
-                    network.getVariantManager().setWorkingVariant(builtVariantId);
+                    if (setVariantInWorkers) {
+                        network.getVariantManager().setWorkingVariant(builtVariantId);
+                    }
                     workerNetworks.set(worker, LfNetworkCopier.copy(lfNetwork, getLoadFlowModel(), ReportNode.NO_OP));
                     return null;
                 }, executor));
@@ -315,7 +326,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 // each worker has parameters of its own: the outer loops keep a state
                 P workerParameters = worker == 0 ? parameters : createParameters(lfParameters, lfParametersExt, topoConfig.isBreaker(), areas);
                 workers.add(CompletableFutureTask.runAsync(() -> {
-                    network.getVariantManager().setWorkingVariant(builtVariantId);
+                    if (setVariantInWorkers) {
+                        network.getVariantManager().setWorkingVariant(builtVariantId);
+                    }
                     results.set(worker, runSimulations(workerNetworks.get(worker), propagatedContingencies, queue, workerParameters,
                             securityAnalysisParameters, operatorStrategies, actions, limitScalings, contingencyActivePowerLossDistribution));
                     return null;
@@ -341,7 +354,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         } finally {
             executor.shutdownNow();
             network.getVariantManager().setWorkingVariant(workingVariantId);
-            network.getVariantManager().allowVariantMultiThreadAccess(oldAllowVariantMultiThreadAccess);
+            if (setVariantInWorkers) {
+                network.getVariantManager().allowVariantMultiThreadAccess(oldAllowVariantMultiThreadAccess);
+            }
         }
     }
 
