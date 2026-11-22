@@ -1013,6 +1013,21 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         return arrays.get(arrayIndexOfEquation[equation]).getElementNumToColumn(elementNumOfEquation[equation]);
     }
 
+    /**
+     * The column of every equation in OLF's index, as {@link #getColumnInEquationSystem(int)} gives it: the elements of
+     * an equation array are consecutive equations, whose columns are copied from the array at once.
+     */
+    public void getColumnsInEquationSystem(int[] columns) {
+        for (int equation = 0; equation < singleEquations.size(); equation++) {
+            columns[equation] = bound[equation] ? singleEquations.get(equation).getColumn() : -1;
+        }
+        for (int a = 0; a < arrays.size(); a++) {
+            int first = arrayFirstEquation[a];
+            int length = (a + 1 < arrays.size() ? arrayFirstEquation[a + 1] : equationCount) - first;
+            System.arraycopy(arrays.get(a).getElementNumToColumn(), 0, columns, first, length);
+        }
+    }
+
     /** The terms held as objects: all the terms of a single equation, the additional terms of an array element. */
     public List<SingleEquationTerm<V, E>> getSingleTerms(int equation) {
         if (equation < singleEquations.size()) {
