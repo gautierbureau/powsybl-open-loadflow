@@ -223,6 +223,11 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
         }
 
         @Override
+        public void onGeneratorStatusChange(LfGenerator generator) {
+            onActivePowerChange(generator.getBus());
+        }
+
+        @Override
         public void onGenerationReactivePowerTargetChange(LfBus bus, double oldGenerationTargetQ, double newGenerationTargetQ) {
             onReactivePowerChange(bus);
         }
@@ -263,9 +268,14 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
             forgetAll();
         }
 
+        /**
+         * The status changes the active power of the converter stations in their buses (none in linear mode, the
+         * equations carry it) and the reactive limits they read at it: an active power change of their two buses.
+         */
         @Override
         public void onHvdcAcEmulationStatusChange(LfHvdc hvdc, LfHvdc.AcEmulationControl.AcEmulationStatus acEmulationStatus) {
-            forgetAll();
+            onActivePowerChange(hvdc.getConverterStation1().getBus());
+            onActivePowerChange(hvdc.getConverterStation2().getBus());
         }
 
         @Override
