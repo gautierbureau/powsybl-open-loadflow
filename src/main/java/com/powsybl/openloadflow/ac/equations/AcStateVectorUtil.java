@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.equations;
 
 import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.equations.EquationSystemIndex;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.util.PreviousValueVoltageInitializer;
@@ -31,30 +32,41 @@ public final class AcStateVectorUtil {
     }
 
     public static void initStateVector(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem, VoltageInitializer initializer) {
-        double[] x = stateArray(equationSystem, equationSystem.getIndex().getSortedVariablesToFind().size());
-        for (Variable<AcVariableType> v : equationSystem.getIndex().getSortedVariablesToFind()) {
-            x[v.getRow()] = initValue(network, v, initializer);
+        EquationSystemIndex<AcVariableType, AcEquationType> index = equationSystem.getIndex();
+        double[] x = stateArray(equationSystem, index.getSortedVariablesToFind().size());
+        // by type, from the rows and element numbers of the index: each variable is given its value at its row
+        for (AcVariableType type : AcVariableType.values()) {
+            int[] rows = index.getRowsOfType(type);
+            int[] elementNums = index.getElementNumsOfType(type);
+            for (int i = 0; i < rows.length; i++) {
+                x[rows[i]] = initValue(network, type, elementNums[i], initializer);
+            }
         }
         equationSystem.getStateVector().set(x);
     }
 
     /** The initial value of a variable. */
     public static double initValue(LfNetwork network, Variable<AcVariableType> v, VoltageInitializer initializer) {
-        switch (v.getType()) {
+        return initValue(network, v.getType(), v.getElementNum(), initializer);
+    }
+
+    /** The initial value of the variable of a type and an element. */
+    public static double initValue(LfNetwork network, AcVariableType type, int elementNum, VoltageInitializer initializer) {
+        switch (type) {
             case BUS_V:
-                return initializer.getMagnitude(network.getBus(v.getElementNum()));
+                return initializer.getMagnitude(network.getBus(elementNum));
 
             case BUS_PHI:
-                return initializer.getAngle(network.getBus(v.getElementNum()));
+                return initializer.getAngle(network.getBus(elementNum));
 
             case SHUNT_B:
-                return network.getShunt(v.getElementNum()).getB();
+                return network.getShunt(elementNum).getB();
 
             case BRANCH_ALPHA1:
-                return network.getBranch(v.getElementNum()).getPiModel().getA1();
+                return network.getBranch(elementNum).getPiModel().getA1();
 
             case BRANCH_RHO1:
-                return network.getBranch(v.getElementNum()).getPiModel().getR1();
+                return network.getBranch(elementNum).getPiModel().getR1();
 
             case DUMMY_P,
                  DUMMY_Q,
@@ -73,17 +85,17 @@ public final class AcStateVectorUtil {
                 return 0.1;
 
             case DC_BUS_V:
-                return initializer.getDcVoltage(network.getDcBus(v.getElementNum()));
+                return initializer.getDcVoltage(network.getDcBus(elementNum));
 
             case CONV_P_AC:
-                double p = network.getVoltageSourceConverter(v.getElementNum()).getPac();
+                double p = network.getVoltageSourceConverter(elementNum).getPac();
                 return Double.isNaN(p) || !(initializer instanceof PreviousValueVoltageInitializer) ? 0.0 : p;
 
             case CONV_Q_AC:
-                double q = network.getVoltageSourceConverter(v.getElementNum()).getQac();
+                double q = network.getVoltageSourceConverter(elementNum).getQac();
                 return Double.isNaN(q) || !(initializer instanceof PreviousValueVoltageInitializer) ? 0.0 : q;
             default:
-                throw new IllegalStateException("Unknown variable type " + v.getType());
+                throw new IllegalStateException("Unknown variable type " + type);
         }
     }
 }
