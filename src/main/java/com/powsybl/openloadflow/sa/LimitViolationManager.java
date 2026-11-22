@@ -18,6 +18,7 @@ import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LimitScalingManager;
 import com.powsybl.openloadflow.util.ArrayEvaluable;
 import com.powsybl.openloadflow.util.Evaluable;
+import com.powsybl.openloadflow.util.EvaluableConstants;
 import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.security.*;
 import com.powsybl.security.limitscaling.LimitScaling;
@@ -84,8 +85,13 @@ public class LimitViolationManager {
         getMonitoredBranchSides(network);
         FlatMonitoredBranchSides flatSides = getFlatMonitoredBranchSides(network);
         MonitoredBranchSide[] sides = flatSides.sides;
+        // the voltage of each bus in per unit, read once
+        double[] busV = new double[network.getBuses().size()];
+        for (LfBus bus : network.getBuses()) {
+            busV[bus.getNum()] = bus.getV();
+        }
         for (int k = 0; k < sides.length; k++) {
-            if (flatSides.mayBeViolated(k)) {
+            if (flatSides.mayBeViolated(k, busV)) {
                 MonitoredBranchSide monitoredSide = sides[k];
                 if (!isBranchDisabled.test(monitoredSide.branch)) {
                     detectBranchSideViolations(monitoredSide);
@@ -96,7 +102,7 @@ public class LimitViolationManager {
         // Detect violation limits on buses: same pre-filter with voltages and limits read from flat arrays
         FlatBusLimits busLimits = flatSides.busLimits;
         for (int num = 0; num < busLimits.lowVoltageLimit.length; num++) {
-            double v = network.getBus(num).getV();
+            double v = busV[num];
             if (v > busLimits.highVoltageLimit[num] || v < busLimits.lowVoltageLimit[num]) {
                 LfBus bus = network.getBus(num);
                 if (!bus.isDisabled()) {
@@ -228,16 +234,26 @@ public class LimitViolationManager {
     /**
      * Flat view of monitored branch sides for a fast pre-filter: smallest limit of each type and direct access to
      * active and reactive power values when they are stored in arrays ({@link ArrayEvaluable}). A side may be violated
-     * only if a value is above the corresponding smallest limit. Sides with current limits, or whose powers are not
-     * stored in arrays, always go through the detailed detection.
+     * only if a value is above the corresponding smallest limit. Sides whose powers are not stored in arrays, or with
+     * current limits and a current that is not the one of the closed branch, always go through the detailed detection.
+     *
+     * <p>The current of a closed branch side is estimated as |S| / V, which is its magnitude in per unit; it may differ
+     * from the one of the current term in the last bits, so that a side is only skipped when the estimate is below its
+     * smallest current limit by a margin far larger than that: the detailed detection, with the current term, decides
+     * for the others.
      */
     private static final class FlatMonitoredBranchSides {
+
+        /** Relative margin of the current estimate, far above the rounding differences with the current term. */
+        private static final double CURRENT_ESTIMATE_MARGIN = 1e-6;
 
         private final int branchEvaluableVersion;
         private final MonitoredBranchSide[] sides;
         private final boolean[] alwaysDetailed;
         private final double[] minActivePowerLimit;
         private final double[] minApparentPowerLimit;
+        private final double[] minCurrentLimit;
+        private final int[] busNum;
         private final double[][] pValues;
         private final int[] pIndex;
         private final double[][] qValues;
@@ -251,6 +267,8 @@ public class LimitViolationManager {
             alwaysDetailed = new boolean[size];
             minActivePowerLimit = new double[size];
             minApparentPowerLimit = new double[size];
+            minCurrentLimit = new double[size];
+            busNum = new int[size];
             pValues = new double[size][];
             pIndex = new int[size];
             qValues = new double[size][];
@@ -260,9 +278,15 @@ public class LimitViolationManager {
                 boolean side1 = m.side() == TwoSides.ONE;
                 minActivePowerLimit[k] = m.activePowerLimitsGroups().isEmpty() ? Double.POSITIVE_INFINITY : m.minActivePowerLimit();
                 minApparentPowerLimit[k] = m.apparentPowerLimitsGroups().isEmpty() ? Double.POSITIVE_INFINITY : m.minApparentPowerLimit();
+                minCurrentLimit[k] = m.currentLimitsGroups().isEmpty() ? Double.POSITIVE_INFINITY : m.minCurrentLimit();
+                busNum[k] = m.bus().getNum();
                 Evaluable p = side1 ? m.branch().getP1() : m.branch().getP2();
                 Evaluable q = side1 ? m.branch().getQ1() : m.branch().getQ2();
-                if (!m.currentLimitsGroups().isEmpty() || !(p instanceof ArrayEvaluable) || !(q instanceof ArrayEvaluable)) {
+                Evaluable i = side1 ? m.branch().getI1() : m.branch().getI2();
+                Evaluable closedI = side1 ? m.branch().getClosedI1() : m.branch().getClosedI2();
+                // the current term of the closed branch (not in DC, where a branch has none)
+                boolean currentFromPowers = m.currentLimitsGroups().isEmpty() || i == closedI && i != EvaluableConstants.NAN;
+                if (!currentFromPowers || !(p instanceof ArrayEvaluable) || !(q instanceof ArrayEvaluable)) {
                     alwaysDetailed[k] = true;
                 } else {
                     pValues[k] = ((ArrayEvaluable) p).getValues();
@@ -274,7 +298,7 @@ public class LimitViolationManager {
             busLimits = FlatBusLimits.create(network);
         }
 
-        boolean mayBeViolated(int k) {
+        boolean mayBeViolated(int k, double[] busV) {
             if (alwaysDetailed[k]) {
                 return true;
             }
@@ -284,7 +308,19 @@ public class LimitViolationManager {
             }
             double q = qValues[k][qIndex[k]];
             // same computation as LfBranch.computeApparentPower1 and computeApparentPower2
-            return FastMath.sqrt(p * p + q * q) > minApparentPowerLimit[k];
+            double s = FastMath.sqrt(p * p + q * q);
+            if (s > minApparentPowerLimit[k]) {
+                return true;
+            }
+            double minCurrent = minCurrentLimit[k];
+            if (minCurrent == Double.POSITIVE_INFINITY) {
+                return false;
+            }
+            double v = busV[busNum[k]];
+            if (!(v > 0)) {
+                return true;
+            }
+            return s / v > minCurrent * (1 - CURRENT_ESTIMATE_MARGIN);
         }
     }
 

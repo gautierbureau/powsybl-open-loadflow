@@ -39,6 +39,12 @@ public class ClosedBranchSide1ActiveFlowEquationTermArrayEvaluator extends Abstr
                 dph1, dph2, dv1, dv2, da1, dr1);
     }
 
+    /** The flows of the branches are kept in an array of the branch vector, by branch number. */
+    @Override
+    public boolean evaluatesElementsFromArray() {
+        return true;
+    }
+
     @Override
     public double[] eval() {
         return branchVector.p1;
