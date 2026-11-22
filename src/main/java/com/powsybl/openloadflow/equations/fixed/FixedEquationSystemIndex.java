@@ -208,9 +208,7 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
             if (columnOfEquation == null || columnOfEquation.length != structure.getEquationCount()) {
                 columnOfEquation = new int[structure.getEquationCount()];
             }
-            for (int equation = 0; equation < columnOfEquation.length; equation++) {
-                columnOfEquation[equation] = structure.getColumnInEquationSystem(equation);
-            }
+            structure.getColumnsInEquationSystem(columnOfEquation);
         }
         if (!matrixStructureValid) {
             structure.buildMatrixStructure(pairedEquations, pairedPositions);

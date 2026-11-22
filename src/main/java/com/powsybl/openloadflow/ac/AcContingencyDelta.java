@@ -222,10 +222,14 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
      */
     private static double[] targetsByPosition(FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed,
                                           FixedStructure<AcVariableType, AcEquationType> structure, double[] targetVector) {
-        double[] targets = new double[structure.getVariableCount()];
-        for (int position = 0; position < targets.length; position++) {
-            int equation = fixed.getEquationOfPosition(position);
-            targets[position] = equation < 0 ? Double.NaN : targetVector[structure.getColumnInEquationSystem(equation)];
+        int variableCount = structure.getVariableCount();
+        double[] targets = new double[variableCount];
+        // the columns of the positions, read at once from the pairing
+        int[] rows = new int[variableCount];
+        int[] columns = new int[variableCount];
+        fixed.getRowsAndColumnsOfPositions(rows, columns);
+        for (int position = 0; position < variableCount; position++) {
+            targets[position] = columns[position] < 0 ? Double.NaN : targetVector[columns[position]];
         }
         return targets;
     }
