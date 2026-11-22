@@ -205,7 +205,9 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
         if (placedAgain || columnOfEquation == null || columnOfEquation.length != structure.getEquationCount()) {
             // the columns of OLF's index change only with an activation, which calls for a placement: they are read
             // once by placement, not at each evaluation
-            columnOfEquation = new int[structure.getEquationCount()];
+            if (columnOfEquation == null || columnOfEquation.length != structure.getEquationCount()) {
+                columnOfEquation = new int[structure.getEquationCount()];
+            }
             for (int equation = 0; equation < columnOfEquation.length; equation++) {
                 columnOfEquation[equation] = structure.getColumnInEquationSystem(equation);
             }

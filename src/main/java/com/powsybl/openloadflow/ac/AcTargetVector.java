@@ -438,7 +438,7 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
 
     @Override
     protected double[] createArray() {
-        double[] array = new double[equationSystem.getIndex().getColumnCount()];
+        double[] array = reuseOrCreateArray(equationSystem.getIndex().getColumnCount());
         gather(array);
         return array;
     }

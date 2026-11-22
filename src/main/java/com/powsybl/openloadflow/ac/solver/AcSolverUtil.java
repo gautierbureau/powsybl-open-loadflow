@@ -24,8 +24,17 @@ public final class AcSolverUtil {
     private AcSolverUtil() {
     }
 
+    /**
+     * An array for a new state of the given size: the one of the state vector, which the new state replaces, when it
+     * has that size, so that each solve does not allocate one. Nothing keeps the state array across a solve.
+     */
+    static double[] stateArray(EquationSystem<AcVariableType, AcEquationType> equationSystem, int size) {
+        double[] current = equationSystem.getStateVector().get();
+        return current != null && current.length == size ? current : new double[size];
+    }
+
     public static void initStateVector(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem, VoltageInitializer initializer) {
-        double[] x = new double[equationSystem.getIndex().getSortedVariablesToFind().size()];
+        double[] x = stateArray(equationSystem, equationSystem.getIndex().getSortedVariablesToFind().size());
         for (Variable<AcVariableType> v : equationSystem.getIndex().getSortedVariablesToFind()) {
             x[v.getRow()] = initValue(network, v, initializer);
         }
