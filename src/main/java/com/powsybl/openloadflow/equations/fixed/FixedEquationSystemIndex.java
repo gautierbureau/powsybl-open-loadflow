@@ -70,6 +70,8 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
 
     private int[] positionOfEquation;
     private int[] equationOfPosition;
+    /** The linear terms of the structure, with their activity as of the last pairing. */
+    private FixedStructure.LinearTerms<V, E> linearTerms;
     /** For the search of a pairing: the positions already tried for the equation being paired. */
     private int[] visited;
     private int stamp;
@@ -119,6 +121,7 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
                 }
             }
         }
+        boolean pairedAgain = !pairingValid;
         if (!pairingValid) {
             place();
             pairingValid = true;
@@ -130,6 +133,12 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
             matrixStructureValid = true;
         }
         structure.updateMatrixElementIndices();
+        // an activation always calls for a pairing: the activity of the linear terms is read again with it
+        FixedStructure.LinearTerms<V, E> current = structure.getLinearTerms();
+        if (pairedAgain && current == linearTerms) {
+            current.updateActivity();
+        }
+        linearTerms = current;
     }
 
     /**
@@ -341,6 +350,10 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
 
     /** Adds the derivatives of the active object terms of a paired equation in the column of its position. */
     private void addSingleTerms(double[] jacobianValues, int equation) {
+        if (!structure.isMixed(equation)) {
+            addLinearTerms(jacobianValues, equation);
+            return;
+        }
         FixedStructure.ObjectTerms<V, E> compiled = structure.getObjectTerms(equation);
         if (compiled == null) {
             return;
@@ -352,6 +365,22 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
                 for (int k = 0; k < compiled.row[t].length; k++) {
                     jacobianValues[compiled.matrixElementIndex[t][k]] += term.der(variables.get(k));
                 }
+            }
+        }
+    }
+
+    /**
+     * The same for an equation whose object terms are all linear, from the arrays of the structure: the derivative of
+     * a coefficient times a variable is the coefficient. No object is called, unless a term computes its coefficient.
+     */
+    private void addLinearTerms(double[] jacobianValues, int equation) {
+        for (int i = linearTerms.start[equation]; i < linearTerms.start[equation + 1]; i++) {
+            if (linearTerms.active[i]) {
+                double coefficient = linearTerms.coefficient[i];
+                if (Double.isNaN(coefficient)) {
+                    coefficient = linearTerms.terms.get(i).der(linearTerms.variables.get(i));
+                }
+                jacobianValues[linearTerms.matrixElementIndex[i]] += coefficient;
             }
         }
     }
