@@ -146,6 +146,7 @@ class AcJacobianStructureTest {
         try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters)) {
             new AcloadFlowEngine(context).run();
             assertFalse(context.getJacobianMatrix() instanceof AcFixedJacobianMatrix);
+            context.forgetPivots(); // nothing to forget, and no failure
         }
     }
 

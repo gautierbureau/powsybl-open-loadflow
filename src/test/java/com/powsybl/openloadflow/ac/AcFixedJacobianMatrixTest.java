@@ -26,6 +26,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
 import com.powsybl.openloadflow.equations.JacobianMatrix;
+import com.powsybl.openloadflow.equations.fixed.FixedJacobian;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -91,6 +92,29 @@ class AcFixedJacobianMatrixTest {
     void analysedOnceWhileBusesReleaseTheirVoltage() {
         runLoadFlow(IeeeCdfNetworkFactory.create118(), new SparseMatrixFactory(), context ->
                 assertEquals(1, ((AcFixedJacobianMatrix) context.getJacobianMatrix()).getFixedJacobian().getAnalysisCount()));
+    }
+
+    /** Factorises again on the current state, as the next iteration of a Newton-Raphson does. */
+    private static void factoriseAgain(AcLoadFlowContext context) {
+        var stateVector = context.getEquationSystem().getStateVector();
+        stateVector.set(stateVector.get().clone());
+        context.getJacobianMatrix().solveTransposed(new double[context.getEquationSystem().getIndex().getColumnCount()]);
+    }
+
+    @Test
+    void forgottenPivotsAreChosenAgainOnce() {
+        runLoadFlow(IeeeCdfNetworkFactory.create118(), new SparseMatrixFactory(), context -> {
+            FixedJacobian<AcVariableType, AcEquationType> jacobian = ((AcFixedJacobianMatrix) context.getJacobianMatrix()).getFixedJacobian();
+            int pivotingCount = jacobian.getPivotingCount();
+            factoriseAgain(context);
+            assertEquals(pivotingCount, jacobian.getPivotingCount()); // the pivots of the last factorisation are good
+            context.forgetPivots();
+            factoriseAgain(context);
+            assertEquals(pivotingCount + 1, jacobian.getPivotingCount()); // chosen again
+            factoriseAgain(context);
+            assertEquals(pivotingCount + 1, jacobian.getPivotingCount()); // and tried first from then on
+            assertEquals(1, jacobian.getAnalysisCount());
+        });
     }
 
     private static DenseMatrix randomColumns(int rowCount, int columnCount, Random random) {

@@ -41,6 +41,11 @@ public class AcFixedJacobianMatrix extends AcJacobianMatrix {
         return fixedJacobian;
     }
 
+    /** The next factorisation chooses its pivots: see {@link FixedJacobian#forgetPivots()}. */
+    public void forgetPivots() {
+        fixedJacobian.forgetPivots();
+    }
+
     @Override
     protected void updateStatus(Status status) {
         super.updateStatus(status);
