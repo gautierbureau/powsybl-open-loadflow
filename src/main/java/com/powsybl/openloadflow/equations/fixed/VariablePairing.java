@@ -16,6 +16,8 @@ import com.powsybl.openloadflow.equations.Quantity;
  *     alternatives of its position, the ones OLF switches between.</li>
  * <li>Which of two alternatives keeps the position when both are active: the one that fixes the variable.</li>
  * <li>Its controller positions: the other positions it may take, where a control sends it.</li>
+ * <li>The kind of each variable: an equation moved to keep a zero off the diagonal stays among variables of its
+ *     kind.</li>
  * </ul>
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
@@ -41,6 +43,15 @@ public interface VariablePairing<V extends Enum<V> & Quantity, E extends Enum<E>
      * pairings are met.
      */
     default void forEachControllerVariable(ControllerVariableConsumer<V, E> consumer) {
+    }
+
+    /**
+     * The kind of a variable. An equation that would leave a zero on the diagonal where it is moves to the position of
+     * another variable of the kind of its own: there its derivative is as strong as on its own position. One kind by
+     * default.
+     */
+    default int kind(V variableType) {
+        return 0;
     }
 
     /** An equation, by type and element, and the variable of a position it may take, by type and element. */
