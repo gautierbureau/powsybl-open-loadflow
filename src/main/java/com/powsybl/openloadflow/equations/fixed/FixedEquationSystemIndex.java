@@ -166,18 +166,13 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     }
 
     /**
-     * Gives each active equation a position, from the current activations only. The variable of a position is to find when an active term depends
-     * on its variable: OLF's index keeps a row for exactly those variables.
-     * <ol>
-     * <li>Each active equation takes its own position when it is to find.</li>
-     * <li>When two claim it, the one that fixes the variable keeps it, and the other is displaced: the reactive balance
-     *     of a bus whose voltage a remote controller holds, displaced by the voltage target of that bus.</li>
-     * <li>A displaced equation takes one of its controller positions, the position of a variable a control frees. When that position is
-     *     held, its equation moves to one of its own positions in turn (the search of an augmenting path, as in a
-     *     matching).</li>
-     * <li>An equation that finds no position that way takes any free position whose variable is to find: the matrix structure then grows.</li>
-     * </ol>
-     * Any pairing gives the same system, with the equations in another order.
+     * Gives each active equation a position. The variable of a position is to find when an active term depends on it: OLF's index keeps
+     * a row for exactly those variables. Each equation takes the position it is paired with, when it depends on its
+     * variable; when two claim one, the one that fixes the variable keeps it. The others are paired one by one on a
+     * position they may take and whose variable they depend on: the one they had before or a controller position, which are in the
+     * matrix structure already. An equation in the way moves the same way. So no position holds an equation that does not depend on
+     * its variable, a zero on the diagonal, as long as the controller positions allow it. Any pairing gives the same system,
+     * with the equations in another order.
      */
     private void place() {
         equationSystem.getIndex().getSortedVariablesToFind();
@@ -189,7 +184,7 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
                 continue;
             }
             int own = structure.getOwnPosition(equation);
-            if (own < 0 || !isToFind(own)) {
+            if (own < 0 || !isToFind(own) || !structure.dependsOn(equation, own)) {
                 displaced.add(equation);
             } else if (equationOfPosition[own] < 0) {
                 take(equation, own);
@@ -201,10 +196,21 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
                 displaced.add(equation);
             }
         }
+        // a displaced equation takes a position it may take and depends on; an equation in its way moves the same way
+        TIntArrayList left = new TIntArrayList();
         for (int i = 0; i < displaced.size(); i++) {
             int equation = displaced.getQuick(i);
             stamp++;
-            if (!move(equation)) {
+            if (!move(equation, true)) {
+                left.add(equation);
+            }
+        }
+        // what is left has no such position. It takes one it may take all the same, which leaves a zero on the diagonal
+        // and keeps the matrix structure; only then any unpaired one
+        for (int i = 0; i < left.size(); i++) {
+            int equation = left.getQuick(i);
+            stamp++;
+            if (!move(equation, false)) {
                 int position = findUnpairedPosition(equation);
                 if (position < 0) {
                     throw new PowsyblException("More active equations than variables: no position left for "
@@ -228,29 +234,31 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     }
 
     /**
-     * Gives the equation one of the positions it may take: its own or a controller position. When the position is held, its equation is
-     * moved the same way first; one that has no other position to go to keeps it.
+     * Gives the equation one of the positions it may take: its own, the one it had or a controller position. When the position is
+     * held, its equation is moved the same way first: one that has no other position to go to keeps it. This is the
+     * search of an augmenting path. With {@code dependent}, only positions whose variable the equations depend on are
+     * taken: together the moves then leave no zero on the diagonal when such a pairing exists.
      */
-    private boolean move(int equation) {
+    private boolean move(int equation, boolean dependent) {
         int own = structure.getOwnPosition(equation);
-        if (own >= 0 && moveTo(equation, own)) {
+        if (own >= 0 && moveTo(equation, own, dependent)) {
             return true;
         }
         for (int position : structure.getControllerPositions(equation)) {
-            if (moveTo(equation, position)) {
+            if (moveTo(equation, position, dependent)) {
                 return true;
             }
         }
         return false;
     }
 
-    private boolean moveTo(int equation, int position) {
-        if (visited[position] == stamp || !isToFind(position)) {
+    private boolean moveTo(int equation, int position, boolean dependent) {
+        if (visited[position] == stamp || !isToFind(position) || dependent && !structure.dependsOn(equation, position)) {
             return false;
         }
         visited[position] = stamp;
         int other = equationOfPosition[position];
-        if (other >= 0 && !move(other)) {
+        if (other >= 0 && !move(other, dependent)) {
             return false;
         }
         take(equation, position);
@@ -412,6 +420,21 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     public FixedStructure<V, E> getStructure() {
         update();
         return structure;
+    }
+
+    /**
+     * How many positions hold an equation that does not depend, in the current state, on their variable: the zeros on
+     * the diagonal. A factorisation without pivoting needs none.
+     */
+    public int getZeroDiagonalCount() {
+        update();
+        int count = 0;
+        for (int position = 0; position < equationOfPosition.length; position++) {
+            if (equationOfPosition[position] >= 0 && !structure.dependsOnNow(equationOfPosition[position], position)) {
+                count++;
+            }
+        }
+        return count;
     }
 
     /**

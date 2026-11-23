@@ -46,7 +46,9 @@ import java.util.function.Consumer;
  *     change.</li>
  * <li><b>Controller positions.</b> The other positions an equation may take, given by the {@link VariablePairing} from the controls of the
  *     network: the reactive balance of a bus whose voltage a remote generator holds goes to the position of that
- *     generator's bus voltage, which the control frees.</li>
+ *     generator's bus voltage, which the control frees. Also the moves that keep zeros off the diagonal: an equation
+ *     that does not depend on the variable it is paired with, or on the one a control sends it to, exchanges its position
+ *     with an equation paired with a variable it depends on.</li>
  * <li><b>Matrix structure.</b> For each position, the sorted rows of every equation that may stand there, plus the diagonal: the
  *     Jacobian by columns, one column per position. It is built from a list of pairings and only ever grows.</li>
  * <li><b>Matrix element indices.</b> For each derivative of each term, the index of its value in the column of the position its
@@ -122,6 +124,10 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private final int[] pairedPosition;
     /** The equations that changed position since their matrix element indices were computed. */
     private final TIntArrayList staleMatrixElementIndices = new TIntArrayList();
+    /** True for an equation with a term that depends on the variable it is paired with. */
+    private final boolean[] dependsOnOwnVariable;
+    /** True for an equation that takes part in a chain of moves: what it depends on is then asked of its active terms. */
+    private final boolean[] movesInChain;
     private final boolean[] fixesVariable;
     /** For each equation, the positions it may take besides its own, sorted: empty for most. */
     private final int[][] controllerPositions;
@@ -181,6 +187,8 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
 
         rows = new int[equationCount][];
         ownPosition = new int[equationCount];
+        dependsOnOwnVariable = new boolean[equationCount];
+        movesInChain = new boolean[equationCount];
         fixesVariable = new boolean[equationCount];
         TIntArrayList withSingleTerms = new TIntArrayList();
         TIntArrayList buffer = new TIntArrayList();
@@ -192,6 +200,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             V variableType = pairing.variableType(type);
             ownPosition[equation] = variableType == null ? -1
                     : positionByTypeAndElement.getOrDefault(key(variableType, getElementNum(equation)), -1);
+            dependsOnOwnVariable[equation] = ownPosition[equation] >= 0 && Arrays.binarySearch(rows[equation], ownPosition[equation]) >= 0;
             fixesVariable[equation] = pairing.fixesVariable(type);
             if (equation >= singleEquations.size() && !getSingleTerms(equation).isEmpty()) {
                 withSingleTerms.add(equation);
@@ -214,6 +223,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
                 controllerPositionLists.computeIfAbsent(equation, e -> new TIntArrayList()).add(position);
             }
         });
+        addExchangesAgainstZeroDiagonals(controllerPositionLists, pairing);
         controllerPositionLists.forEach((equation, positionList) -> controllerPositions[equation] = sortedDistinct(positionList));
 
         for (int a = 0; a < arrays.size(); a++) {
@@ -224,6 +234,186 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             arrayTerms.addAll(termsOfArray);
             arrayTermsOfArray.add(termsOfArray);
         }
+    }
+
+    /**
+     * An equation on a position whose variable it does not depend on leaves a zero on the diagonal, around which a
+     * factorisation has to pivot. Two kinds of equations would:
+     * <ul>
+     * <li>one that does not depend on the variable it is paired with: the two equations that tie the buses of a zero
+     * impedance branch together, paired with the flows of the branch, or the balance of a bus that only such
+     * branches connect;</li>
+     * <li>one that a control sends to the position of a variable it does not depend on: the reactive balance of a bus
+     * whose voltage is held by a shunt of another bus, sent to the susceptance of that shunt.</li>
+     * </ul>
+     * Such an equation takes the position of a variable it depends on instead, and the equation paired with that position the
+     * position the first one leaves: the equation of the branch goes to the angle of a bus and the balance of that bus to
+     * the flow of the branch; the balance of the controlled bus goes to the voltage of the bus of the shunt, and the
+     * balance of that bus to the susceptance. An equation only moves to a variable of the kind of its own. These moves
+     * are added to the controller positions, so that the matrix structure holds them from the start. The pairing then finds, in each
+     * state, which ones to make.
+     */
+    private void addExchangesAgainstZeroDiagonals(Map<Integer, TIntArrayList> controllerPositionLists, VariablePairing<V, E> pairing) {
+        ChainSearch search = new ChainSearch(controllerPositionLists, pairing);
+        List<int[]> independent = new ArrayList<>();
+        controllerPositionLists.forEach((equation, positionList) -> {
+            for (int i = 0; i < positionList.size(); i++) {
+                if (Arrays.binarySearch(rows[equation], positionList.getQuick(i)) < 0) {
+                    independent.add(new int[] {equation, positionList.getQuick(i)});
+                }
+            }
+        });
+        independent.sort(Comparator.<int[]>comparingInt(pair -> pair[0]).thenComparingInt(pair -> pair[1]));
+        for (int[] pair : independent) {
+            search.addChains(pair[0], pair[1]);
+        }
+        for (int equation = 0; equation < equationCount; equation++) {
+            if (ownPosition[equation] >= 0 && rows[equation].length > 0 && !dependsOnOwnVariable[equation]) {
+                search.addChains(equation, ownPosition[equation]);
+            }
+        }
+    }
+
+    /**
+     * The search of the moves that bring to a position an equation which depends on its variable, when the equation that
+     * should take the position does not: this one takes the position of a variable it depends on, the equation paired with
+     * that position the position of a variable it depends on in turn, and so on until one depends on the variable of the first
+     * position. Most often the first equation paired with a position is enough: a chain of one move each way, an exchange.
+     */
+    private final class ChainSearch {
+
+        /** How many equations a search visits at most: it gives up on a position that nothing close depends on. */
+        private static final int MAX_VISITED_COUNT = 256;
+
+        private final Map<Integer, TIntArrayList> controllerPositionLists;
+        private final int[] kind = new int[variables.size()];
+        private final TIntArrayList[] pairedWith;
+        private final int[] visited = new int[equationCount];
+        private final int[] previous = new int[equationCount];
+        private final int[] positionTaken = new int[equationCount];
+        private final TIntArrayList queue = new TIntArrayList();
+        private int stamp;
+
+        private ChainSearch(Map<Integer, TIntArrayList> controllerPositionLists, VariablePairing<V, E> pairing) {
+            this.controllerPositionLists = controllerPositionLists;
+            for (int position = 0; position < kind.length; position++) {
+                kind[position] = pairing.kind(variables.get(position).getType());
+            }
+            pairedWith = new TIntArrayList[variables.size()];
+            for (int equation = 0; equation < equationCount; equation++) {
+                int own = ownPosition[equation];
+                if (own >= 0) {
+                    if (pairedWith[own] == null) {
+                        pairedWith[own] = new TIntArrayList(2);
+                    }
+                    pairedWith[own].add(equation);
+                }
+            }
+        }
+
+        /** Adds to the controller positions the moves of the shortest chains from the equation to the position. */
+        private void addChains(int first, int target) {
+            stamp++;
+            queue.resetQuick();
+            queue.add(first);
+            visited[first] = stamp;
+            previous[first] = -1;
+            boolean found = false;
+            int levelEnd = 1;
+            for (int head = 0; head < queue.size() && queue.size() <= MAX_VISITED_COUNT; head++) {
+                if (head == levelEnd) {
+                    if (found) {
+                        return;
+                    }
+                    levelEnd = queue.size();
+                }
+                found |= visit(queue.getQuick(head), target);
+            }
+        }
+
+        /**
+         * Looks at the equations paired with the variables an equation depends on, among the variables of the kind of
+         * its own. True when one of these equations ends a chain.
+         */
+        private boolean visit(int equation, int target) {
+            boolean found = false;
+            int ownKind = kind[ownPosition[equation] >= 0 ? ownPosition[equation] : target];
+            for (int position : rows[equation]) {
+                if (position == target || position == ownPosition[equation] || kind[position] != ownKind || pairedWith[position] == null) {
+                    continue;
+                }
+                for (int i = 0; i < pairedWith[position].size(); i++) {
+                    int other = pairedWith[position].getQuick(i);
+                    if (kind[target] == kind[position] && Arrays.binarySearch(rows[other], target) >= 0) {
+                        found = true;
+                        addControllerPosition(other, target);
+                        addControllerPosition(equation, position);
+                        for (int e = equation; previous[e] >= 0; e = previous[e]) {
+                            addControllerPosition(previous[e], positionTaken[e]);
+                        }
+                    } else if (visited[other] != stamp) {
+                        visited[other] = stamp;
+                        previous[other] = equation;
+                        positionTaken[other] = position;
+                        queue.add(other);
+                    }
+                }
+            }
+            return found;
+        }
+
+        private void addControllerPosition(int equation, int position) {
+            movesInChain[equation] = true;
+            if (position != ownPosition[equation]) {
+                controllerPositionLists.computeIfAbsent(equation, e -> new TIntArrayList()).add(position);
+            }
+        }
+    }
+
+    /**
+     * True when the equation depends on the variable of the position. For an equation that takes part in a chain of moves
+     * this is asked of its active terms: around zero impedance branches the answer changes with the state.
+     */
+    boolean dependsOn(int equation, int position) {
+        if (movesInChain[equation]) {
+            return dependsOnNow(equation, position);
+        }
+        return position == ownPosition[equation] ? dependsOnOwnVariable[equation] : Arrays.binarySearch(rows[equation], position) >= 0;
+    }
+
+    /** True when a term of the equation that is active now depends on the variable of the position. */
+    boolean dependsOnNow(int equation, int position) {
+        ObjectTerms<V, E> compiled = objectTerms.get(equation);
+        if (compiled != null) {
+            for (int t = 0; t < compiled.row.length; t++) {
+                if (contains(compiled.row[t], position) && compiled.terms.get(t).isActive()) {
+                    return true;
+                }
+            }
+        }
+        if (equation >= singleEquations.size()) {
+            int a = getArrayIndex(equation);
+            int element = equation - arrayFirstEquation[a];
+            for (ArrayTerms<V, E> terms : arrayTermsOfArray.get(a)) {
+                TIntArrayList termNums = terms.termArray.getTermNumsForEquationElementNum(element);
+                for (int i = 0; i < termNums.size(); i++) {
+                    int term = termNums.getQuick(i);
+                    if (contains(terms.row[term], position) && terms.termArray.isTermActive(term)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean contains(int[] values, int value) {
+        for (int v : values) {
+            if (v == value) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** The object terms of an equation with the positions of their variables; null when it has none or when a variable has no position. */
@@ -464,6 +654,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             }
         }
         rows[equation] = sortedDistinct(all);
+        dependsOnOwnVariable[equation] = ownPosition[equation] >= 0 && Arrays.binarySearch(rows[equation], ownPosition[equation]) >= 0;
         objectTerms.set(equation, compileObjectTerms(equation));
         return true;
     }
@@ -594,7 +785,10 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         return objectTerms.get(equation);
     }
 
-    /** The positions the equation may take besides its own: those its {@link VariablePairing} gives, sorted. */
+    /**
+     * The positions the equation may take besides its own: those its {@link VariablePairing} gives, and those of the moves that
+     * keep zeros off the diagonal.
+     */
     int[] getControllerPositions(int equation) {
         return controllerPositions[equation];
     }

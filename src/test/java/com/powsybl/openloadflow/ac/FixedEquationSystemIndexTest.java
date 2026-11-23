@@ -25,10 +25,12 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.fixed.FixedEquationSystemIndex;
 import com.powsybl.openloadflow.equations.fixed.FixedStructure;
+import com.powsybl.openloadflow.equations.fixed.FixedStructures;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.LfShunt;
 import com.powsybl.openloadflow.network.LfSynchronousNetwork;
 import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.network.util.UniformValueVoltageInitializer;
@@ -48,6 +50,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.io.IOException;
 import java.io.StringWriter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 import java.util.Set;
@@ -247,6 +250,88 @@ class FixedEquationSystemIndexTest {
     }
 
     /**
+     * Buses 1, 2 and 3 are tied by two zero impedance lines, 1 and 3. Bus 1 holds its voltage and is the angle
+     * reference; buses 1 and 3 have other lines, bus 2 has none. OLF pairs the two equations of a zero impedance line
+     * with its flows, which they do not depend on, and the balances of bus 2 with its voltage, which they do not depend
+     * on either. Here the equations of a line take the voltage positions of the bus at its end away from the reference, and
+     * the balances of that bus the flow positions of the line. When a line is lost, the bus that is left with nothing but a
+     * zero impedance line is the one that exchanges its positions. No position ever holds an equation that does not depend on
+     * its variable, and the matrix structure does not change.
+     */
+    @Test
+    void theEquationsOfAZeroImpedanceLineExchangeTheirVariablesWithTheBalancesOfABus() {
+        Network network = ZeroImpedanceNetworkFactory.createWithVoltageControl();
+        AcLoadFlowParameters acParameters = acParameters(network, new LoadFlowParameters(), false, true);
+        LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
+        try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
+             FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed =
+                     new FixedEquationSystemIndex<>(context.getEquationSystem(), new AcVariablePairing(lfNetwork))) {
+            check(lfNetwork, context, fixed, "base state");
+            assertEquals("BUS_TARGET_PHI:1", equationOn(context, fixed, AcVariableType.BUS_PHI, 1));
+            assertEquals("ZERO_PHI:1", equationOn(context, fixed, AcVariableType.BUS_PHI, 2));
+            assertEquals("BUS_TARGET_P:2", equationOn(context, fixed, AcVariableType.DUMMY_P, 1));
+            assertEquals("ZERO_PHI:3", equationOn(context, fixed, AcVariableType.BUS_PHI, 3));
+            assertEquals("BUS_TARGET_P:3", equationOn(context, fixed, AcVariableType.DUMMY_P, 3));
+            assertEquals("BUS_TARGET_V:1", equationOn(context, fixed, AcVariableType.BUS_V, 1));
+            assertEquals("ZERO_V:1", equationOn(context, fixed, AcVariableType.BUS_V, 2));
+            assertEquals("BUS_TARGET_Q:2", equationOn(context, fixed, AcVariableType.DUMMY_Q, 1));
+            assertEquals("ZERO_V:3", equationOn(context, fixed, AcVariableType.BUS_V, 3));
+            assertEquals("BUS_TARGET_Q:3", equationOn(context, fixed, AcVariableType.DUMMY_Q, 3));
+            assertEquals(0, fixed.getZeroDiagonalCount());
+
+            // line 1 is lost: its flows are fixed to zero, and bus 2 hangs from bus 3 by line 3
+            lfNetwork.getBranchById("l12").setDisabled(true);
+            check(lfNetwork, context, fixed, "line 1 lost");
+            assertEquals("DUMMY_TARGET_P:1", equationOn(context, fixed, AcVariableType.DUMMY_P, 1));
+            assertEquals("ZERO_PHI:3", equationOn(context, fixed, AcVariableType.BUS_PHI, 2));
+            assertEquals("BUS_TARGET_P:2", equationOn(context, fixed, AcVariableType.DUMMY_P, 3));
+            assertEquals("BUS_TARGET_P:3", equationOn(context, fixed, AcVariableType.BUS_PHI, 3));
+            assertEquals("DUMMY_TARGET_Q:1", equationOn(context, fixed, AcVariableType.DUMMY_Q, 1));
+            assertEquals("ZERO_V:3", equationOn(context, fixed, AcVariableType.BUS_V, 2));
+            assertEquals("BUS_TARGET_Q:2", equationOn(context, fixed, AcVariableType.DUMMY_Q, 3));
+            assertEquals("BUS_TARGET_Q:3", equationOn(context, fixed, AcVariableType.BUS_V, 3));
+            assertEquals(0, fixed.getZeroDiagonalCount());
+            assertEquals(1, fixed.getMatrixStructureBuildCount());
+        }
+    }
+
+    /**
+     * The shunts of buses 1 and 2 hold the voltage of bus 3, a bus they are not connected to: the reactive balance of
+     * bus 3 does not depend on their susceptances. So it does not take the position of the susceptance of a shunt, as it
+     * does for a shunt of its own bus: it takes the voltage position of the bus of the shunt, and the reactive balance of
+     * that bus takes the position of the susceptance.
+     */
+    @Test
+    void aBalanceReachesARemoteShuntThroughTheBalanceOfItsBus() {
+        Network network = VoltageControlNetworkFactory.createWithShuntSharedRemoteControl();
+        AcLoadFlowParameters acParameters = acParameters(network, new LoadFlowParameters().setShuntCompensatorVoltageControlOn(true), false, true);
+        LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
+        LfShunt shunt0 = lfNetwork.getBus(1).getControllerShunt().orElseThrow();
+        LfShunt shunt1 = lfNetwork.getBus(2).getControllerShunt().orElseThrow();
+        try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
+             FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed =
+                     new FixedEquationSystemIndex<>(context.getEquationSystem(), new AcVariablePairing(lfNetwork))) {
+            shunt0.setVoltageControlEnabled(true);
+            shunt1.setVoltageControlEnabled(true);
+            check(lfNetwork, context, fixed, "both shunts hold the voltage");
+            assertEquals("BUS_TARGET_V:3", equationOn(context, fixed, AcVariableType.BUS_V, 3));
+            assertEquals("BUS_TARGET_Q:3", equationOn(context, fixed, AcVariableType.BUS_V, 1));
+            assertEquals("BUS_TARGET_Q:1", equationOn(context, fixed, AcVariableType.SHUNT_B, shunt0.getNum()));
+            assertEquals("DISTR_SHUNT_B:" + shunt1.getNum(), equationOn(context, fixed, AcVariableType.SHUNT_B, shunt1.getNum()));
+            assertEquals(0, fixed.getZeroDiagonalCount());
+
+            shunt0.setVoltageControlEnabled(false);
+            check(lfNetwork, context, fixed, "the second shunt holds the voltage");
+            assertEquals("SHUNT_TARGET_B:" + shunt0.getNum(), equationOn(context, fixed, AcVariableType.SHUNT_B, shunt0.getNum()));
+            assertEquals("BUS_TARGET_Q:1", equationOn(context, fixed, AcVariableType.BUS_V, 1));
+            assertEquals("BUS_TARGET_Q:3", equationOn(context, fixed, AcVariableType.BUS_V, 2));
+            assertEquals("BUS_TARGET_Q:2", equationOn(context, fixed, AcVariableType.SHUNT_B, shunt1.getNum()));
+            assertEquals(0, fixed.getZeroDiagonalCount());
+            assertEquals(1, fixed.getMatrixStructureBuildCount());
+        }
+    }
+
+    /**
      * OLF holds its single equations in a hash map whose order changes from one run to the next. The structure numbers
      * them by type and element: where several pairings are possible the choice follows the numbers, and two runs
      * must make the same one.
@@ -266,6 +351,13 @@ class FixedEquationSystemIndexTest {
                 assertTrue(types < 0 || types == 0 && structure.getElementNum(equation - 1) < structure.getElementNum(equation));
             }
         }
+    }
+
+    private static String equationOn(AcLoadFlowContext context, FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed,
+                                     AcVariableType variableType, int elementNum) {
+        FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
+        int equation = fixed.getEquationOfPosition(structure.getPosition(context.getEquationSystem().getVariable(elementNum, variableType)));
+        return equation < 0 ? "none" : structure.getType(equation) + ":" + structure.getElementNum(equation);
     }
 
     private static String write(FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed) throws IOException {
@@ -382,6 +474,10 @@ class FixedEquationSystemIndexTest {
             }
         }
         assertEquals(equationSystem.getIndex().getColumnCount(), activeCount, state);
+        // no position holds an equation that does not depend on its variable, wherever a pairing can avoid it
+        if (hasPairingWithoutZeroDiagonal(structure)) {
+            assertEquals(0, fixed.getZeroDiagonalCount(), state);
+        }
         for (int position = 0; position < variableCount; position++) {
             if (fixed.getEquationOfPosition(position) < 0) {
                 for (int row = 0; row < variableCount; row++) {
@@ -396,6 +492,47 @@ class FixedEquationSystemIndexTest {
      * Solving the fixed system gives OLF's own Newton step: the positions only put the equations in another order, and a
      * position without equation leaves its variable where it is.
      */
+    /**
+     * True when the active equations can be paired one per position, each on a variable it depends on in the current
+     * state: searched here among all the variables of each equation, whatever its controller positions. It is not so in a state
+     * OLF cannot solve either, like an island of zero impedance branches that no bus holds the voltage of.
+     */
+    private static boolean hasPairingWithoutZeroDiagonal(FixedStructure<AcVariableType, AcEquationType> structure) {
+        int[] equationOfPosition = new int[structure.getVariableCount()];
+        Arrays.fill(equationOfPosition, -1);
+        for (int equation = 0; equation < structure.getEquationCount(); equation++) {
+            if (structure.isActive(equation) && !place(structure, equation, equationOfPosition, new boolean[structure.getVariableCount()])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean place(FixedStructure<AcVariableType, AcEquationType> structure, int equation, int[] equationOfPosition, boolean[] visited) {
+        int own = structure.getOwnPosition(equation);
+        if (own >= 0 && pairOn(structure, equation, own, equationOfPosition, visited)) {
+            return true;
+        }
+        for (int position : FixedStructures.getRows(structure, equation)) {
+            if (pairOn(structure, equation, position, equationOfPosition, visited)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean pairOn(FixedStructure<AcVariableType, AcEquationType> structure, int equation, int position, int[] equationOfPosition, boolean[] visited) {
+        if (visited[position] || structure.getVariable(position).getRow() < 0 || !FixedStructures.dependsOnNow(structure, equation, position)) {
+            return false;
+        }
+        visited[position] = true;
+        if (equationOfPosition[position] >= 0 && !place(structure, equationOfPosition[position], equationOfPosition, visited)) {
+            return false;
+        }
+        equationOfPosition[position] = equation;
+        return true;
+    }
+
     private static void checkNewtonStep(AcLoadFlowContext context, FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed) {
         double[] referenceStep = context.getEquationVector().getArray().clone();
         double[] targets = context.getTargetVector().getArray();
