@@ -11,6 +11,7 @@ import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.PhaseTapChanger;
 import com.powsybl.iidm.network.TwoWindingsTransformer;
+import com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.DenseMatrix;
@@ -48,7 +49,9 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.io.IOException;
 import java.io.StringWriter;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.function.Consumer;
@@ -56,6 +59,7 @@ import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -114,6 +118,17 @@ class FixedEquationSystemIndexTest {
         return network;
     }
 
+    /** The HVDC line of the factory follows the angles of its two ends only with this extension. */
+    private static Network hvdcInAcEmulation() {
+        Network network = HvdcNetworkFactory.createWithHvdcInAcEmulation();
+        network.getHvdcLine("hvdc34").newExtension(HvdcAngleDroopActivePowerControlAdder.class)
+                .withDroop(180)
+                .withP0(0f)
+                .withEnabled(true)
+                .add();
+        return network;
+    }
+
     private static List<Case> cases() {
         return List.of(
                 new Case("ieee14", IeeeCdfNetworkFactory::create14),
@@ -136,7 +151,7 @@ class FixedEquationSystemIndexTest {
                         parameters -> parameters.setPhaseShifterRegulationOn(true)),
                 new Case("generator remote reactive power control", ReactivePowerControlNetworkFactory::createWithGeneratorRemoteControl,
                         parameters -> OpenLoadFlowParameters.create(parameters).setGeneratorReactivePowerRemoteControl(true)),
-                new Case("hvdc in ac emulation", HvdcNetworkFactory::createWithHvdcInAcEmulation),
+                new Case("hvdc in ac emulation", FixedEquationSystemIndexTest::hvdcInAcEmulation),
                 new Case("zero impedance branches", ZeroImpedanceNetworkFactory::createWithVoltageControl),
                 new Case("node breaker", NodeBreakerNetworkFactory::create, parameters -> { }, true));
     }
@@ -266,6 +281,78 @@ class FixedEquationSystemIndexTest {
                 assertTrue(types < 0 || types == 0 && structure.getElementNum(equation - 1) < structure.getElementNum(equation));
             }
         }
+    }
+
+    /**
+     * Around a zero impedance line every term held as an object is a coefficient times one variable: the two angles in
+     * the equation of the line, its flow in the balances of its two buses. The structure holds them in one table, with
+     * their position and their coefficient, and evaluates them from it. The balance of a bus of an HVDC line in AC
+     * emulation holds a term that is not of this kind: its object terms are evaluated one by one.
+     */
+    @Test
+    void linearTermsAreHeldInATable() {
+        Network network = ZeroImpedanceNetworkFactory.createWithVoltageControl();
+        AcLoadFlowParameters acParameters = acParameters(network, new LoadFlowParameters(), false, true);
+        LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
+        try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
+             FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed =
+                     new FixedEquationSystemIndex<>(context.getEquationSystem(), new AcVariablePairing(lfNetwork))) {
+            EquationSystem<AcVariableType, AcEquationType> equationSystem = context.getEquationSystem();
+            FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
+            FixedStructure.LinearTerms<AcVariableType, AcEquationType> linearTerms = structure.getLinearTerms();
+            // the equation of line 1: the angle of bus 1 minus the angle of bus 2
+            int zeroPhi = structure.getNumber(AcEquationType.ZERO_PHI, 1);
+            assertFalse(structure.isMixed(zeroPhi));
+            int first = linearTerms.start[zeroPhi];
+            assertEquals(2, linearTerms.start[zeroPhi + 1] - first);
+            assertEquals(1, linearTerms.coefficient[first]);
+            assertEquals(-1, linearTerms.coefficient[first + 1]);
+            assertEquals(structure.getPosition(equationSystem.getVariable(1, AcVariableType.BUS_PHI)), linearTerms.position[first]);
+            assertEquals(structure.getPosition(equationSystem.getVariable(2, AcVariableType.BUS_PHI)), linearTerms.position[first + 1]);
+            // the active balance of bus 2: it receives the flow of line 1 and gives the flow of line 3
+            int balance = structure.getNumber(AcEquationType.BUS_TARGET_P, 2);
+            int flow1 = structure.getPosition(equationSystem.getVariable(1, AcVariableType.DUMMY_P));
+            int flow3 = structure.getPosition(equationSystem.getVariable(3, AcVariableType.DUMMY_P));
+            assertFalse(structure.isMixed(balance));
+            assertEquals(Map.of(flow1, -1d, flow3, 1d), coefficients(linearTerms, balance, true));
+
+            // the voltage target of bus 5: its voltage
+            int target = structure.getNumber(AcEquationType.BUS_TARGET_V, 5);
+            int voltage = structure.getPosition(equationSystem.getVariable(5, AcVariableType.BUS_V));
+            assertEquals(Map.of(voltage, 1d), coefficients(linearTerms, target, true));
+
+            // bus 5 is lost: OLF turns its terms off, and the table follows when the equations are paired again
+            LfBus lost = lfNetwork.getBus(5);
+            lost.setDisabled(true);
+            lost.getBranches().forEach(branch -> branch.setDisabled(true));
+            check(lfNetwork, context, fixed, "bus 5 lost");
+            assertEquals(Map.of(voltage, 1d), coefficients(fixed.getStructure().getLinearTerms(), target, false));
+            assertEquals(Map.of(flow1, -1d, flow3, 1d), coefficients(fixed.getStructure().getLinearTerms(), balance, true));
+        }
+
+        Network hvdcNetwork = hvdcInAcEmulation();
+        AcLoadFlowParameters hvdcParameters = acParameters(hvdcNetwork, new LoadFlowParameters(), false, true);
+        LfNetwork hvdcLfNetwork = Networks.load(hvdcNetwork, hvdcParameters.getNetworkParameters()).get(0);
+        try (AcLoadFlowContext context = new AcLoadFlowContext(hvdcLfNetwork, hvdcParameters);
+             FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed =
+                     new FixedEquationSystemIndex<>(context.getEquationSystem(), new AcVariablePairing(hvdcLfNetwork))) {
+            FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
+            LfBus converterBus = hvdcLfNetwork.getHvdcs().get(0).getBus1();
+            int balance = structure.getNumber(AcEquationType.BUS_TARGET_P, converterBus.getNum());
+            assertTrue(structure.isMixed(balance));
+            assertTrue(coefficients(structure.getLinearTerms(), balance, true).isEmpty());
+        }
+    }
+
+    /** The coefficient, by position, of the linear terms of an equation that are active, or of those that are not. */
+    private static Map<Integer, Double> coefficients(FixedStructure.LinearTerms<AcVariableType, AcEquationType> linearTerms, int equation, boolean active) {
+        Map<Integer, Double> coefficients = new HashMap<>();
+        for (int i = linearTerms.start[equation]; i < linearTerms.start[equation + 1]; i++) {
+            if (linearTerms.active[i] == active) {
+                coefficients.put(linearTerms.position[i], linearTerms.coefficient[i]);
+            }
+        }
+        return coefficients;
     }
 
     private static String write(FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed) throws IOException {

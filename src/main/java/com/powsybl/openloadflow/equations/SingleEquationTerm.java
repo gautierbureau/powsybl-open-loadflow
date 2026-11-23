@@ -30,18 +30,30 @@ public interface SingleEquationTerm<V extends Enum<V> & Quantity, E extends Enum
 
         private final DoubleSupplier scalarSupplier;
 
+        private final boolean scalarConstant;
+
         MultiplyByScalarEquationTerm(SingleEquationTerm<V, E> term, double scalar) {
-            this(term, () -> scalar);
+            this(term, () -> scalar, true);
         }
 
         MultiplyByScalarEquationTerm(SingleEquationTerm<V, E> term, DoubleSupplier scalarSupplier) {
+            this(term, scalarSupplier, false);
+        }
+
+        private MultiplyByScalarEquationTerm(SingleEquationTerm<V, E> term, DoubleSupplier scalarSupplier, boolean scalarConstant) {
             this.term = Objects.requireNonNull(term);
             this.scalarSupplier = Objects.requireNonNull(scalarSupplier);
+            this.scalarConstant = scalarConstant;
             term.setSelf(this);
         }
 
         public double getScalar() {
             return this.scalarSupplier.getAsDouble();
+        }
+
+        /** True when the scalar was given as a value and not as a supplier: it never changes. */
+        public boolean isScalarConstant() {
+            return scalarConstant;
         }
 
         public EquationTerm<V, E> getTerm() {
