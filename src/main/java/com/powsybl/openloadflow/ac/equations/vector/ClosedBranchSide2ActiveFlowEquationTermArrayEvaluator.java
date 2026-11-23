@@ -38,6 +38,12 @@ public class ClosedBranchSide2ActiveFlowEquationTermArrayEvaluator extends Abstr
         return ClosedBranchSide2ActiveFlowEquationTerm.calculateSensi(y, ksi, g2, v1, ph1, r1, a1, v2, ph2, dph1, dph2, dv1, dv2, da1, dr1);
     }
 
+    /** The flows of the branches are kept in an array of the branch vector, by branch number. */
+    @Override
+    public boolean evaluatesElementsFromArray() {
+        return true;
+    }
+
     @Override
     public double[] eval() {
         return branchVector.p2;

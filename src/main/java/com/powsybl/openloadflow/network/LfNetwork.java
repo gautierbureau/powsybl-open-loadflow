@@ -115,6 +115,9 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
 
     private final List<LfNetworkListener> listeners = new ArrayList<>();
 
+    /** Incremented each time a branch flow evaluable is replaced: what caches them compares it. */
+    private int branchEvaluableVersion;
+
     private Validity validity = Validity.VALID;
 
     private final GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory;
@@ -1204,6 +1207,17 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
 
     public void removeListener(LfNetworkListener listener) {
         listeners.remove(listener);
+    }
+
+    /**
+     * To be called when a branch flow evaluable (P, Q or I) is replaced, so that users caching them can be updated.
+     */
+    public void onBranchEvaluableChange() {
+        branchEvaluableVersion++;
+    }
+
+    public int getBranchEvaluableVersion() {
+        return branchEvaluableVersion;
     }
 
     public List<LfNetworkListener> getListeners() {
