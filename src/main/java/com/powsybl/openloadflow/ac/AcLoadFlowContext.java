@@ -34,6 +34,18 @@ public class AcLoadFlowContext extends AbstractLoadFlowContext<AcVariableType, A
         super(network, parameters);
     }
 
+    /**
+     * The next factorisation of the Jacobian chooses its pivots, when it is solved on a fixed matrix
+     * ({@link AcFixedJacobianMatrix#forgetPivots()}); the matrix of the index is factorised again when its equations
+     * change. Nothing is done when the Jacobian is not created yet: its first factorisation chooses them anyway, and
+     * creating it here would create it earlier than the load flow does.
+     */
+    public void forgetPivots() {
+        if (jacobianMatrix instanceof AcFixedJacobianMatrix fixedJacobianMatrix) {
+            fixedJacobianMatrix.forgetPivots();
+        }
+    }
+
     @Override
     public JacobianMatrix<AcVariableType, AcEquationType> getJacobianMatrix() {
         if (jacobianMatrix == null) {
