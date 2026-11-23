@@ -254,6 +254,11 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         return pivotingCount;
     }
 
+    /** How many zeros the diagonal holds in the current state: see {@link FixedEquationSystemIndex#getZeroDiagonalCount()}. */
+    public int getZeroDiagonalCount() {
+        return fixed.getZeroDiagonalCount();
+    }
+
     private void closeLu() {
         if (lu != null) {
             lu.close();
