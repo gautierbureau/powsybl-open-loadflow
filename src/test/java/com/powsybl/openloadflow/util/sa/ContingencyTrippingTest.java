@@ -52,10 +52,104 @@ class ContingencyTrippingTest {
         Set<Switch> switchesToOpen = new HashSet<>();
         Set<Terminal> terminalsToDisconnect = new HashSet<>();
 
+        // B3 and B4 each isolate a single line: no need to retain them, lines are just disconnected at that side
         ContingencyTripping.createBusbarSectionMinimalTripping(network, network.getBusbarSection("BBS3"))
                 .traverse(switchesToOpen, terminalsToDisconnect);
-        checkSwitches(switchesToOpen, "B3", "B4");
-        checkTerminalIds(terminalsToDisconnect, "LD", "BBS3");
+        checkSwitches(switchesToOpen);
+        checkTerminalIds(terminalsToDisconnect, "LD", "BBS3", "L1", "L2");
+
+        // D leads to the remaining part of the bus (BBS2, G, L2): no need to retain it either
+        switchesToOpen.clear();
+        terminalsToDisconnect.clear();
+        ContingencyTripping.createBusbarSectionMinimalTripping(network, network.getBusbarSection("BBS1"))
+                .traverse(switchesToOpen, terminalsToDisconnect);
+        checkSwitches(switchesToOpen);
+        checkTerminalIds(terminalsToDisconnect, "BBS1", "L1");
+
+        switchesToOpen.clear();
+        terminalsToDisconnect.clear();
+        ContingencyTripping.createBusbarSectionMinimalTripping(network, network.getBusbarSection("BBS2"))
+                .traverse(switchesToOpen, terminalsToDisconnect);
+        checkSwitches(switchesToOpen);
+        checkTerminalIds(terminalsToDisconnect, "BBS2", "G", "L2");
+    }
+
+    /**
+     * <pre>
+     *     LA            LD            LC
+     *     |             |             |
+     *    [DA]          [DD]          [DC]
+     *     |             |             |
+     * BBS_A ---[C1]--- BBS_B ---[C2]--- BBS_C
+     * </pre>
+     */
+    private static Network createThreeBusbarSectionsNetwork() {
+        Network network = Network.create("test", "test");
+        VoltageLevel vl1 = network.newVoltageLevel().setId("VL1").setNominalV(400).setTopologyKind(TopologyKind.NODE_BREAKER).add();
+        vl1.getNodeBreakerView().newBusbarSection().setId("BBS_A").setNode(0).add();
+        vl1.getNodeBreakerView().newBusbarSection().setId("BBS_B").setNode(1).add();
+        vl1.getNodeBreakerView().newBusbarSection().setId("BBS_C").setNode(2).add();
+        vl1.getNodeBreakerView().newBreaker().setId("C1").setNode1(0).setNode2(1).add();
+        vl1.getNodeBreakerView().newBreaker().setId("C2").setNode1(1).setNode2(2).add();
+        vl1.getNodeBreakerView().newDisconnector().setId("DA").setNode1(0).setNode2(3).add();
+        vl1.getNodeBreakerView().newDisconnector().setId("DD").setNode1(1).setNode2(4).add();
+        vl1.getNodeBreakerView().newDisconnector().setId("DC").setNode1(2).setNode2(5).add();
+        vl1.newLoad().setId("LD").setNode(4).setP0(10).setQ0(1).add();
+        VoltageLevel vl2 = network.newVoltageLevel().setId("VL2").setNominalV(400).setTopologyKind(TopologyKind.BUS_BREAKER).add();
+        vl2.getBusBreakerView().newBus().setId("B2").add();
+        vl2.newGenerator().setId("G2").setBus("B2").setTargetP(10).setTargetV(400).setVoltageRegulatorOn(true).setMinP(0).setMaxP(100).add();
+        network.newLine().setId("LA").setVoltageLevel1("VL1").setNode1(3).setVoltageLevel2("VL2").setBus2("B2").setR(1).setX(10).add();
+        network.newLine().setId("LC").setVoltageLevel1("VL1").setNode1(5).setVoltageLevel2("VL2").setBus2("B2").setR(1).setX(10).add();
+        return network;
+    }
+
+    @Test
+    void testBusbarSectionTrippingWithBusSplit() {
+        Network network = createThreeBusbarSectionsNetwork();
+
+        Set<Switch> switchesToOpen = new HashSet<>();
+        Set<Terminal> terminalsToDisconnect = new HashSet<>();
+
+        // losing BBS_B splits the bus in two parts still alive (BBS_A + LA, BBS_C + LC): couplers have to be retained,
+        // whereas the load behind DD is just lost
+        ContingencyTripping.createBusbarSectionMinimalTripping(network, network.getBusbarSection("BBS_B"))
+                .traverse(switchesToOpen, terminalsToDisconnect);
+        checkSwitches(switchesToOpen, "C1", "C2");
+        checkTerminalIds(terminalsToDisconnect, "BBS_B", "LD");
+
+        // losing BBS_A: only one part remains alive, LA is just disconnected at that side
+        switchesToOpen.clear();
+        terminalsToDisconnect.clear();
+        ContingencyTripping.createBusbarSectionMinimalTripping(network, network.getBusbarSection("BBS_A"))
+                .traverse(switchesToOpen, terminalsToDisconnect);
+        checkSwitches(switchesToOpen);
+        checkTerminalIds(terminalsToDisconnect, "BBS_A", "LA");
+    }
+
+    @Test
+    void testBusbarSectionTrippingWithFedBay() {
+        Network network = createThreeBusbarSectionsNetwork();
+        // move the load next to line LA: the bay behind DA is still fed by LA once BBS_A is lost
+        network.getLoad("LD").remove();
+        network.getVoltageLevel("VL1").getNodeBreakerView().newInternalConnection().setNode1(3).setNode2(6).add();
+        network.getVoltageLevel("VL1").newLoad().setId("LD").setNode(6).setP0(10).setQ0(1).add();
+
+        Set<Switch> switchesToOpen = new HashSet<>();
+        Set<Terminal> terminalsToDisconnect = new HashSet<>();
+        ContingencyTripping.createBusbarSectionMinimalTripping(network, network.getBusbarSection("BBS_A"))
+                .traverse(switchesToOpen, terminalsToDisconnect);
+        // two parts remain alive: the bay (LA + LD), still fed by LA, and the rest of the busbars (BBS_B, BBS_C, LC):
+        // they have to become two separate buses, so both switches are retained and nothing is disconnected by terminal
+        checkSwitches(switchesToOpen, "DA", "C1");
+        checkTerminalIds(terminalsToDisconnect, "BBS_A");
+
+        // if BBS_C is also split off, two alive parts remain: DA and C2 are retained (DD leads to LD only: lost)
+        switchesToOpen.clear();
+        terminalsToDisconnect.clear();
+        ContingencyTripping.createBusbarSectionMinimalTripping(network, network.getBusbarSection("BBS_B"))
+                .traverse(switchesToOpen, terminalsToDisconnect);
+        checkSwitches(switchesToOpen, "C1", "C2");
+        checkTerminalIds(terminalsToDisconnect, "BBS_B");
     }
 
     @Test
