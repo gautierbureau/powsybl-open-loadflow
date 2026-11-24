@@ -164,9 +164,9 @@ public class LfBusImpl extends AbstractLfBus {
     public void updateState(LfNetworkStateUpdateParameters parameters) {
         var bus = getBus();
         if (!parameters.isDc()) {
-            bus.setV(Math.max(v, 0.0));
+            bus.setV(Math.max(getVoltageKv(), 0.0));
         }
-        bus.setAngle(Math.toDegrees(angle));
+        bus.setAngle(Math.toDegrees(getAngle()));
 
         // update slack bus
         if (slack && parameters.isWriteSlackBus()) {
@@ -187,6 +187,8 @@ public class LfBusImpl extends AbstractLfBus {
     @Override
     public List<BusResult> createBusResults() {
         var bus = getBus();
+        double v = getVoltageKv();
+        double angle = getAngle();
         if (breakers) {
             if (bbsIds.isEmpty()) {
                 return List.of(new BusResult(getVoltageLevelId(), bus.getId(), v, Math.toDegrees(angle)));
