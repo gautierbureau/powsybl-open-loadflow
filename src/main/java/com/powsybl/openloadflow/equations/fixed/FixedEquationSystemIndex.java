@@ -580,8 +580,21 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
      * hand side of each term, as OLF does, and an element of an equation array its value.
      */
     private double addObjectTermValues(int equation, double sum, boolean lhs) {
-        FixedStructure.ObjectTerms<V, E> compiled = structure.getObjectTerms(equation);
         double value = sum;
+        if (linearTerms.linearOnly[equation]) {
+            // the same sum as below, without reading the kinds of the terms from the objects
+            for (int linear = linearTerms.start[equation]; linear < linearTerms.start[equation + 1]; linear++) {
+                if (linearTerms.active[linear]) {
+                    double coefficient = linearTerms.coefficient[linear];
+                    if (Double.isNaN(coefficient)) {
+                        coefficient = linearTerms.terms.get(linear).der(linearTerms.variables.get(linear));
+                    }
+                    value += coefficient * state[rowOfPosition[linearTerms.position[linear]]];
+                }
+            }
+            return value;
+        }
+        FixedStructure.ObjectTerms<V, E> compiled = structure.getObjectTerms(equation);
         if (compiled == null || structure.isMixed(equation)) {
             for (SingleEquationTerm<V, E> term : structure.getSingleTerms(equation)) {
                 if (term.isActive()) {

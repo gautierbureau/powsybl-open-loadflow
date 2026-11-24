@@ -120,10 +120,16 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         final boolean[] active;
         final List<SingleEquationTerm<V, E>> terms;
         final List<Variable<V>> variables;
+        /**
+         * For each equation: true when all the terms it holds as objects are linear, which are then its terms of this
+         * table in the order of their creation. Most single equations: those of the zero impedance branches.
+         */
+        final boolean[] linearOnly;
 
         LinearTerms(int[] start, TIntArrayList position, TDoubleArrayList coefficient, TIntArrayList matrixElementIndex,
-                    List<SingleEquationTerm<V, E>> terms, List<Variable<V>> variables) {
+                    List<SingleEquationTerm<V, E>> terms, List<Variable<V>> variables, boolean[] linearOnly) {
             this.start = start;
+            this.linearOnly = linearOnly;
             this.position = position.toArray();
             this.coefficient = coefficient.toArray();
             this.matrixElementIndex = matrixElementIndex.toArray();
@@ -679,10 +685,15 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             TIntArrayList matrixElementIndex = new TIntArrayList();
             List<SingleEquationTerm<V, E>> terms = new ArrayList<>();
             List<Variable<V>> termVariables = new ArrayList<>();
+            boolean[] linearOnly = new boolean[equationCount];
             for (int equation = 0; equation < equationCount; equation++) {
                 start[equation] = terms.size();
                 ObjectTerms<V, E> compiled = objectTerms.get(equation);
                 if (compiled != null && !mixed[equation]) {
+                    linearOnly[equation] = true;
+                    for (byte kind : compiled.kind) {
+                        linearOnly[equation] &= kind == LINEAR;
+                    }
                     for (int t = 0; t < compiled.row.length; t++) {
                         if (compiled.kind[t] == LINEAR) {
                             position.add(compiled.row[t][0]);
@@ -695,7 +706,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
                 }
             }
             start[equationCount] = terms.size();
-            linearTerms = new LinearTerms<>(start, position, coefficient, matrixElementIndex, terms, termVariables);
+            linearTerms = new LinearTerms<>(start, position, coefficient, matrixElementIndex, terms, termVariables, linearOnly);
         }
         return linearTerms;
     }
