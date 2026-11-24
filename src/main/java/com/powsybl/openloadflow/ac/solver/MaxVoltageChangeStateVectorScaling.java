@@ -50,24 +50,19 @@ public class MaxVoltageChangeStateVectorScaling implements StateVectorScaling {
         int vCutCount = 0;
         int phiCutCount = 0;
         double stepSize = 1.0;
-        for (var variable : equationSystem.getIndex().getSortedVariablesToFind()) {
-            int row = variable.getRow();
+        // the rows of the voltages, then of the angles: the step is the smallest of all, whatever their order
+        for (int row : equationSystem.getIndex().getRowsOfType(AcVariableType.BUS_V)) {
             double absValueChange = Math.abs(dx[row]);
-            switch (variable.getType()) {
-                case BUS_V:
-                    if (absValueChange > maxDv) {
-                        stepSize = Math.min(stepSize, maxDv / absValueChange);
-                        vCutCount++;
-                    }
-                    break;
-                case BUS_PHI:
-                    if (absValueChange > maxDphi) {
-                        stepSize = Math.min(stepSize, maxDphi / absValueChange);
-                        phiCutCount++;
-                    }
-                    break;
-                default:
-                    break;
+            if (absValueChange > maxDv) {
+                stepSize = Math.min(stepSize, maxDv / absValueChange);
+                vCutCount++;
+            }
+        }
+        for (int row : equationSystem.getIndex().getRowsOfType(AcVariableType.BUS_PHI)) {
+            double absValueChange = Math.abs(dx[row]);
+            if (absValueChange > maxDphi) {
+                stepSize = Math.min(stepSize, maxDphi / absValueChange);
+                phiCutCount++;
             }
         }
         if (vCutCount > 0 || phiCutCount > 0) {

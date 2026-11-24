@@ -38,6 +38,13 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
 
     private List<Variable<V>> sortedVariablesToFind = Collections.emptyList();
 
+    /*
+     * The rows and the element numbers of the variables to find of each type (by ordinal), in the order of
+     * sortedVariablesToFind: computed when first asked for after the variables are sorted again.
+     */
+    private int[][] rowsByType;
+    private int[][] elementNumsByType;
+
     private int columnCount = 0;
 
     private int columnCountFromArrayEquations = 0;
@@ -143,6 +150,8 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
     }
 
     private void updateVariablesToFind(Predicate<V> isSeparatedInFirstPart) {
+        rowsByType = null;
+        elementNumsByType = null;
         sortedVariablesToFind = sortedMapVariablesToFindRefCount.keySet().stream().sorted().toList();
         rowCount = 0;
         if (isSeparatedInFirstPart == null) {
@@ -413,6 +422,53 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
     public List<Variable<V>> getSortedVariablesToFind() {
         update();
         return sortedVariablesToFind;
+    }
+
+    /**
+     * The rows of the variables to find of a type, in the order of {@link #getSortedVariablesToFind()}: the state of
+     * the variables of a type is read without going through each variable.
+     */
+    public int[] getRowsOfType(V type) {
+        updateVariablesByType();
+        return type.ordinal() < rowsByType.length ? rowsByType[type.ordinal()] : NO_ROW;
+    }
+
+    /** The element numbers of the variables of {@link #getRowsOfType(Enum)}, in the same order. */
+    public int[] getElementNumsOfType(V type) {
+        updateVariablesByType();
+        return type.ordinal() < elementNumsByType.length ? elementNumsByType[type.ordinal()] : NO_ROW;
+    }
+
+    private static final int[] NO_ROW = new int[0];
+
+    private void updateVariablesByType() {
+        update();
+        if (rowsByType != null) {
+            return;
+        }
+        int typeCount = 0;
+        for (Variable<V> variable : sortedVariablesToFind) {
+            typeCount = Math.max(typeCount, variable.getType().ordinal() + 1);
+        }
+        int[] counts = new int[typeCount];
+        for (Variable<V> variable : sortedVariablesToFind) {
+            counts[variable.getType().ordinal()]++;
+        }
+        int[][] rows = new int[typeCount][];
+        int[][] elementNums = new int[typeCount][];
+        for (int t = 0; t < typeCount; t++) {
+            rows[t] = new int[counts[t]];
+            elementNums[t] = new int[counts[t]];
+        }
+        int[] next = new int[typeCount];
+        for (Variable<V> variable : sortedVariablesToFind) {
+            int t = variable.getType().ordinal();
+            rows[t][next[t]] = variable.getRow();
+            elementNums[t][next[t]] = variable.getElementNum();
+            next[t]++;
+        }
+        rowsByType = rows;
+        elementNumsByType = elementNums;
     }
 
     public int getColumnCount() {
