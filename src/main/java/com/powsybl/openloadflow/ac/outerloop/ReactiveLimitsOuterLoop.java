@@ -21,7 +21,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
-import java.util.function.Predicate;
 
 /**
  * @author Geoffroy Jamgotchian {@literal <geoffroy.jamgotchian at rte-france.com>}
@@ -380,11 +379,26 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
     }
 
     public static List<LfBus> getReactivePowerControllerElements(LfNetwork network) {
-        return network.getBuses().stream()
-                .filter(LfBus::hasGeneratorReactivePowerControl)
-                .flatMap(bus -> bus.getGeneratorReactivePowerControl().orElseThrow().getControllerBuses().stream())
-                .filter(Predicate.not(LfBus::isDisabled))
-                .toList();
+        return getReactivePowerControllerElements(network, false);
+    }
+
+    /**
+     * The controller buses of the remote reactive power controls, in the order of the controlled buses, without the
+     * disabled ones; only those whose control is enabled when asked. A loop on the buses: it runs at each check, and
+     * most buses control nothing.
+     */
+    private static List<LfBus> getReactivePowerControllerElements(LfNetwork network, boolean enabledOnly) {
+        List<LfBus> controllerBuses = new ArrayList<>();
+        for (LfBus bus : network.getBuses()) {
+            if (bus.hasGeneratorReactivePowerControl()) {
+                for (LfBus controllerBus : bus.getGeneratorReactivePowerControl().orElseThrow().getControllerBuses()) {
+                    if (!controllerBus.isDisabled() && (!enabledOnly || controllerBus.isGeneratorReactivePowerControlEnabled())) {
+                        controllerBuses.add(controllerBus);
+                    }
+                }
+            }
+        }
+        return controllerBuses;
     }
 
     /**
@@ -429,9 +443,7 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
         // a bus that has a remote reactive generator power control, if its reactive limits are not respected,
         // will become a classical PQ bus at reactive limits.
         ReactiveLimitsVector reactivePowerControllers = contextData.reactivePowerControllers;
-        List<LfBus> reactivePowerControllerBuses = getReactivePowerControllerElements(network).stream()
-                .filter(LfBus::isGeneratorReactivePowerControlEnabled)
-                .toList();
+        List<LfBus> reactivePowerControllerBuses = getReactivePowerControllerElements(network, true);
         reactivePowerControllers.reset(reactivePowerControllerBuses.size());
         for (int i = 0; i < reactivePowerControllers.count; i++) {
             LfBus bus = reactivePowerControllerBuses.get(i);
