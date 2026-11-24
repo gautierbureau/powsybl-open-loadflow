@@ -144,9 +144,13 @@ public final class ActivePowerDistribution {
     }
 
     public static Collection<LfBus> filterParticipatingBuses(Collection<LfBus> buses) {
-        return buses.stream()
-                .filter(bus -> bus.isParticipating() && !bus.isDisabled() && !bus.isFictitious())
-                .toList();
+        List<LfBus> participatingBuses = new ArrayList<>();
+        for (LfBus bus : buses) {
+            if (bus.isParticipating() && !bus.isDisabled() && !bus.isFictitious()) {
+                participatingBuses.add(bus);
+            }
+        }
+        return Collections.unmodifiableList(participatingBuses);
     }
 
     public record ResultWithFailureBehaviorHandling(boolean failed, String failedMessage, int iteration, double remainingMismatch, boolean movedBuses, double failedDistributedActivePower) { }
