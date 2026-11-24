@@ -36,7 +36,7 @@ public class EquationVector<V extends Enum<V> & Quantity, E extends Enum<E> & Qu
 
     @Override
     protected double[] createArray() {
-        double[] array = new double[equationSystem.getIndex().getColumnCount()];
+        double[] array = reuseOrCreateArray(equationSystem.getIndex().getColumnCount());
         updateArray(array);
         return array;
     }
