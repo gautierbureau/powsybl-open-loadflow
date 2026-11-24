@@ -139,6 +139,23 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
                 active[i] = terms.get(i).isActive();
             }
         }
+
+        /** The same for the terms of one equation only: one whose activity, or the activity of a term, changed. */
+        void updateActivity(int equation) {
+            for (int i = start[equation]; i < start[equation + 1]; i++) {
+                active[i] = terms.get(i).isActive();
+            }
+        }
+
+        /** For an assertion: the activity kept is the one of the terms now. */
+        boolean isActivityCurrent() {
+            for (int i = 0; i < active.length; i++) {
+                if (active[i] != terms.get(i).isActive()) {
+                    return false;
+                }
+            }
+            return true;
+        }
     }
 
     /**
