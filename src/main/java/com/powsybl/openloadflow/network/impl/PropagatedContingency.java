@@ -92,10 +92,13 @@ public class PropagatedContingency {
     public static List<PropagatedContingency> createList(Network network, List<Contingency> contingencies, LfTopoConfig topoConfig,
                                                          PropagatedContingencyCreationParameters creationParameters, int startIndex) {
         List<PropagatedContingency> propagatedContingencies = new ArrayList<>();
+        // the switches the network keeps before any contingency, those the actions operate
+        Set<Switch> operatedSwitches = new HashSet<>(topoConfig.getSwitchesToOpen());
+        operatedSwitches.addAll(topoConfig.getSwitchesToClose());
         for (int index = 0; index < contingencies.size(); index++) {
             Contingency contingency = contingencies.get(index);
             PropagatedContingency propagatedContingency =
-                    PropagatedContingency.create(network, contingency, index + startIndex, topoConfig, creationParameters);
+                    PropagatedContingency.create(network, contingency, index + startIndex, topoConfig, creationParameters, operatedSwitches);
             propagatedContingencies.add(propagatedContingency);
             topoConfig.getSwitchesToOpen().addAll(propagatedContingency.switchesToOpen);
             topoConfig.getBusIdsToLose().addAll(propagatedContingency.busIdsToLose);
@@ -104,7 +107,7 @@ public class PropagatedContingency {
     }
 
     private static PropagatedContingency create(Network network, Contingency contingency, int index, LfTopoConfig topoConfig,
-                                                PropagatedContingencyCreationParameters creationParameters) {
+                                                PropagatedContingencyCreationParameters creationParameters, Set<Switch> operatedSwitches) {
         Set<Switch> switchesToOpen = new HashSet<>();
         Set<Terminal> terminalsToDisconnect = new HashSet<>();
         Set<String> busIdsToLose = new HashSet<>();
@@ -163,7 +166,7 @@ public class PropagatedContingency {
             }
         }
         if (creationParameters.isKeepOnlyNecessarySwitches()) {
-            keepOnlyNecessarySwitches(switchesToOpen, terminalsToDisconnect);
+            keepOnlyNecessarySwitches(switchesToOpen, terminalsToDisconnect, operatedSwitches);
         }
         PropagatedContingency propagatedContingency = new PropagatedContingency(contingency, index, switchesToOpen, terminalsToDisconnect, busIdsToLose);
         propagatedContingency.complete(topoConfig, creationParameters);
@@ -200,8 +203,18 @@ public class PropagatedContingency {
      * or more separates them (a lost busbar section between two others), and keeps its switches; the switches of any
      * other group are dropped, and the terminals of its parts disconnected. Voltage levels in bus/breaker topology keep
      * their switches.
+     * <p>A switch the actions operate does not join parts, as a strategy may open it: a dead part may separate two parts
+     * that it joins.
+     * A group also keeps its switches when dropping them would not give the same network as opening them:
+     * <ul>
+     *     <li>when a switch the actions operate touches one of its parts: a strategy may close that switch and bring the
+     *     part back, with the terminals the contingency did not disconnect;</li>
+     *     <li>when its parts hold no terminal to disconnect (a busbar section lost on its own): the contingency would then
+     *     lose nothing, and have no result, where opening its switches loses the bus of the busbar section.</li>
+     * </ul>
      */
-    private static void keepOnlyNecessarySwitches(Set<Switch> switchesToOpen, Set<Terminal> terminalsToDisconnect) {
+    private static void keepOnlyNecessarySwitches(Set<Switch> switchesToOpen, Set<Terminal> terminalsToDisconnect,
+                                                  Set<Switch> operatedSwitches) {
         if (switchesToOpen.isEmpty()) {
             return;
         }
@@ -222,8 +235,9 @@ public class PropagatedContingency {
             for (int node = 0; node < nodeCount; node++) {
                 parent[node] = node;
             }
+            // a switch the actions operate may be opened by a strategy: the parts do not count on it
             for (Switch sw : view.getSwitches()) {
-                if (!sw.isOpen() && !openedIds.contains(sw.getId())) {
+                if (!sw.isOpen() && !openedIds.contains(sw.getId()) && !operatedSwitches.contains(sw)) {
                     parent[find(parent, view.getNode1(sw.getId()))] = find(parent, view.getNode2(sw.getId()));
                 }
             }
@@ -265,6 +279,23 @@ public class PropagatedContingency {
                     aliveNeighbours.computeIfAbsent(find(group, dead), k -> new HashSet<>()).add(alive[part1] ? part1 : part2);
                 }
             }
+            // the groups that keep their switches although they separate nothing
+            Set<Integer> keptGroups = new HashSet<>();
+            for (Switch sw : view.getSwitches()) {
+                if (operatedSwitches.contains(sw)) {
+                    for (int part : new int[] {find(parent, view.getNode1(sw.getId())), find(parent, view.getNode2(sw.getId()))}) {
+                        if (!alive[part]) {
+                            keptGroups.add(find(group, part));
+                        }
+                    }
+                }
+            }
+            Set<Integer> groupsWithTerminals = new HashSet<>();
+            for (int part : terminalsByPart.keySet()) {
+                if (!alive[part]) {
+                    groupsWithTerminals.add(find(group, part));
+                }
+            }
             Set<Integer> disconnectedParts = new HashSet<>();
             for (Switch sw : e.getValue()) {
                 int part1 = find(parent, view.getNode1(sw.getId()));
@@ -273,7 +304,8 @@ public class PropagatedContingency {
                     continue;
                 }
                 int deadGroup = find(group, alive[part1] ? part2 : part1);
-                if (aliveNeighbours.getOrDefault(deadGroup, Set.of()).size() >= 2) {
+                if (aliveNeighbours.getOrDefault(deadGroup, Set.of()).size() >= 2
+                        || keptGroups.contains(deadGroup) || !groupsWithTerminals.contains(deadGroup)) {
                     continue;
                 }
                 switchesToOpen.remove(sw);
