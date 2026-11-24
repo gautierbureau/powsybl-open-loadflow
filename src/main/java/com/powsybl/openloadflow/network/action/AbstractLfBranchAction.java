@@ -81,13 +81,21 @@ public abstract class AbstractLfBranchAction<A extends Action> extends AbstractL
         return false;
     }
 
+    /**
+     * A branch open at one side follows the bus of its connected side, not the bus of its open side.
+     */
+    private static boolean isOnlyConnectedTo(LfBranch branch, LfBus bus) {
+        return branch.isConnectedSide1() && !branch.isConnectedSide2() && branch.getBus1() == bus
+                || branch.isConnectedSide2() && !branch.isConnectedSide1() && branch.getBus2() == bus;
+    }
+
     public static NetworkActivations getNetworkActivations(GraphConnectivity<LfBus, LfBranch> connectivity) {
         // disable buses and branches that won't be part of the main connected component
         Set<LfBus> removedBuses = connectivity.getVerticesRemovedFromMainComponent();
         Set<LfBranch> removedBranches = new HashSet<>(connectivity.getEdgesRemovedFromMainComponent());
         // we should manage branches open at one side.
         for (LfBus bus : removedBuses) {
-            bus.getBranches().stream().filter(b -> !b.isConnectedAtBothSides()).forEach(removedBranches::add);
+            bus.getBranches().stream().filter(b -> isOnlyConnectedTo(b, bus)).forEach(removedBranches::add);
         }
         DisabledNetwork disabledNetwork = new DisabledNetwork(removedBuses, removedBranches);
 
@@ -96,7 +104,7 @@ public abstract class AbstractLfBranchAction<A extends Action> extends AbstractL
         Set<LfBranch> addedBranches = new HashSet<>(connectivity.getEdgesAddedToMainComponent());
         // we should manage branches open at one side.
         for (LfBus bus : addedBuses) {
-            bus.getBranches().stream().filter(b -> !b.isConnectedAtBothSides()).forEach(addedBranches::add);
+            bus.getBranches().stream().filter(b -> isOnlyConnectedTo(b, bus)).forEach(addedBranches::add);
         }
         EnabledNetwork enabledNetwork = new EnabledNetwork(addedBuses, addedBranches);
 

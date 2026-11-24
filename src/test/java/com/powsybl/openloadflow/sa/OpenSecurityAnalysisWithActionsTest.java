@@ -904,6 +904,25 @@ class OpenSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnalysisTe
         assertEquals(-2.990, getOperatorStrategyResult(result, "strategy").getNetworkResult().getBranchResult("l45").getP1(), LoadFlowAssert.DELTA_POWER);
     }
 
+    @Test
+    void testBranchOpenAtOneSideFollowsItsConnectedSide() {
+        // the contingency disconnects lB at its VLN side; the strategy brings BBS back and cuts bB, the connected side of lB, off
+        Network network = NodeBreakerNetworkFactory.createWithBusbarReconnectedAndBusCutOff();
+        List<Contingency> contingencies = List.of(new Contingency("BBS", new BusbarSectionContingency("BBS")));
+        List<Action> actions = List.of(new SwitchAction("closeBrA", "brA", false), new SwitchAction("openSB", "sB", true));
+        List<OperatorStrategy> operatorStrategies = List.of(new OperatorStrategy("strategy", ContingencyContext.specificContingency("BBS"),
+                new TrueCondition(), List.of("closeBrA", "openSB")));
+        SecurityAnalysisParameters securityAnalysisParameters = new SecurityAnalysisParameters();
+        securityAnalysisParameters.getLoadFlowParameters().setDistributedSlack(false);
+        SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, createAllBranchesMonitors(network), securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+        OperatorStrategyResult operatorStrategyResult = getOperatorStrategyResult(result, "strategy");
+        assertEquals(PostContingencyComputationStatus.CONVERGED, operatorStrategyResult.getStatus());
+        // BBS feeds its load again through lA, and lB, left with no connected side, carries nothing
+        assertEquals(100, operatorStrategyResult.getNetworkResult().getBranchResult("lA").getP1(), LoadFlowAssert.DELTA_POWER);
+        assertNull(operatorStrategyResult.getNetworkResult().getBranchResult("lB"));
+    }
+
     @ParameterizedTest
     @ValueSource(ints = {1, 2})
     void testCheckValidityActions(int threadCount) {
