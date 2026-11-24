@@ -130,6 +130,11 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     private boolean firstPassValid;
     /** The equations whose activity, or the activity of a term, changed since the last pairing. */
     private final TIntHashSet changedEquations = new TIntHashSet();
+    /**
+     * The equations whose activity, or the activity of a term, changed, as the last pairing found them: the linear
+     * terms read again the activity of theirs only. Null when the activity of every term is read again.
+     */
+    private TIntArrayList activityChangedEquations;
     /** The position of each equation at the last pairing, to visit only the equations that moved. */
     private int[] lastPositionOfEquation;
     /** False when every equation has to be visited after the pairing: a new structure. */
@@ -220,8 +225,16 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
         // an activation always calls for a pairing: the activity of the terms evaluated from arrays is read again with it
         FixedStructure.LinearTerms<V, E> current = structure.getLinearTerms();
         if (pairedAgain && current == linearTerms) {
-            current.updateActivity();
+            if (activityChangedEquations == null) {
+                current.updateActivity();
+            } else {
+                for (int i = 0; i < activityChangedEquations.size(); i++) {
+                    current.updateActivity(activityChangedEquations.getQuick(i));
+                }
+            }
+            assert current.isActivityCurrent() : "The activity of a linear term changed without an event on its equation";
         }
+        activityChangedEquations = null;
         linearTerms = current;
         FixedStructure.ElementTerms<V, E> currentElementTerms = structure.getElementTerms();
         if (pairedAgain && currentElementTerms == elementTerms) {
@@ -285,11 +298,15 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
         }
         // what the equations of the chains depend on is kept from the last pairing, for those whose activity did not change
         if (firstPassValid) {
+            activityChangedEquations = new TIntArrayList(changedEquations.size());
             for (TIntIterator it = changedEquations.iterator(); it.hasNext();) {
-                structure.refreshDependedOnNow(it.next());
+                int equation = it.next();
+                structure.refreshDependedOnNow(equation);
+                activityChangedEquations.add(equation);
             }
         } else {
             structure.refreshDependedOnNow();
+            activityChangedEquations = null;
         }
         updateFirstPass(changedPositions);
         assert firstPassIsTheFullOne() : "The first pass kept from the last pairing is not the one computed again";
