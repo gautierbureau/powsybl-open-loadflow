@@ -467,4 +467,54 @@ public final class NodeBreakerNetworkFactory {
 
         return network;
     }
+
+    /**
+     * <pre>
+     *   bA (g) ---------- lAx ---------- bAx --- sB --- bB      (VLA, VLB: bus/breaker)
+     *    |                                               |
+     *    | lA                                            | lB
+     *    |                                               |
+     *   [o] brA (open)                                  [+] brB
+     *    |                                               |
+     *   [/] dA                                          [/] dB
+     *    |                                               |
+     *   ---------------------- BBS -----------------------   VLN: node/breaker
+     *                           |
+     *                          [/] dD
+     *                           |
+     *                          [+] brD
+     *                           |
+     *                           D
+     * </pre>
+     * Losing BBS disconnects lB at its VLN side; closing brA brings BBS back through lA, opening sB cuts bB off.
+     */
+    public static Network createWithBusbarReconnectedAndBusCutOff() {
+        Network network = Network.create("test", "test");
+        Substation s = network.newSubstation().setId("S").add();
+        VoltageLevel vla = s.newVoltageLevel().setId("VLA").setNominalV(400).setTopologyKind(TopologyKind.BUS_BREAKER).add();
+        vla.getBusBreakerView().newBus().setId("bA").add();
+        vla.newGenerator().setId("g").setBus("bA").setConnectableBus("bA").setMinP(0).setMaxP(1000).setTargetP(100)
+                .setLocalTargetV(400).newVoltageRegulation().withMode(RegulationMode.VOLTAGE).withRegulating(true).add()
+                .add();
+        VoltageLevel vlb = s.newVoltageLevel().setId("VLB").setNominalV(400).setTopologyKind(TopologyKind.BUS_BREAKER).add();
+        vlb.getBusBreakerView().newBus().setId("bAx").add();
+        vlb.getBusBreakerView().newBus().setId("bB").add();
+        vlb.getBusBreakerView().newSwitch().setId("sB").setBus1("bAx").setBus2("bB").setOpen(false).add();
+        VoltageLevel vln = s.newVoltageLevel().setId("VLN").setNominalV(400).setTopologyKind(TopologyKind.NODE_BREAKER).add();
+        vln.getNodeBreakerView().newBusbarSection().setId("BBS").setNode(0).add();
+        vln.getNodeBreakerView().newDisconnector().setId("dA").setNode1(0).setNode2(1).add();
+        vln.getNodeBreakerView().newBreaker().setId("brA").setNode1(1).setNode2(2).setOpen(true).add();
+        vln.getNodeBreakerView().newDisconnector().setId("dB").setNode1(0).setNode2(3).add();
+        vln.getNodeBreakerView().newBreaker().setId("brB").setNode1(3).setNode2(4).add();
+        vln.getNodeBreakerView().newDisconnector().setId("dD").setNode1(0).setNode2(5).add();
+        vln.getNodeBreakerView().newBreaker().setId("brD").setNode1(5).setNode2(6).add();
+        vln.newLoad().setId("D").setNode(6).setP0(100).setQ0(0).add();
+        network.newLine().setId("lAx").setBus1("bA").setConnectableBus1("bA").setVoltageLevel1("VLA")
+                .setBus2("bAx").setConnectableBus2("bAx").setVoltageLevel2("VLB").setR(0).setX(1).add();
+        network.newLine().setId("lA").setBus1("bA").setConnectableBus1("bA").setVoltageLevel1("VLA")
+                .setNode2(2).setVoltageLevel2("VLN").setR(0).setX(1).add();
+        network.newLine().setId("lB").setBus1("bB").setConnectableBus1("bB").setVoltageLevel1("VLB")
+                .setNode2(4).setVoltageLevel2("VLN").setR(0).setX(1).add();
+        return network;
+    }
 }
