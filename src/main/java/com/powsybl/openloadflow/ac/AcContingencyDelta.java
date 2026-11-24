@@ -223,10 +223,14 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
      */
     private static double[] targetsBySlot(FixedEquationSystem<AcVariableType, AcEquationType> fixed,
                                           FixedStructure<AcVariableType, AcEquationType> structure, double[] targetVector) {
-        double[] targets = new double[structure.getSlotCount()];
-        for (int slot = 0; slot < targets.length; slot++) {
-            int equation = fixed.getEquationOfSlot(slot);
-            targets[slot] = equation < 0 ? Double.NaN : targetVector[structure.getColumnInEquationSystem(equation)];
+        int slotCount = structure.getSlotCount();
+        double[] targets = new double[slotCount];
+        // the columns of the slots, read at once from the placement
+        int[] rows = new int[slotCount];
+        int[] columns = new int[slotCount];
+        fixed.getRowsAndColumnsOfSlots(rows, columns);
+        for (int slot = 0; slot < slotCount; slot++) {
+            targets[slot] = columns[slot] < 0 ? Double.NaN : targetVector[columns[slot]];
         }
         return targets;
     }
