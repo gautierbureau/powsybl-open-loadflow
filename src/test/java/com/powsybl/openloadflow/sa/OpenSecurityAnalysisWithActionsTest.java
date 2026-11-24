@@ -2410,4 +2410,22 @@ class OpenSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnalysisTe
         Mockito.verify(connectivityFactory, Mockito.atLeastOnce()).supportsIncremental();
         Mockito.verify(connectivityFactory, Mockito.never()).create();
     }
+
+    @Test
+    void testEvenShiloachIsNotUsedWhenDoingASecurityAnalysisWithActionsWithoutOperatorStrategy() {
+        // the network keeps the line an action connects, and starts disconnected from it with temporary changes that
+        // Even-Shiloach cannot nest with those of a contingency
+        EvenShiloachGraphDecrementalConnectivityFactory<LfBus, LfBranch> connectivityFactory = Mockito.spy(EvenShiloachGraphDecrementalConnectivityFactory.class);
+        securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), connectivityFactory);
+
+        Network network = FourBusNetworkFactory.create();
+        network.getLine("l13").disconnect();
+        List<Contingency> contingencies = List.of(new Contingency("l14", new BranchContingency("l14")));
+        List<Action> actions = List.of(new TerminalsConnectionAction("closeLine", "l13", false));
+
+        SecurityAnalysisResult result = runSecurityAnalysis(network, contingencies, List.of(), new SecurityAnalysisParameters(),
+                List.of(), actions, ReportNode.NO_OP);
+        assertSame(PostContingencyComputationStatus.CONVERGED, result.getPostContingencyResults().getFirst().getStatus());
+        Mockito.verify(connectivityFactory, Mockito.never()).create();
+    }
 }
