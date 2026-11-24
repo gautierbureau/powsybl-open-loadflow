@@ -283,6 +283,14 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             }
             rowOfSlot[slot] = row;
         }
+        // what the equations of the chains depend on is kept from the last placement, for those whose activity did not change
+        if (firstPassValid) {
+            for (TIntIterator it = changedEquations.iterator(); it.hasNext();) {
+                structure.refreshDependedOnNow(it.next());
+            }
+        } else {
+            structure.refreshDependedOnNow();
+        }
         updateFirstPass(changedSlots);
         assert firstPassIsTheFullOne() : "The first pass kept from the last placement is not the one computed again";
         System.arraycopy(firstPassEquationOfSlot, 0, equationOfSlot, 0, equationOfSlot.length);

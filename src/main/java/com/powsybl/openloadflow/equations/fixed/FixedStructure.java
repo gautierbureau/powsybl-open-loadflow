@@ -248,6 +248,14 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private final boolean[] fixesVariable;
     /** For each equation, the slots it may take besides its own, sorted: empty for most. */
     private final int[][] candidates;
+    /**
+     * For an equation that takes part in a chain of moves, whether an active term depends on the variable of its own
+     * slot, and of each of its candidates: what {@link #dependsOnNow} answers, kept from one placement to the next and
+     * refreshed for the equations whose terms changed activity. Only the placement asks, for these slots, thousands of
+     * times per placement around the zero impedance branches.
+     */
+    private final boolean[] ownSlotDependedOnNow;
+    private final boolean[][] candidatesDependedOnNow;
     /** For each slot, the equations that can hold it, built when first asked for. */
     private int[][] alternatives;
     /** For each equation, the terms it holds as objects: null when it has none. */
@@ -354,6 +362,13 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         });
         addCandidatesAgainstZeroDiagonals(candidateSlots, placement);
         candidateSlots.forEach((equation, slotList) -> candidates[equation] = sortedDistinct(slotList));
+        ownSlotDependedOnNow = new boolean[equationCount];
+        candidatesDependedOnNow = new boolean[equationCount][];
+        for (int equation = 0; equation < equationCount; equation++) {
+            if (movesInChain[equation]) {
+                candidatesDependedOnNow[equation] = new boolean[candidates[equation].length];
+            }
+        }
 
         for (int a = 0; a < arrays.size(); a++) {
             List<ArrayTerms<V, E>> termsOfArray = new ArrayList<>();
@@ -505,9 +520,38 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
      */
     boolean dependsOn(int equation, int slot) {
         if (movesInChain[equation]) {
-            return dependsOnNow(equation, slot);
+            boolean dependsNow;
+            if (slot == ownSlot[equation]) {
+                dependsNow = ownSlotDependedOnNow[equation];
+            } else {
+                int i = Arrays.binarySearch(candidates[equation], slot);
+                dependsNow = i >= 0 ? candidatesDependedOnNow[equation][i] : dependsOnNow(equation, slot);
+            }
+            assert dependsNow == dependsOnNow(equation, slot) : "What the equation depends on was not refreshed after a change of activity";
+            return dependsNow;
         }
         return slot == ownSlot[equation] ? dependsOnOwnSlot[equation] : Arrays.binarySearch(rows[equation], slot) >= 0;
+    }
+
+    /**
+     * Refreshes what an equation that takes part in a chain of moves depends on now, for its own slot and its
+     * candidates: after a change of the activity of the equation or of one of its terms.
+     */
+    void refreshDependedOnNow(int equation) {
+        if (movesInChain[equation]) {
+            ownSlotDependedOnNow[equation] = ownSlot[equation] >= 0 && dependsOnNow(equation, ownSlot[equation]);
+            int[] slotsOfCandidates = candidates[equation];
+            for (int i = 0; i < slotsOfCandidates.length; i++) {
+                candidatesDependedOnNow[equation][i] = dependsOnNow(equation, slotsOfCandidates[i]);
+            }
+        }
+    }
+
+    /** The same for every equation: for a new structure, or after a change the events do not locate. */
+    void refreshDependedOnNow() {
+        for (int equation = 0; equation < equationCount; equation++) {
+            refreshDependedOnNow(equation);
+        }
     }
 
     /** True when a term of the equation that is active now depends on the variable of the slot. */
