@@ -283,6 +283,14 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
             }
             rowOfPosition[position] = row;
         }
+        // what the equations of the chains depend on is kept from the last pairing, for those whose activity did not change
+        if (firstPassValid) {
+            for (TIntIterator it = changedEquations.iterator(); it.hasNext();) {
+                structure.refreshDependedOnNow(it.next());
+            }
+        } else {
+            structure.refreshDependedOnNow();
+        }
         updateFirstPass(changedPositions);
         assert firstPassIsTheFullOne() : "The first pass kept from the last pairing is not the one computed again";
         System.arraycopy(firstPassEquationOfPosition, 0, equationOfPosition, 0, equationOfPosition.length);
