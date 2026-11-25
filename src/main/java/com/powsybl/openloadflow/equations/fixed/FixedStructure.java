@@ -53,7 +53,11 @@ import java.util.function.Consumer;
  */
 public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> {
 
-    /** The terms of one term array, indexed by term number, and where each of their outputs goes. */
+    /**
+     * The terms of one term array, indexed by term number, and where each of their outputs goes, in flat arrays that a
+     * fill reads in sequence, in the order of the term numbers. The derivatives of a term are at the indices
+     * {@code start[term]} to {@code start[term + 1]} of the derivative tables.
+     */
     static final class ArrayTerms<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> {
 
         final EquationTermArray<V, E> termArray;
@@ -61,20 +65,33 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         final int[] equation;
         /** The element of each term: its index in {@code eval()} and in each array of {@code evalDer()}. */
         final int[] element;
-        /** For each derivative of each term: its array in {@code evalDer()}. */
-        final int[][] localIndex;
-        /** For each derivative of each term: the slot of its variable. */
-        final int[][] row;
-        /** For each derivative of each term: its value index in the own column of the equation, -1 when the pattern lacks it. */
-        final int[][] destination;
+        /** The first derivative of each term, and the end of the derivatives of the last one. */
+        final int[] start;
+        /** For each derivative: its array in {@code evalDer()}. */
+        final int[] localIndex;
+        /** For each derivative: the slot of its variable. */
+        final int[] row;
+        /** For each derivative: its value index in the own column of the equation, -1 when the pattern lacks it. */
+        final int[] destination;
 
-        ArrayTerms(EquationTermArray<V, E> termArray, int termCount) {
+        ArrayTerms(EquationTermArray<V, E> termArray, int termCount, int derivativeCount) {
             this.termArray = termArray;
             equation = new int[termCount];
             element = new int[termCount];
-            localIndex = new int[termCount][];
-            row = new int[termCount][];
-            destination = new int[termCount][];
+            start = new int[termCount + 1];
+            localIndex = new int[derivativeCount];
+            row = new int[derivativeCount];
+            destination = new int[derivativeCount];
+        }
+
+        /** True when a derivative of a term is on the variable of a slot. */
+        boolean hasRow(int term, int slot) {
+            for (int d = start[term]; d < start[term + 1]; d++) {
+                if (row[d] == slot) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 
@@ -594,7 +611,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
                 TIntArrayList termNums = terms.termArray.getTermNumsForEquationElementNum(element);
                 for (int i = 0; i < termNums.size(); i++) {
                     int term = termNums.getQuick(i);
-                    if (contains(terms.row[term], slot) && terms.termArray.isTermActive(term)) {
+                    if (terms.hasRow(term, slot) && terms.termArray.isTermActive(term)) {
                         return true;
                     }
                 }
@@ -756,10 +773,15 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private ArrayTerms<V, E> compile(EquationTermArray<V, E> termArray, int a) {
         int elementCount = arrays.get(a).getElementCount();
         int termCount = 0;
+        int derivativeCount = 0;
         for (int element = 0; element < elementCount; element++) {
-            termCount += termArray.getTermNumsForEquationElementNum(element).size();
+            TIntArrayList termNums = termArray.getTermNumsForEquationElementNum(element);
+            termCount += termNums.size();
+            for (int i = 0; i < termNums.size(); i++) {
+                derivativeCount += termArray.getTermDerivatives(termNums.getQuick(i)).size();
+            }
         }
-        ArrayTerms<V, E> terms = new ArrayTerms<>(termArray, termCount);
+        ArrayTerms<V, E> terms = new ArrayTerms<>(termArray, termCount, derivativeCount);
         for (int element = 0; element < elementCount; element++) {
             TIntArrayList termNums = termArray.getTermNumsForEquationElementNum(element);
             int equation = arrayFirstEquation[a] + element;
@@ -769,16 +791,20 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             }
             for (int i = 0; i < termNums.size(); i++) {
                 int term = termNums.getQuick(i);
-                List<Derivative<V>> derivatives = termArray.getTermDerivatives(term);
                 terms.equation[term] = equation;
                 terms.element[term] = termArray.getTermElementNum(term);
-                terms.localIndex[term] = new int[derivatives.size()];
-                terms.row[term] = new int[derivatives.size()];
-                terms.destination[term] = new int[derivatives.size()];
-                for (int k = 0; k < derivatives.size(); k++) {
-                    terms.localIndex[term][k] = derivatives.get(k).getLocalIndex();
-                    terms.row[term][k] = slots.get(derivatives.get(k).getVariable());
-                }
+                terms.start[term + 1] = termArray.getTermDerivatives(term).size();
+            }
+        }
+        for (int term = 0; term < termCount; term++) {
+            terms.start[term + 1] += terms.start[term];
+        }
+        for (int term = 0; term < termCount; term++) {
+            int d = terms.start[term];
+            for (Derivative<V> derivative : termArray.getTermDerivatives(term)) {
+                terms.localIndex[d] = derivative.getLocalIndex();
+                terms.row[d] = slots.get(derivative.getVariable());
+                d++;
             }
         }
         return terms;
@@ -876,8 +902,9 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     }
 
     private void setDestinations(ArrayTerms<V, E> terms, int term) {
-        for (int k = 0; k < terms.row[term].length; k++) {
-            terms.destination[term][k] = index(destinationSlot[terms.equation[term]], terms.row[term][k]);
+        int column = destinationSlot[terms.equation[term]];
+        for (int d = terms.start[term]; d < terms.start[term + 1]; d++) {
+            terms.destination[d] = index(column, terms.row[d]);
         }
     }
 

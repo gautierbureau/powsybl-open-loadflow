@@ -757,19 +757,18 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
         for (FixedStructure.ArrayTerms<V, E> terms : structure.getArrayTerms()) {
             double[] termValues = terms.termArray.eval();
             double[][] termDerivatives = terms.termArray.evalDer();
+            int[] start = terms.start;
+            int[] localIndex = terms.localIndex;
+            int[] destination = terms.destination;
             for (int term = 0; term < terms.equation.length; term++) {
                 if (terms.termArray.isTermActive(term)) {
                     int equation = terms.equation[term];
                     int element = terms.element[term];
-                    int own = structure.getOwnSlot(equation);
-                    int slot = slotOfEquation[equation];
-                    int[] localIndex = terms.localIndex[term];
-                    balance[own] += termValues[element];
-                    if (slot >= 0) {
+                    balance[structure.getOwnSlot(equation)] += termValues[element];
+                    if (slotOfEquation[equation] >= 0) {
                         // the destinations are for the slot the equation holds, its own or another
-                        int[] destination = terms.destination[term];
-                        for (int k = 0; k < destination.length; k++) {
-                            jacobianValues[destination[k]] += termDerivatives[localIndex[k]][element];
+                        for (int d = start[term]; d < start[term + 1]; d++) {
+                            jacobianValues[destination[d]] += termDerivatives[localIndex[d]][element];
                         }
                     }
                 }
