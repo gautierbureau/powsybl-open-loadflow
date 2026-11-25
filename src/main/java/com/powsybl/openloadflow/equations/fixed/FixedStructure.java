@@ -1087,11 +1087,14 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
 
     /**
      * The column of every equation in OLF's index, as {@link #getColumnInEquationSystem(int)} gives it: the elements of
-     * an equation array are consecutive equations, whose columns are copied from the array at once.
+     * an equation array are consecutive equations, whose columns are copied from the array at once. The columns of the
+     * single equations are read only with {@code singles}: they are left as they are otherwise.
      */
-    public void getColumnsInEquationSystem(int[] columns) {
-        for (int equation = 0; equation < singleEquations.size(); equation++) {
-            columns[equation] = bound[equation] ? singleEquations.get(equation).getColumn() : -1;
+    public void getColumnsInEquationSystem(int[] columns, boolean singles) {
+        if (singles) {
+            for (int equation = 0; equation < singleEquations.size(); equation++) {
+                columns[equation] = bound[equation] ? singleEquations.get(equation).getColumn() : -1;
+            }
         }
         for (int a = 0; a < arrays.size(); a++) {
             int first = arrayFirstEquation[a];
