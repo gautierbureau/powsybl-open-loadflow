@@ -168,6 +168,13 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     private boolean liveChanged;
     /** False when the columns of the single equations have to be read again from them. */
     private boolean singleColumnsValid;
+    /**
+     * For each slot, whether its variable is an orphan of OLF's index in ghost mode: it keeps its row, but no active
+     * term refers to it. It is not live for the placement, as a variable without row: no equation takes its slot.
+     */
+    private boolean[] orphanSlot;
+    /** The slots whose variable became an orphan or stopped being one since the last placement. */
+    private final TIntArrayList orphanChangedSlots = new TIntArrayList();
 
     private final EquationSystemIndexListener<V, E> indexListener = new EquationSystemIndexListener<>() {
 
@@ -200,6 +207,16 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
         public void onEquationIndexOrderChanged() {
             liveFromEvents = false;
             singleColumnsValid = false;
+        }
+
+        @Override
+        public void onVariableOrphanChange(Variable<V> variable, boolean orphan) {
+            int slot = structure != null ? structure.getSlot(variable) : -1;
+            if (slot >= 0 && orphanSlot[slot] != orphan) {
+                orphanSlot[slot] = orphan;
+                orphanChangedSlots.add(slot);
+                placementValid = false;
+            }
         }
 
         @Override
@@ -251,6 +268,11 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             equationOfSlot = new int[structure.getSlotCount()];
             rowOfSlot = new int[structure.getSlotCount()];
             live = new boolean[structure.getSlotCount()];
+            orphanSlot = new boolean[structure.getSlotCount()];
+            for (int slot = 0; slot < orphanSlot.length; slot++) {
+                orphanSlot[slot] = equationSystem.getIndex().isOrphan(structure.getVariable(slot));
+            }
+            orphanChangedSlots.resetQuick();
             liveFromEvents = false;
             singleColumnsValid = false;
             visited = new int[structure.getSlotCount()];
@@ -392,6 +414,8 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             liveFromEvents = true;
         }
         liveChanged = false;
+        changedSlots.addAll(orphanChangedSlots);
+        orphanChangedSlots.resetQuick();
         assert rowsAreCurrent() : "The rows counted from the live slots are not those of OLF's index";
         // what the equations of the chains depend on is kept from the last placement, for those whose activity did not change
         if (firstPassValid) {
@@ -612,7 +636,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     }
 
     private boolean isLive(int slot) {
-        return rowOfSlot[slot] >= 0;
+        return rowOfSlot[slot] >= 0 && !orphanSlot[slot];
     }
 
     private boolean isFree(int slot) {
@@ -677,6 +701,10 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
                     values[column] = addObjectTermValues(equation, 0, true);
                 }
             }
+        }
+        // the ghost equations of OLF's index keep their column, not being equations of the system: zero
+        for (int column : equationSystem.getIndex().getGhostColumns()) {
+            values[column] = 0;
         }
         return written;
     }
@@ -896,7 +924,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
 
     private boolean isInSystem(int[] slots) {
         for (int slot : slots) {
-            if (rowOfSlot[slot] < 0) {
+            if (!isLive(slot)) {
                 return false;
             }
         }
@@ -905,7 +933,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
 
     private boolean isInSystem(List<Variable<V>> variables) {
         for (int k = 0; k < variables.size(); k++) {
-            if (variables.get(k).getRow() < 0) {
+            if (variables.get(k).getRow() < 0 || equationSystem.getIndex().isOrphan(variables.get(k))) {
                 return false;
             }
         }

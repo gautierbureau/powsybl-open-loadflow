@@ -51,7 +51,9 @@ public class EquationVector<V extends Enum<V> & Quantity, E extends Enum<E> & Qu
 
         Arrays.fill(array, 0); // necessary?
         for (SingleEquation<V, E> equation : equationSystem.getIndex().getSortedSingleEquationsToSolve()) {
-            array[equation.getColumn()] = equation.evalLhs();
+            if (equation.isActive()) { // an inactive equation to solve is a ghost: zero
+                array[equation.getColumn()] = equation.evalLhs();
+            }
         }
         for (EquationArray<V, E> equationArray : equationSystem.getEquationArrays()) {
             equationArray.eval(array);

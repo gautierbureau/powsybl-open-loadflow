@@ -433,6 +433,11 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
     private void gather(double[] array) {
         for (SingleEquation<AcVariableType, AcEquationType> equation : equationSystem.getIndex().getSortedSingleEquationsToSolve()) {
             int column = equation.getColumn();
+            if (!equation.isActive()) {
+                // a ghost of the index: zero
+                array[column] = 0;
+                continue;
+            }
             array[column] = target(equation.getType(), equation.getElementNum());
             array[column] -= equation.rhs();
         }
@@ -451,6 +456,9 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
             for (int elementNum = 0; elementNum < elementCount; elementNum++) {
                 if (equationArray.isElementActive(elementNum)) {
                     array[columns[elementNum]] = target(type, elementNum, c, t);
+                } else if (columns[elementNum] >= 0) {
+                    // a ghost of the index: zero
+                    array[columns[elementNum]] = 0;
                 }
             }
         }

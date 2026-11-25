@@ -532,6 +532,11 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         return parameters;
     }
 
+    /** Called once the base case is solved, with its context, before the simulations of the contingencies. */
+    protected void beforeContingencySimulations(C context) {
+        // nothing by default
+    }
+
     protected void afterPreContingencySimulation(P parameters) {
     }
 
@@ -580,6 +585,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             // only run post-contingency simulations if pre-contingency simulation is ok
             if (preContingencyComputationOk) {
                 afterPreContingencySimulation(p);
+                beforeContingencySimulations(context);
 
                 // update network result
                 preContingencyNetworkResult.update();

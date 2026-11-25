@@ -22,6 +22,7 @@ import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
+import com.powsybl.openloadflow.ac.solver.NewtonRaphsonFactory;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
 import com.powsybl.openloadflow.lf.outerloop.config.AbstractAcOuterLoopConfig;
@@ -161,6 +162,23 @@ public class AcSecurityAnalysis extends AbstractSecurityAnalysis<AcVariableType,
     @Override
     protected AcLoadFlowParameters copyParameters(AcLoadFlowParameters parameters) {
         return new AcLoadFlowParameters(parameters);
+    }
+
+    /**
+     * The buses a contingency isolates keep their equations and variables in the index, as ghosts and orphans
+     * ({@link com.powsybl.openloadflow.equations.EquationSystemIndex#setGhostMode(boolean)}): the index, the vectors and
+     * the placement of the fixed structure keep their layout, instead of being built again for each contingency that
+     * isolates buses and for its restoration. The fixed structure solves the identity for the variables no equation
+     * holds: the system solved is the same.
+     */
+    @Override
+    protected void beforeContingencySimulations(AcLoadFlowContext context) {
+        AcLoadFlowParameters parameters = context.getParameters();
+        if (parameters.getJacobianStructure() == AcJacobianStructure.FIXED
+                && parameters.getSolverFactory() instanceof NewtonRaphsonFactory
+                && !parameters.isAsymmetrical()) {
+            context.getEquationSystem().getIndex().setGhostMode(true);
+        }
     }
 
     @Override

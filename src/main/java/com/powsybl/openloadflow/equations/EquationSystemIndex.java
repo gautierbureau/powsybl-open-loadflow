@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.equations;
 
 import com.powsybl.commons.PowsyblException;
+import gnu.trove.list.array.TIntArrayList;
 import org.apache.commons.lang3.mutable.MutableInt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,6 +58,31 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
 
     private final List<EquationSystemIndexListener<V, E>> listeners = new ArrayList<>();
 
+    /*
+     * Ghost mode: an equation deactivated while it has a column keeps it, as a ghost, and a variable no active term
+     * refers to anymore keeps its row, as an orphan. The columns and the rows then do not change when a contingency
+     * isolates buses and when they come back: the vectors keep their layout, zero at the ghost columns, and the index
+     * is not built again. A ghost equation and an orphan variable are not in the system they solve: a solver that keeps
+     * the identity for the variables that no equation holds (the fixed structure) solves it unchanged. A real change
+     * of structure (an equation or a variable that has no column or row, an equation removed) builds the index again,
+     * as without ghost mode, the ghosts and the orphans being removed first.
+     */
+    private boolean ghostMode;
+    private final Set<SingleEquation<V, E>> ghostSingleEquations = new LinkedHashSet<>();
+    private final Set<Variable<V>> orphanVariables = new LinkedHashSet<>();
+    /** The active single equations without a column, and the variables referred to without a row, since the last build. */
+    private final Set<SingleEquation<V, E>> newEquations = new HashSet<>();
+    private final Set<Variable<V>> newVariables = new HashSet<>();
+    /** Ghosts, orphans or new equations and variables changed since the last update. */
+    private boolean ghostsChanged;
+    /**
+     * An equation removed from the system: the index is built again at the next update. Equations and variables
+     * without column or row are judged at the update, on the net effect of the changes: the activations made while a
+     * bus is enabled again, and undone before the update, change nothing.
+     */
+    private boolean rebuildNeeded;
+    private int[] ghostColumns = new int[0];
+
     public EquationSystemIndex(EquationSystem<V, E> equationSystem) {
         this.equationSystem = Objects.requireNonNull(equationSystem);
         equationSystem.addListener(this);
@@ -96,6 +122,148 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
 
     private void notifyEquationTermConstantsChanged() {
         listeners.forEach(EquationSystemIndexListener::onEquationTermConstantsChanged);
+    }
+
+    private void notifyVariableOrphanChange(Variable<V> variable, boolean orphan) {
+        listeners.forEach(listener -> listener.onVariableOrphanChange(variable, orphan));
+    }
+
+    public boolean isGhostMode() {
+        return ghostMode;
+    }
+
+    /**
+     * Enables or disables the ghost mode (see its fields). Disabling it removes the ghosts and the orphans: the index
+     * is then built again if there were any.
+     */
+    public void setGhostMode(boolean ghostMode) {
+        if (ghostMode == this.ghostMode) {
+            return;
+        }
+        update();
+        if (!ghostMode) {
+            removeGhosts();
+        }
+        this.ghostMode = ghostMode;
+        for (EquationArray<V, E> equationArray : equationSystem.getEquationArrays()) {
+            equationArray.setGhostMode(ghostMode);
+        }
+        ghostsChanged = false;
+        rebuildNeeded = false;
+    }
+
+    /**
+     * Resolves the pending changes: in ghost mode the index is built again only when it is read. A listener that reads
+     * the index after deciding what to update calls this first, so that it is notified of what changed before.
+     */
+    public void validate() {
+        update();
+    }
+
+    /** True when the variable keeps its row as an orphan: no active term refers to it. */
+    public boolean isOrphan(Variable<V> variable) {
+        return !orphanVariables.isEmpty() && orphanVariables.contains(variable);
+    }
+
+    /** The columns of the ghost equations, sorted: zero in the vectors, and not equations of the system solved. */
+    public int[] getGhostColumns() {
+        update();
+        return ghostColumns;
+    }
+
+    /**
+     * Resolves the changes since the last update: the ghosts absorb them, or the index is built again, the ghosts and
+     * the orphans being removed first and the listeners notified of what they would have been without ghost mode.
+     */
+    private boolean hasNewEquationsOrVariables() {
+        if (!newEquations.isEmpty() || !newVariables.isEmpty()) {
+            return true;
+        }
+        for (EquationArray<V, E> equationArray : equationSystem.getEquationArrays()) {
+            if (equationArray.getNewActiveCount() > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void updateGhosts() {
+        if (!rebuildNeeded && !ghostsChanged && equationsIndexValid && variablesIndexValid) {
+            return;
+        }
+        if (rebuildNeeded || !equationsIndexValid || !variablesIndexValid || hasNewEquationsOrVariables()) {
+            rebuildNeeded = false;
+            ghostsChanged = false;
+            List<Variable<V>> addedVariables = new ArrayList<>(newVariables);
+            List<SingleEquation<V, E>> addedEquations = new ArrayList<>(newEquations);
+            newEquations.clear();
+            newVariables.clear();
+            removeGhosts();
+            equationsIndexValid = false;
+            variablesIndexValid = false;
+            for (Variable<V> variable : addedVariables) {
+                notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.ADDED);
+            }
+            for (SingleEquation<V, E> equation : addedEquations) {
+                notifyEquationChange(equation, EquationSystemIndexListener.ChangeType.ADDED);
+            }
+        } else if (ghostsChanged) {
+            ghostsChanged = false;
+            ghostColumns = computeGhostColumns();
+            listeners.forEach(EquationSystemIndexListener::onGhostChange);
+        }
+    }
+
+    private int[] computeGhostColumns() {
+        TIntArrayList columns = new TIntArrayList();
+        for (SingleEquation<V, E> equation : ghostSingleEquations) {
+            columns.add(equation.getColumn());
+        }
+        for (EquationArray<V, E> equationArray : equationSystem.getEquationArrays()) {
+            if (equationArray.getGhostCount() > 0) {
+                int[] elementNumToColumn = equationArray.getElementNumToColumn();
+                for (int elementNum = 0; elementNum < equationArray.getElementCount(); elementNum++) {
+                    if (equationArray.isElementGhost(elementNum)) {
+                        columns.add(elementNumToColumn[elementNum]);
+                    }
+                }
+            }
+        }
+        columns.sort();
+        return columns.toArray();
+    }
+
+    /** The ghosts lose their column and the orphans their row; the listeners are notified as without ghost mode. */
+    private void removeGhosts() {
+        List<SingleEquation<V, E>> ghosts = new ArrayList<>(ghostSingleEquations);
+        ghostSingleEquations.clear();
+        for (SingleEquation<V, E> equation : ghosts) {
+            equation.setColumn(-1);
+            sortedSetEquationsToSolve.remove(equation);
+        }
+        boolean arrayGhosts = false;
+        for (EquationArray<V, E> equationArray : equationSystem.getEquationArrays()) {
+            arrayGhosts |= equationArray.getGhostCount() > 0;
+            equationArray.removeGhosts();
+        }
+        List<Variable<V>> orphans = new ArrayList<>(orphanVariables);
+        orphanVariables.clear();
+        for (Variable<V> variable : orphans) {
+            variable.setRow(-1);
+            sortedMapVariablesToFindRefCount.remove(variable);
+        }
+        ghostColumns = new int[0];
+        if (!ghosts.isEmpty() || arrayGhosts || !orphans.isEmpty()) {
+            equationsIndexValid = false;
+            variablesIndexValid = false;
+        }
+        for (Variable<V> variable : orphans) {
+            notifyVariableOrphanChange(variable, false);
+            notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.REMOVED);
+        }
+        for (SingleEquation<V, E> equation : ghosts) {
+            notifyEquationChange(equation, EquationSystemIndexListener.ChangeType.REMOVED);
+        }
     }
 
     private void updateEquationColumns(Collection<SingleEquation<V, E>> singleEquations, Collection<EquationArray<V, E>> equationArrays) {
@@ -174,8 +342,16 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
     }
 
     private void update() {
+        if (ghostMode) {
+            updateGhosts();
+        }
         if (!equationsIndexValid) {
             updateEquationsToSolve();
+            if (ghostMode) {
+                for (EquationArray<V, E> equationArray : equationSystem.getEquationArrays()) {
+                    equationArray.snapshotStructure();
+                }
+            }
         }
 
         if (!variablesIndexValid) {
@@ -201,23 +377,58 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
             if (variableRefCount == null) {
                 variableRefCount = new MutableInt(1);
                 sortedMapVariablesToFindRefCount.put(variable, variableRefCount);
-                variablesIndexValid = false;
-                notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.ADDED);
+                if (ghostMode) {
+                    // no row yet: the index is built again at the next update if it still has none then
+                    newVariables.add(variable);
+                    ghostsChanged = true;
+                } else {
+                    variablesIndexValid = false;
+                    notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.ADDED);
+                }
             } else {
+                if (variableRefCount.intValue() == 0 && orphanVariables.remove(variable)) {
+                    ghostsChanged = true;
+                    notifyVariableOrphanChange(variable, false);
+                }
                 variableRefCount.increment();
             }
         }
     }
 
     private void addEquation(SingleEquation<V, E> equation) {
+        if (ghostMode) {
+            if (ghostSingleEquations.remove(equation)) {
+                // a ghost active again, on its column
+                ghostsChanged = true;
+            } else {
+                // no column yet: the index is built again at the next update if it is still active then
+                sortedSetEquationsToSolve.add(equation);
+                newEquations.add(equation);
+                ghostsChanged = true;
+            }
+            addEquationTerms(equation);
+            return;
+        }
         sortedSetEquationsToSolve.add(equation);
         equationsIndexValid = false;
+        addEquationTerms(equation);
+        notifyEquationChange(equation, EquationSystemIndexListener.ChangeType.ADDED);
+    }
+
+    private void addEquationTerms(SingleEquation<V, E> equation) {
         for (SingleEquationTerm<V, E> term : equation.getTerms()) {
             if (term.isActive()) {
                 addTerm(term);
             }
         }
-        notifyEquationChange(equation, EquationSystemIndexListener.ChangeType.ADDED);
+    }
+
+    private void removeEquationTerms(SingleEquation<V, E> equation) {
+        for (SingleEquationTerm<V, E> term : equation.getTerms()) {
+            if (term.isActive()) {
+                removeTerm(term);
+            }
+        }
     }
 
     private void removeTerm(SingleEquationTerm<V, E> term) {
@@ -231,24 +442,50 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
             if (variableRefCount != null) {
                 variableRefCount.decrement();
                 if (variableRefCount.intValue() == 0) {
-                    variable.setRow(-1);
-                    sortedMapVariablesToFindRefCount.remove(variable);
-                    variablesIndexValid = false;
-                    notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.REMOVED);
+                    if (ghostMode && newVariables.remove(variable)) {
+                        // referred to and no more since the last build: it never had a row
+                        sortedMapVariablesToFindRefCount.remove(variable);
+                    } else if (ghostMode && variable.getRow() >= 0) {
+                        // keeps its row, as an orphan
+                        orphanVariables.add(variable);
+                        ghostsChanged = true;
+                        notifyVariableOrphanChange(variable, true);
+                    } else {
+                        variable.setRow(-1);
+                        sortedMapVariablesToFindRefCount.remove(variable);
+                        variablesIndexValid = false;
+                        notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.REMOVED);
+                    }
                 }
             }
         }
     }
 
-    private void removeEquation(SingleEquation<V, E> equation) {
+    /** An equation deactivated, or removed from the system when {@code removed}. */
+    private void removeEquation(SingleEquation<V, E> equation, boolean removed) {
+        if (ghostMode && !removed) {
+            if (newEquations.remove(equation)) {
+                // activated and deactivated since the last build: it never had a column
+                sortedSetEquationsToSolve.remove(equation);
+            } else if (equation.getColumn() >= 0) {
+                // keeps its column, as a ghost
+                ghostSingleEquations.add(equation);
+                ghostsChanged = true;
+            } else {
+                sortedSetEquationsToSolve.remove(equation);
+                rebuildNeeded = true;
+            }
+            removeEquationTerms(equation);
+            return;
+        }
+        if (ghostMode) {
+            newEquations.remove(equation);
+            rebuildNeeded = true;
+        }
         equation.setColumn(-1);
         sortedSetEquationsToSolve.remove(equation);
         equationsIndexValid = false;
-        for (SingleEquationTerm<V, E> term : equation.getTerms()) {
-            if (term.isActive()) {
-                removeTerm(term);
-            }
-        }
+        removeEquationTerms(equation);
         notifyEquationChange(equation, EquationSystemIndexListener.ChangeType.REMOVED);
     }
 
@@ -257,12 +494,19 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
         switch (eventType) {
             case EQUATION_REMOVED:
                 if (equation.isActive()) {
-                    removeEquation(equation);
+                    removeEquation(equation, true);
+                } else if (ghostSingleEquations.remove(equation)) {
+                    // a ghost removed from the system: its terms have left the index already
+                    equation.setColumn(-1);
+                    sortedSetEquationsToSolve.remove(equation);
+                    equationsIndexValid = false;
+                    rebuildNeeded = true;
+                    notifyEquationChange(equation, EquationSystemIndexListener.ChangeType.REMOVED);
                 }
                 break;
 
             case EQUATION_DEACTIVATED:
-                removeEquation(equation);
+                removeEquation(equation, false);
                 break;
 
             case EQUATION_CREATED:
@@ -322,8 +566,12 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
                         removeVariables(variables);
                     }
                 }
-                equationsIndexValid = false;
-                notifyEquationArrayChange(equationArray, EquationSystemIndexListener.ChangeType.REMOVED);
+                if (ghostMode) {
+                    ghostsChanged = true;
+                } else {
+                    equationsIndexValid = false;
+                    notifyEquationArrayChange(equationArray, EquationSystemIndexListener.ChangeType.REMOVED);
+                }
                 break;
 
             case EQUATION_ACTIVATED:
@@ -346,8 +594,12 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
                         addVariables(variables);
                     }
                 }
-                equationsIndexValid = false;
-                notifyEquationArrayChange(equationArray, EquationSystemIndexListener.ChangeType.ADDED);
+                if (ghostMode) {
+                    ghostsChanged = true;
+                } else {
+                    equationsIndexValid = false;
+                    notifyEquationArrayChange(equationArray, EquationSystemIndexListener.ChangeType.ADDED);
+                }
                 break;
 
             default:
