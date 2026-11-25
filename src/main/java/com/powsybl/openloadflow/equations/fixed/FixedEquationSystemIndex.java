@@ -168,6 +168,13 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     private boolean liveChanged;
     /** False when the columns of the single equations have to be read again from them. */
     private boolean singleColumnsValid;
+    /**
+     * For each position, whether its variable is an orphan of OLF's index while the inactive columns are kept: it keeps its row, but no active
+     * term refers to it. It is not live for the pairing, as a variable without row: no equation takes its position.
+     */
+    private boolean[] orphanPosition;
+    /** The positions whose variable became an orphan or stopped being one since the last pairing. */
+    private final TIntArrayList orphanChangedPositions = new TIntArrayList();
 
     private final EquationSystemIndexListener<V, E> indexListener = new EquationSystemIndexListener<>() {
 
@@ -200,6 +207,16 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
         public void onEquationIndexOrderChanged() {
             liveFromEvents = false;
             singleColumnsValid = false;
+        }
+
+        @Override
+        public void onVariableOrphanChange(Variable<V> variable, boolean orphan) {
+            int position = structure != null ? structure.getPosition(variable) : -1;
+            if (position >= 0 && orphanPosition[position] != orphan) {
+                orphanPosition[position] = orphan;
+                orphanChangedPositions.add(position);
+                pairingValid = false;
+            }
         }
 
         @Override
@@ -251,6 +268,11 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
             equationOfPosition = new int[structure.getVariableCount()];
             rowOfPosition = new int[structure.getVariableCount()];
             live = new boolean[structure.getVariableCount()];
+            orphanPosition = new boolean[structure.getVariableCount()];
+            for (int position = 0; position < orphanPosition.length; position++) {
+                orphanPosition[position] = equationSystem.getIndex().isOrphan(structure.getVariable(position));
+            }
+            orphanChangedPositions.resetQuick();
             liveFromEvents = false;
             singleColumnsValid = false;
             visited = new int[structure.getVariableCount()];
@@ -392,6 +414,8 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
             liveFromEvents = true;
         }
         liveChanged = false;
+        changedPositions.addAll(orphanChangedPositions);
+        orphanChangedPositions.resetQuick();
         assert rowsAreCurrent() : "The rows counted from the live positions are not those of OLF's index";
         // what the equations of the chains depend on is kept from the last pairing, for those whose activity did not change
         if (firstPassValid) {
@@ -612,7 +636,7 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     }
 
     private boolean isToFind(int position) {
-        return rowOfPosition[position] >= 0;
+        return rowOfPosition[position] >= 0 && !orphanPosition[position];
     }
 
     private boolean isUnpaired(int position) {
@@ -677,6 +701,10 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
                     values[column] = addObjectTermValues(equation, 0, true);
                 }
             }
+        }
+        // the inactive equations of OLF's index keep their column, not being equations of the system: zero
+        for (int column : equationSystem.getIndex().getInactiveColumns()) {
+            values[column] = 0;
         }
         return written;
     }
@@ -895,7 +923,7 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
 
     private boolean isInSystem(int[] positions) {
         for (int position : positions) {
-            if (rowOfPosition[position] < 0) {
+            if (!isToFind(position)) {
                 return false;
             }
         }
@@ -904,7 +932,7 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
 
     private boolean isInSystem(List<Variable<V>> variables) {
         for (int k = 0; k < variables.size(); k++) {
-            if (variables.get(k).getRow() < 0) {
+            if (variables.get(k).getRow() < 0 || equationSystem.getIndex().isOrphan(variables.get(k))) {
                 return false;
             }
         }

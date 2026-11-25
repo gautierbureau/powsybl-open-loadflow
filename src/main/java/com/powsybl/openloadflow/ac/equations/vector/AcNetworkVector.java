@@ -121,6 +121,8 @@ public class AcNetworkVector extends AbstractLfNetworkListener
      * Update vectorized view of the variables from the equation system.
      */
     public void updateVariables() {
+        // the changes the index has pending may move the rows of the variables: resolved first
+        equationSystem.getIndex().validate();
         if (!variablesInvalid) {
             return;
         }
