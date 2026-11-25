@@ -152,9 +152,11 @@ public class AcSecurityAnalysis extends AbstractSecurityAnalysis<AcVariableType,
 
     @Override
     protected AcloadFlowEngine createLoadFlowEngine(AcLoadFlowContext context) {
-        // each simulation, of the base case, of a contingency or of an operator strategy, factorises with pivots of its
-        // own: its results do not depend on the simulations run before it
-        context.forgetPivots();
+        // unless the pivots are reused, each simulation, of the base case, of a contingency or of an operator strategy,
+        // factorises with pivots of its own: its results do not depend on the simulations run before it
+        if (!reusePivots) {
+            context.forgetPivots();
+        }
         return new AcloadFlowEngine(context);
     }
 

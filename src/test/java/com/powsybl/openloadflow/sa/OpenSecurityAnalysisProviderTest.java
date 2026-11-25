@@ -52,7 +52,7 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
     @Test
     void specificParametersNamesTest() {
         assertEquals(List.of("createResultExtension", "contingencyPropagation", "threadCount", "dcFastMode", "contingencyActivePowerLossDistribution", "startWithFrozenACEmulation",
-                "keepOnlyNecessarySwitches"),
+                "keepOnlyNecessarySwitches", "reusePivots"),
             provider.getSpecificParametersNames());
     }
 
@@ -98,6 +98,11 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         assertTrue(parametersExt.isKeepOnlyNecessarySwitches());
         testCount++;
 
+        assertFalse(parametersExt.isReusePivots());
+        parametersExt.setReusePivots(true);
+        assertTrue(parametersExt.isReusePivots());
+        testCount++;
+
         assertEquals(OpenSecurityAnalysisParameters.SPECIFIC_PARAMETERS_NAMES.size(), testCount);
     }
 
@@ -112,6 +117,7 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         moduleConfig.setStringProperty("threadCount", "3");
         moduleConfig.setStringProperty("contingencyActivePowerLossDistribution", "Default");
         moduleConfig.setStringProperty("keepOnlyNecessarySwitches", "true");
+        moduleConfig.setStringProperty("reusePivots", "true");
 
         OpenSecurityAnalysisParameters parametersExt = (OpenSecurityAnalysisParameters) provider.loadSpecificParameters(platformConfig).orElseThrow();
         assertTrue(parametersExt.isCreateResultExtension());
@@ -120,6 +126,7 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         assertFalse(parametersExt.isStartWithFrozenACEmulation());
         assertEquals(3, parametersExt.getThreadCount());
         assertTrue(parametersExt.isKeepOnlyNecessarySwitches());
+        assertTrue(parametersExt.isReusePivots());
         // check test completeness
 
         assertEquals(OpenSecurityAnalysisParameters.SPECIFIC_PARAMETERS_NAMES.size(), moduleConfig.getPropertyNames().size());
@@ -142,7 +149,8 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
                 "threadCount", "3",
                 "startWithFrozenACEmulation", "false",
                 "contingencyActivePowerLossDistribution", "Default",
-                "keepOnlyNecessarySwitches", "true");
+                "keepOnlyNecessarySwitches", "true",
+                "reusePivots", "true");
         OpenSecurityAnalysisParameters parametersExt = (OpenSecurityAnalysisParameters) provider.loadSpecificParameters(properties).orElseThrow();
         assertTrue(parametersExt.isCreateResultExtension());
         assertFalse(parametersExt.isContingencyPropagation());
@@ -151,6 +159,7 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         assertFalse(parametersExt.isStartWithFrozenACEmulation());
         assertEquals("Default", parametersExt.getContingencyActivePowerLossDistribution());
         assertTrue(parametersExt.isKeepOnlyNecessarySwitches());
+        assertTrue(parametersExt.isReusePivots());
 
         // check test completeness
         assertEquals(OpenSecurityAnalysisParameters.SPECIFIC_PARAMETERS_NAMES.size(), properties.size());
@@ -165,7 +174,8 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
                 .setDcFastMode(true)
                 .setThreadCount(3)
                 .setStartWithFrozenACEmulation(false)
-                .setKeepOnlyNecessarySwitches(true);
+                .setKeepOnlyNecessarySwitches(true)
+                .setReusePivots(true);
         parameters.addExtension(OpenSecurityAnalysisParameters.class, parametersExt);
         roundTripTest(parameters, JsonSecurityAnalysisParameters::write, JsonSecurityAnalysisParameters::read, "/sa-params.json");
     }

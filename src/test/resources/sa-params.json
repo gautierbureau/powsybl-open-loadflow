@@ -40,7 +40,8 @@
       "dcFastMode" : true,
       "contingencyActivePowerLossDistribution" : "Default",
       "startWithFrozenACEmulation" : false,
-      "keepOnlyNecessarySwitches" : true
+      "keepOnlyNecessarySwitches" : true,
+      "reusePivots" : true
     }
   }
 }
