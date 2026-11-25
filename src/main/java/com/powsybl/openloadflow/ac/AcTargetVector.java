@@ -26,9 +26,11 @@ import java.util.*;
  * network changes what it is computed from: the active power of a bus for its active balance, its reactive power
  * (or its active power, or its voltage control switched, which compute it again) for its reactive balance and its
  * voltage target with a slope, a tap for the targets of its branch, a susceptance
- * for the target of its shunt. Other events (an element disabled or enabled, a control switched, a target of a
- * control changed, a zero impedance network split or merged, the slack bus moved) are rarer: every target is
- * computed again. When the index changes, the targets are gathered into its columns: a target is computed only for
+ * for the target of its shunt. A bus or a branch disabled or enabled, or a branch connected or disconnected at one
+ * side, forgets the targets of its number and the targets that read other elements (voltage targets, reactive power
+ * and slack distributions); a zero impedance network split or merged, the voltage targets and the reactive power
+ * distribution. Other events (another element disabled or enabled, a control switched, a target of a control
+ * changed, the slack bus moved) are rarer: every target is computed again. When the index changes, the targets are gathered into its columns: a target is computed only for
  * an equation that has none yet. The right-hand side of a single equation is read at each gather.
  *
  * <p>With assertions enabled, each gather is compared with the targets computed again for every equation.
@@ -196,7 +198,9 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
 
     private final LfNetwork network;
 
-    private static final int TYPE_COUNT = AcEquationType.values().length;
+    private static final AcEquationType[] TYPES = AcEquationType.values();
+
+    private static final int TYPE_COUNT = TYPES.length;
 
     /** For each equation type, by ordinal, the target of each element, valid where {@link #computed} is set. */
     private final double[][] targets = new double[TYPE_COUNT][];
@@ -265,7 +269,11 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
 
         @Override
         public void onDisableChange(LfElement element, boolean disabled) {
-            forgetAll();
+            if (element.getType() == ElementType.BUS || element.getType() == ElementType.BRANCH) {
+                forgetElement(element.getNum());
+            } else {
+                forgetAll();
+            }
         }
 
         /**
@@ -300,17 +308,17 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
 
         @Override
         public void onZeroImpedanceNetworkSplit(LfZeroImpedanceNetwork initialNetwork, List<LfZeroImpedanceNetwork> splitNetworks, LoadFlowModel loadFlowModel) {
-            forgetAll();
+            forgetVoltageTargets();
         }
 
         @Override
         public void onZeroImpedanceNetworkMerge(LfZeroImpedanceNetwork network1, LfZeroImpedanceNetwork network2, LfZeroImpedanceNetwork mergedNetwork, LoadFlowModel loadFlowModel) {
-            forgetAll();
+            forgetVoltageTargets();
         }
 
         @Override
         public void onBranchConnectionStatusChange(LfBranch branch, TwoSides side, boolean connected) {
-            forgetAll();
+            forgetElement(branch.getNum());
         }
 
         @Override
@@ -362,6 +370,30 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
         if (c != null) {
             Arrays.fill(c, false);
         }
+    }
+
+    /**
+     * The voltage target of a bus is read from the main voltage controls of its zero impedance network, and the
+     * targets of the reactive power distribution from the controller buses of the merged controls.
+     */
+    private void forgetVoltageTargets() {
+        forget(AcEquationType.BUS_TARGET_V);
+        forget(AcEquationType.DISTR_Q);
+        invalidateValues();
+    }
+
+    /**
+     * A bus or a branch disabled or enabled, or a branch connected or disconnected at one side: the targets of the
+     * element, of every type whose elements have its number (of any kind, more than needed), and the targets that
+     * read other elements than their own (the voltage targets, the reactive power distribution, the slack
+     * distribution).
+     */
+    private void forgetElement(int num) {
+        for (AcEquationType type : TYPES) {
+            forget(type, num);
+        }
+        forget(AcEquationType.BUS_DISTR_SLACK_P);
+        forgetVoltageTargets();
     }
 
     private void forgetAll() {
