@@ -226,6 +226,9 @@ public class AcBranchVector {
                 ksi[i] = piModel.getKsi();
                 cosKsi[i] = FastMath.cos(ksi[i]);
                 sinKsi[i] = FastMath.sin(ksi[i]);
+            } else {
+                // ksi is 0: its cosine is 1, as the flows of a closed branch compute theta from those of ksi
+                cosKsi[i] = 1;
             }
             b1[i] = piModel.getB1();
             b2[i] = piModel.getB2();
