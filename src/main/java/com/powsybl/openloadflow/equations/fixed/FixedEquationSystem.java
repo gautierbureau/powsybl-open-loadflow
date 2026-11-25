@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.equations.Equation;
 import com.powsybl.openloadflow.equations.EquationArray;
 import com.powsybl.openloadflow.equations.EquationEventType;
 import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.equations.EquationSystemIndexListener;
 import com.powsybl.openloadflow.equations.EquationSystemListener;
 import com.powsybl.openloadflow.equations.EquationTermArray;
 import com.powsybl.openloadflow.equations.EquationTermEventType;
@@ -152,16 +153,87 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     private int structureBuildCount;
     private int patternBuildCount;
 
+    /*
+     * The rows of OLF's index are the ranks of its variables in their order, which is the order of the slots: the row
+     * of a live slot is the number of live slots before it. The slots that are live are followed from the variables
+     * the index adds and removes, so that the rows are counted again over this table instead of being read from every
+     * variable. Likewise the columns of the single equations change only when the index adds or removes one.
+     */
+    /** For each slot, whether its variable is in OLF's index, valid when {@link #liveFromEvents} is set. */
+    private boolean[] live;
+    private int liveCount;
+    /** False when the live slots have to be read from the rows of the variables: a new structure, a variable without slot. */
+    private boolean liveFromEvents;
+    /** True when the index added or removed a variable since the last placement. */
+    private boolean liveChanged;
+    /** False when the columns of the single equations have to be read again from them. */
+    private boolean singleColumnsValid;
+
+    private final EquationSystemIndexListener<V, E> indexListener = new EquationSystemIndexListener<>() {
+
+        @Override
+        public void onVariableChange(Variable<V> variable, ChangeType changeType) {
+            onIndexVariableChange(variable, changeType == ChangeType.ADDED);
+        }
+
+        @Override
+        public void onEquationChange(SingleEquation<V, E> equation, ChangeType changeType) {
+            singleColumnsValid = false;
+        }
+
+        @Override
+        public void onEquationTermChange(SingleEquationTerm<V, E> term) {
+            // the variables it adds or removes have their own events
+        }
+
+        @Override
+        public void onEquationArrayChange(EquationArray<V, E> equationArray, ChangeType changeType) {
+            // the columns of the arrays are read again at each placement
+        }
+
+        @Override
+        public void onEquationTermArrayChange(EquationTermArray<V, E> equationTermArray, int termNum, ChangeType changeType) {
+            // the variables it adds or removes have their own events
+        }
+
+        @Override
+        public void onEquationIndexOrderChanged() {
+            liveFromEvents = false;
+            singleColumnsValid = false;
+        }
+
+        @Override
+        public void onEquationTermConstantsChanged() {
+            // no change of rows or columns
+        }
+    };
+
     public FixedEquationSystem(EquationSystem<V, E> equationSystem, Placement<V, E> placement, Scope scope) {
         this.equationSystem = equationSystem;
         this.placement = placement;
         this.scope = scope;
         equationSystem.addListener(this);
+        equationSystem.getIndex().addListener(indexListener);
     }
 
     @Override
     public void close() {
         equationSystem.removeListener(this);
+        equationSystem.getIndex().removeListener(indexListener);
+    }
+
+    private void onIndexVariableChange(Variable<V> variable, boolean added) {
+        liveChanged = true;
+        if (!liveFromEvents) {
+            return;
+        }
+        int slot = structure != null ? structure.getSlot(variable) : -1;
+        if (slot < 0) {
+            liveFromEvents = false;
+        } else if (live[slot] != added) {
+            live[slot] = added;
+            liveCount += added ? 1 : -1;
+        }
     }
 
     private void update() {
@@ -178,6 +250,9 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             slotOfEquation = new int[structure.getEquationCount()];
             equationOfSlot = new int[structure.getSlotCount()];
             rowOfSlot = new int[structure.getSlotCount()];
+            live = new boolean[structure.getSlotCount()];
+            liveFromEvents = false;
+            singleColumnsValid = false;
             visited = new int[structure.getSlotCount()];
             stamp = 0;
             balance = new double[structure.getSlotCount()];
@@ -212,8 +287,11 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             // once by placement, not at each evaluation
             if (columnOfEquation == null || columnOfEquation.length != structure.getEquationCount()) {
                 columnOfEquation = new int[structure.getEquationCount()];
+                singleColumnsValid = false;
             }
-            structure.getColumnsInEquationSystem(columnOfEquation);
+            structure.getColumnsInEquationSystem(columnOfEquation, !singleColumnsValid);
+            singleColumnsValid = true;
+            assert columnsAreCurrent() : "The columns kept from the last placement are not those of OLF's index";
         }
         if (!patternValid) {
             structure.buildPattern(placedEquations, placedSlots);
@@ -287,15 +365,34 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
      */
     private void place() {
         placementCount++;
-        equationSystem.getIndex().getSortedVariablesToFind();
+        int variableCount = equationSystem.getIndex().getSortedVariablesToFind().size();
         TIntHashSet changedSlots = new TIntHashSet();
-        for (int slot = 0; slot < rowOfSlot.length; slot++) {
-            int row = structure.getVariable(slot).getRow();
-            if ((row >= 0) != (rowOfSlot[slot] >= 0)) {
-                changedSlots.add(slot);
+        if (liveFromEvents && liveCount == variableCount) {
+            if (liveChanged) {
+                int row = 0;
+                for (int slot = 0; slot < rowOfSlot.length; slot++) {
+                    int newRow = live[slot] ? row++ : -1;
+                    if ((newRow >= 0) != (rowOfSlot[slot] >= 0)) {
+                        changedSlots.add(slot);
+                    }
+                    rowOfSlot[slot] = newRow;
+                }
             }
-            rowOfSlot[slot] = row;
+        } else {
+            liveCount = 0;
+            for (int slot = 0; slot < rowOfSlot.length; slot++) {
+                int row = structure.getVariable(slot).getRow();
+                if ((row >= 0) != (rowOfSlot[slot] >= 0)) {
+                    changedSlots.add(slot);
+                }
+                rowOfSlot[slot] = row;
+                live[slot] = row >= 0;
+                liveCount += row >= 0 ? 1 : 0;
+            }
+            liveFromEvents = true;
         }
+        liveChanged = false;
+        assert rowsAreCurrent() : "The rows counted from the live slots are not those of OLF's index";
         // what the equations of the chains depend on is kept from the last placement, for those whose activity did not change
         if (firstPassValid) {
             activityChangedEquations = new TIntArrayList(changedEquations.size());
@@ -454,6 +551,16 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     private void setDisplaced(int position, int equation) {
         displacedAt[position] = equation;
         displacedPositions.set(position, equation >= 0);
+    }
+
+    /** For the assertion of {@link #place()}: the row of each slot is the row of its variable. */
+    private boolean rowsAreCurrent() {
+        for (int slot = 0; slot < rowOfSlot.length; slot++) {
+            if (rowOfSlot[slot] != structure.getVariable(slot).getRow()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** For the assertion of {@link #place()}: the first pass computed for every slot gives the one kept. */
@@ -821,6 +928,8 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             changed(equation.getType(), equation.getElementNum());
         } else {
             firstPassValid = false;
+            // a single equation bound or unbound: the structure reads another one
+            singleColumnsValid = false;
         }
         invalidate(!kept);
     }
