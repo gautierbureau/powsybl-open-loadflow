@@ -100,6 +100,13 @@ public class OpenSensitivityAnalysisProvider implements SensitivityAnalysisProvi
         return ProviderConstants.NAME;
     }
 
+    /** The AC sensitivity analysis a run uses: OLF's here, a subclass of it for a provider extending this one. */
+    protected AcSensitivityAnalysis createAcSensitivityAnalysis(MatrixFactory matrixFactory,
+                                                                GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory,
+                                                                SensitivityAnalysisParameters sensitivityAnalysisParameters) {
+        return new AcSensitivityAnalysis(matrixFactory, connectivityFactory, sensitivityAnalysisParameters);
+    }
+
     @Override
     public String getVersion() {
         return new PowsyblOpenLoadFlowVersion().getMavenProjectVersion();
@@ -233,7 +240,7 @@ public class OpenSensitivityAnalysisProvider implements SensitivityAnalysisProvi
         if (loadFlowParameters.isDc()) {
             analysis = createDcSensitivityAnalysis(selectedConnectivityFactory, sensitivityAnalysisParameters);
         } else {
-            analysis = new AcSensitivityAnalysis(matrixFactory, selectedConnectivityFactory, sensitivityAnalysisParameters);
+            analysis = createAcSensitivityAnalysis(matrixFactory, selectedConnectivityFactory, sensitivityAnalysisParameters);
         }
         analysis.analyse(network, workingVariantId, contingencies, operatorStrategies, actions, creationParameters, variableSets,
                 decoratedFactorReader, resultWriter, sensiReportNode, sensitivityAnalysisParametersExt, computationManager.getExecutor());

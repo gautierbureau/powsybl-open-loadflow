@@ -82,7 +82,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                     if (!factor.getFunctionEquationTerm().isActive()) {
                         throw new PowsyblException("Found an inactive equation for a factor that has no predefined result");
                     }
-                    sensi = factor.getFunctionEquationTerm().calculateSensi(factorsState, factorGroup.getIndex());
+                    sensi = calculateSensi(factor, factorsState, factorGroup.getIndex(), contingencyIndex, operatorStrategyIndex);
                     // Add the direct term (explicit dependence of the function on the variable), if any
                     sensi += computeParameterDirectPartial(factor);
                     // unscale the sensitivity computed in per unit
@@ -98,6 +98,17 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
                 }
             }
         }
+    }
+
+    /**
+     * The sensitivity of a factor in a state ({@code contingencyIndex} and {@code operatorStrategyIndex}, -1 for none) from
+     * the solved states of its group's right-hand side ({@code column} of {@code factorsStates}): its function's directional
+     * derivative there, the direct term of a branch parameter added by the caller. A subclass may give one it computed
+     * otherwise.
+     */
+    protected double calculateSensi(LfSensitivityFactor<AcVariableType, AcEquationType> factor, DenseMatrix factorsStates,
+                                    int column, int contingencyIndex, int operatorStrategyIndex) {
+        return factor.getFunctionEquationTerm().calculateSensi(factorsStates, column);
     }
 
     /**
@@ -206,7 +217,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         int contingencyIndex = lfNetworkChange.getContingencyIndex();
         int operatorStrategyIndex = lfNetworkChange.getOperatorStrategyIndex();
 
-        if (!runLoadFlow(context, false)) {
+        if (!runPostContingencyLoadFlow(context, lfNetworkChange)) {
             // write contingency status
             resultWriter.writeStateStatus(contingencyIndex, operatorStrategyIndex, SensitivityAnalysisResult.Status.FAILURE);
             return;
@@ -235,7 +246,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         // solve system
         DenseMatrix factorsStates = initFactorsRhs(context.getEquationSystem(), factorGroups, participationByBus); // this is the rhs for the moment
         describeSvcPilotFactorsRhs(factorGroups, context).forEach((col, column) -> column.writeInto(factorsStates, col));
-        context.getJacobianMatrix().solveTransposed(factorsStates);
+        solveFactorsStates(context, factorsStates, lfNetworkChange);
         setFunctionReferences(lfFactors);
 
         // calculate sensitivity values
@@ -620,7 +631,39 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
         }
     }
 
-    private static boolean runLoadFlow(AcLoadFlowContext context, boolean isRunningBaseSituation) {
+    /**
+     * Called once the base case is solved and its sensitivities written, with the contingency load flow parameters
+     * applied, before the first network change (operator strategy or contingency) is simulated, the context still holding
+     * the base case's state: where a subclass prepares the contingencies' states (a batch solved together, for instance).
+     * Does nothing here.
+     */
+    protected void beforeContingencySimulations(LfNetwork lfNetwork, AcLoadFlowContext context, List<PropagatedContingency> contingencies,
+                                                LoadFlowParameters lfParameters, OpenLoadFlowParameters contingencyLfParametersExt) {
+        // nothing to prepare
+    }
+
+    /**
+     * Brings the state of a network change (a contingency, an operator strategy or both) to its converged load flow, the
+     * change applied to the network (and its active power loss distributed when the slack is): runs the load flow here.
+     * False when it failed.
+     */
+    protected boolean runPostContingencyLoadFlow(AcLoadFlowContext context, LfNetworkChange lfNetworkChange) {
+        return runLoadFlow(context, false);
+    }
+
+    /**
+     * Solves the factor groups' right-hand sides in place, on the Jacobian of the state the load flow left: the base
+     * case ({@code lfNetworkChange} null) or a network change's.
+     */
+    protected void solveFactorsStates(AcLoadFlowContext context, DenseMatrix factorsStates, LfNetworkChange lfNetworkChange) {
+        context.getJacobianMatrix().solveTransposed(factorsStates);
+    }
+
+    /**
+     * Runs the load flow of a state: the base case, whose failure fails the analysis, or a network change's, whose
+     * failure is reported as the state's status.
+     */
+    protected boolean runLoadFlow(AcLoadFlowContext context, boolean isRunningBaseSituation) {
         AcLoadFlowResult result = context.getParameters().getSolverFactory().createLoadFlowEngine(context)
                 .run();
         if (result.isSuccess() || result.getSolverStatus() == AcSolverStatus.NO_CALCULATION) {
@@ -876,7 +919,7 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             describeSvcPilotFactorsRhs(factorGroups, context).forEach((col, column) -> column.writeInto(factorsStates, col));
 
             // solve system
-            context.getJacobianMatrix().solveTransposed(factorsStates);
+            solveFactorsStates(context, factorsStates, null);
 
             OpenLoadFlowParameters contingencylfParametersExt = applyGenericContingencyParameters(context, lfParameters, lfParametersExt,
                     sensitivityAnalysisParametersExt.isStartWithFrozenACEmulation());
@@ -888,6 +931,8 @@ public class AcSensitivityAnalysis extends AbstractSensitivityAnalysis<AcVariabl
             if (parameters.getOperatorStrategiesCalculationMode() != SensitivityOperatorStrategiesCalculationMode.ONLY_OPERATOR_STRATEGIES) {
                 calculateSensitivityValues(allFactorHolder.getFactorsForBaseNetwork(), factorGroups, factorsStates, -1, -1, resultWriter);
             }
+
+            beforeContingencySimulations(lfNetwork, context, propagatedContingencies, lfParameters, contingencylfParametersExt);
 
             NetworkState networkState = NetworkState.save(lfNetwork);
 
