@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.network;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
@@ -37,6 +38,11 @@ public class NetworkState {
 
     private final List<AreaState> areaStates;
 
+    /** The voltage in kV and the angle of each bus, by bus number: restored at once, without going through the buses. */
+    private final double[] busVoltages;
+
+    private final double[] busAngles;
+
     protected NetworkState(LfNetwork network, List<BusState> busStates, List<BranchState> branchStates, List<HvdcState> hvdcStates, List<AcDcConverterState> acDcConverterStates,
                            Set<LfBus> excludedSlackBuses, List<AreaState> areaStates) {
         this.network = Objects.requireNonNull(network);
@@ -46,6 +52,8 @@ public class NetworkState {
         this.acDcConverterStates = Objects.requireNonNull(acDcConverterStates);
         this.excludedSlackBuses = Objects.requireNonNull(excludedSlackBuses);
         this.areaStates = Objects.requireNonNull(areaStates);
+        busVoltages = Arrays.copyOf(network.getBusVoltages(), busStates.size());
+        busAngles = Arrays.copyOf(network.getBusAngles(), busStates.size());
     }
 
     public static NetworkState save(LfNetwork network) {
@@ -109,18 +117,15 @@ public class NetworkState {
         Objects.requireNonNull(buses);
         Objects.requireNonNull(branches);
         LOGGER.trace("Restoring network state of {} buses and {} branches", buses.size(), branches.size());
-        boolean[] busListed = new boolean[busStates.size()];
         for (LfBus bus : buses) {
             checkSaved(busStates, bus);
-            busListed[bus.getNum()] = true;
         }
-        for (int num = 0; num < busStates.size(); num++) {
-            BusState state = busStates.get(num);
-            if (busListed[num]) {
-                state.restore();
-            } else if (voltages) {
-                state.restoreVoltage();
-            }
+        if (voltages) {
+            restoreVoltages();
+        }
+        int[] busNums = buses.stream().mapToInt(LfBus::getNum).distinct().sorted().toArray();
+        for (int num : busNums) {
+            busStates.get(num).restore();
         }
         int[] branchNums = branches.stream().mapToInt(LfBranch::getNum).distinct().sorted().toArray();
         for (LfBranch branch : branches) {
@@ -165,9 +170,9 @@ public class NetworkState {
 
     /** Restores the saved voltage magnitude and angle of every bus, and nothing else. */
     public void restoreVoltages() {
-        for (BusState state : busStates) {
-            state.restoreVoltage();
-        }
+        System.arraycopy(busVoltages, 0, network.getBusVoltages(), 0, busVoltages.length);
+        System.arraycopy(busAngles, 0, network.getBusAngles(), 0, busAngles.length);
+        network.onStateWrite();
     }
 
     /** Restores the saved voltage magnitude and angle of the given buses, and nothing else. */
