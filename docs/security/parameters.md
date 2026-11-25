@@ -33,6 +33,17 @@ this could lead to more equipments to be simulated as tripped, because disconnec
 The default value is `true`.
 
 (param-secu-create-result-extension)=
+By default, each simulation (a contingency, an operator strategy) factorises its Jacobian with pivots chosen from its
+own matrices, which costs a full numerical factorisation per simulation: its results then do not depend on the
+simulations run before it. When `reusePivots` is set to `true`, a simulation refactorises its Jacobian on the pivots the
+previous one ended with, and chooses new ones only when one of them is no longer good. This is faster, but the last bits
+of the results may then depend on the simulations run before it: their order, and the number of threads.
+
+The default value is `false`.
+
+(param-secu-reuse-pivots)=
+### reusePivots
+The `reusePivots` property applies to the AC Security Analysis.
 ### createResultExtension
 The `createResultExtension` property defines whether Open Load Flow specific results extensions should be created
 in the security analysis results. Today the available extensions provide information about branches and three-windings

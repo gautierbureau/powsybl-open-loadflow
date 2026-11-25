@@ -33,6 +33,8 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
 
     private boolean startWithFrozenACEmulation = START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE;
 
+    private boolean reusePivots = REUSE_PIVOTS_DEFAULT_VALUE;
+
     public static final String CREATE_RESULT_EXTENSION_PARAM_NAME = "createResultExtension";
     public static final boolean CREATE_RESULT_EXTENSION_DEFAULT_VALUE = false;
     public static final String CONTINGENCY_PROPAGATION_PARAM_NAME = "contingencyPropagation";
@@ -45,12 +47,15 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
     public static final boolean START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE = true;
     public static final String CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME = "contingencyActivePowerLossDistribution";
     public static final String CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE = "Default";
+    public static final String REUSE_PIVOTS_PARAM_NAME = "reusePivots";
+    public static final boolean REUSE_PIVOTS_DEFAULT_VALUE = false;
     public static final List<String> SPECIFIC_PARAMETERS_NAMES = List.of(CREATE_RESULT_EXTENSION_PARAM_NAME,
             CONTINGENCY_PROPAGATION_PARAM_NAME,
             THREAD_COUNT_PARAM_NAME,
             DC_FAST_MODE_PARAM_NAME,
             CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME,
-            START_WITH_FROZEN_AC_EMULATION_PARAM_NAME);
+            START_WITH_FROZEN_AC_EMULATION_PARAM_NAME,
+            REUSE_PIVOTS_PARAM_NAME);
 
     @Override
     public String getName() {
@@ -115,6 +120,22 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
         return this;
     }
 
+    /**
+     * When false (the default), each simulation of the AC security analysis (a contingency, an operator strategy)
+     * factorises its Jacobian with pivots chosen from its own matrices: its results do not depend on the simulations
+     * run before it. When true, it refactorises on the pivots the previous simulation ended with, and chooses new ones
+     * only when one of them is no longer good: this saves a full numerical factorisation per simulation, but the last
+     * bits of the results may then depend on the simulations run before (their order, the number of threads).
+     */
+    public boolean isReusePivots() {
+        return reusePivots;
+    }
+
+    public OpenSecurityAnalysisParameters setReusePivots(boolean reusePivots) {
+        this.reusePivots = reusePivots;
+        return this;
+    }
+
     public static OpenSecurityAnalysisParameters getOrDefault(SecurityAnalysisParameters parameters) {
         OpenSecurityAnalysisParameters parametersExt = parameters.getExtension(OpenSecurityAnalysisParameters.class);
         if (parametersExt == null) {
@@ -137,7 +158,8 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
                         .setDcFastMode(config.getBooleanProperty(DC_FAST_MODE_PARAM_NAME, DC_FAST_MODE_DEFAULT_VALUE))
                         .setContingencyActivePowerLossDistribution(config.getStringProperty(CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME,
                             CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE))
-                        .setStartWithFrozenACEmulation(config.getBooleanProperty(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME, START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE)));
+                        .setStartWithFrozenACEmulation(config.getBooleanProperty(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME, START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE))
+                        .setReusePivots(config.getBooleanProperty(REUSE_PIVOTS_PARAM_NAME, REUSE_PIVOTS_DEFAULT_VALUE)));
         return parameters;
     }
 
@@ -159,6 +181,8 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
                 .ifPresent(this::setContingencyActivePowerLossDistribution);
         Optional.ofNullable(properties.get(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME))
                 .ifPresent(value -> this.setStartWithFrozenACEmulation(Boolean.parseBoolean(value)));
+        Optional.ofNullable(properties.get(REUSE_PIVOTS_PARAM_NAME))
+                .ifPresent(value -> this.setReusePivots(Boolean.parseBoolean(value)));
         return this;
     }
 }

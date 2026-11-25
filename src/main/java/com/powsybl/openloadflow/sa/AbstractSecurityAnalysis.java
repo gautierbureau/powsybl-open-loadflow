@@ -88,6 +88,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
     protected Level logLevel = Level.INFO; // level of the post contingency and action logs
 
+    protected boolean reusePivots = OpenSecurityAnalysisParameters.REUSE_PIVOTS_DEFAULT_VALUE;
+
     protected AbstractSecurityAnalysis(Network network, MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory,
                                        List<StateMonitor> stateMonitors, ReportNode reportNode) {
         this.network = Objects.requireNonNull(network);
@@ -132,6 +134,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         LoadFlowParameters lfParameters = securityAnalysisParameters.getLoadFlowParameters();
         OpenLoadFlowParameters lfParametersExt = OpenLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters());
         OpenSecurityAnalysisParameters securityAnalysisParametersExt = OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters);
+        reusePivots = securityAnalysisParametersExt.isReusePivots();
 
         if ((lfParametersExt.isAcDcNetwork()) && (lfParameters.isDc())) {
             throw new PowsyblException("Security analysis does not support DC load flow on AC-DC networks");
