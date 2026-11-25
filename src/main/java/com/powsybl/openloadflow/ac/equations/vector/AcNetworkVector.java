@@ -185,14 +185,15 @@ public class AcNetworkVector extends AbstractLfNetworkListener
     }
 
     /**
-     * Update all power flows and their derivatives.
+     * Update the power flows and their derivatives of the branches that have terms for when they are closed at both
+     * sides (not of a zero impedance branch).
      */
     public void updateClosedBranches(double[] state) {
         var w = new DoubleWrapper();
 
         for (int branchNum = 0; branchNum < branchVector.getSize(); branchNum++) {
 
-            if (!branchVector.disabled[branchNum]) {
+            if (!branchVector.disabled[branchNum] && branchVector.closable[branchNum]) {
 
                 branchVector.r1State[branchNum] = branchVector.r1Row[branchNum] != -1 ? state[branchVector.r1Row[branchNum]]
                         : branchVector.r1[branchNum];

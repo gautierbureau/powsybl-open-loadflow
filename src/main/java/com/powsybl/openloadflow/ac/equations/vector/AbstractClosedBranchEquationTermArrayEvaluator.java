@@ -45,6 +45,12 @@ public abstract class AbstractClosedBranchEquationTermArrayEvaluator extends Abs
 
     protected abstract double calculateSensi(int branchNum, double dph1, double dph2, double dv1, double dv2, double da1, double dr1);
 
+    /** The flows of the branch are then computed at each state update. */
+    @Override
+    public void onTermAdded(int branchNum) {
+        branchVector.setClosable(branchNum);
+    }
+
     @Override
     public List<Derivative<AcVariableType>> getDerivatives(int branchNum) {
         int bus1Num = branchVector.bus1Num[branchNum];
