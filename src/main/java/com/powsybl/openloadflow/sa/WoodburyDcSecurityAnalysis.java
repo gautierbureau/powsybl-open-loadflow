@@ -64,7 +64,7 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
 
     private record ToFastDcResults(Function<ConnectivityAnalysisResult, double[]> toPostContingencyStates,
                                    BiFunction<ConnectivityAnalysisResult, LfOperatorStrategy, ConnectivityAnalysisResult> toPostContingencyAndOperatorStrategyConnectivityAnalysisResult,
-                                   Function<ConnectivityAnalysisResult, double[]> toPostContingencyAndOperatorStrategyStates) {
+                                   BiFunction<ConnectivityAnalysisResult, Predicate<LfBranch>, double[]> toPostContingencyAndOperatorStrategyStates) {
     }
 
     private record SecurityAnalysisSimulationResults(PreContingencyNetworkResult preContingencyNetworkResult, LimitViolationManager preContingencyLimitViolationManager,
@@ -110,18 +110,21 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                                                     ConnectivityAnalysisResult connectivityAnalysisResult, Map<String, ComputedContingencyElement> contingencyElementByBranch,
                                                     ReportNode reportNode) {
         return calculatePostContingencyAndOperatorStrategyStates(loadFlowContext, contingenciesStates, flowStates, connectivityAnalysisResult, contingencyElementByBranch,
-                Collections.emptyMap(), DenseMatrix.EMPTY, reportNode);
+                Collections.emptyMap(), DenseMatrix.EMPTY, branch -> false, reportNode);
     }
 
     /**
      * Calculate post contingency and post operator strategy states, for a contingency and operator strategy actions.
      * In case of connectivity break, a pre-computation is done to reset active power flow of hvdc lines on which one bus is lost.
      * If connectivity, a generator, a load or a phase tap changer is lost/modified due to the contingency/operator strategy, the pre contingency flowStates are overridden.
+     * An action element on a branch the contingency alone already disables (a branch it opens, or one connected to a bus
+     * it disconnects) changes nothing: it is not part of the Woodbury update, which would otherwise remove that branch twice.
      * @return the post contingency and operator strategy states.
      */
     private double[] calculatePostContingencyAndOperatorStrategyStates(DcLoadFlowContext loadFlowContext, DenseMatrix contingenciesStates, double[] flowStates,
                                                                        ConnectivityAnalysisResult connectivityAnalysisResult, Map<String, ComputedContingencyElement> contingencyElementByBranch,
-                                                                       Map<LfAction, List<ComputedElement>> actionElementByLfAction, DenseMatrix actionsStates, ReportNode reportNode) {
+                                                                       Map<LfAction, List<ComputedElement>> actionElementByLfAction, DenseMatrix actionsStates,
+                                                                       Predicate<LfBranch> isBranchDisabledByContingency, ReportNode reportNode) {
         PropagatedContingency contingency = connectivityAnalysisResult.getPropagatedContingency();
         Set<LfBus> disabledBuses = connectivityAnalysisResult.getDisabledBuses();
         Set<LfBranch> partialDisabledBranches = connectivityAnalysisResult.getPartialDisabledBranches();
@@ -143,6 +146,7 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 .filter(Objects::nonNull)
                 .flatMap(Collection::stream)
                 .filter(actionElement -> !elementsToReconnect.contains(actionElement.getLfBranch().getId()))
+                .filter(actionElement -> !isBranchDisabledByContingency.test(actionElement.getLfBranch()))
                 .toList();
 
         var lfNetwork = loadFlowContext.getNetwork();
@@ -247,13 +251,14 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         DcLoadFlowContext loadFlowContext = woodburyContext.dcLoadFlowContext;
         LfNetwork lfNetwork = loadFlowContext.getNetwork();
 
+        // apply modifications first, so that branch flows (which, in the vectorized equation system, are
+        // computed on state vector update) are evaluated on the final network topology and tap positions
+        lfContingency.apply(loadFlowContext.getParameters().getBalanceType());
+        LfActionUtils.applyListOfActions(operatorStrategyLfActions, lfNetwork, lfContingency, loadFlowContext.getParameters().getNetworkParameters());
+
         // update network state with post contingency and post operator strategy states
         loadFlowContext.getEquationSystem().getStateVector().set(postContingencyAndOperatorStrategyStates);
         updateNetwork(lfNetwork, loadFlowContext.getEquationSystem(), postContingencyAndOperatorStrategyStates);
-
-        // apply modifications to compute results
-        lfContingency.apply(loadFlowContext.getParameters().getBalanceType());
-        LfActionUtils.applyListOfActions(operatorStrategyLfActions, lfNetwork, lfContingency, loadFlowContext.getParameters().getNetworkParameters());
 
         // update network result
         var postActionsNetworkResult = new PostContingencyNetworkResult(lfNetwork, stateMonitorIndexes(),
@@ -360,7 +365,7 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 };
 
                 double[] postContingencyAndOperatorStrategyStates = toFastDcResults.toPostContingencyAndOperatorStrategyStates
-                    .apply(postContingencyAndOperatorStrategyConnectivityAnalysisResult);
+                    .apply(postContingencyAndOperatorStrategyConnectivityAnalysisResult, isBranchDisabled);
                 OperatorStrategyResult operatorStrategyResult = computeOperatorStrategyResultFromPostContingencyAndOperatorStrategyStates(woodburyContext,
                     lfContingency, operatorStrategy.value(), operatorStrategyLfActions,
                     securityAnalysisSimulationResults.preContingencyLimitViolationManager, contingency, securityAnalysisSimulationResults.preContingencyNetworkResult,
@@ -389,8 +394,11 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
         // Therefore, we can also assume that lfNetwork contains only one synchronous network
 
         Map<String, Action> actionsById = Actions.indexById(actions);
+        // In MT the operator strategy check is performed before running the simulations: a partition holds only some of
+        // the contingencies the strategies refer to
+        boolean checkOperatorStrategies = OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters).getThreadCount() == 1;
         Map<String, List<Indexed<OperatorStrategy>>> operatorStrategiesByContingencyId =
-                OperatorStrategies.indexByContingencyId(propagatedContingencies, operatorStrategies, actionsById, true);
+                OperatorStrategies.indexByContingencyId(propagatedContingencies, operatorStrategies, actionsById, checkOperatorStrategies);
         Set<Action> neededActions = OperatorStrategies.getNeededActions(operatorStrategiesByContingencyId, actionsById);
         Map<String, LfAction> lfActionById = LfActionUtils.createLfActions(lfNetwork, neededActions, network); // only convert needed actions
 
@@ -439,7 +447,9 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                     securityAnalysisParameters.getModifiedMonitoredElementsParameters());
 
             // compute states with +1 -1 to model the contingencies and run connectivity analysis
-            ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivityBreakAnalysisResults = ConnectivityBreakAnalysis.run(context, propagatedContingencies);
+            // as the AC security analysis: a contingency stranding the slack bus loses the slack bus's component, not the rest
+            ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivityBreakAnalysisResults = ConnectivityBreakAnalysis.run(context, propagatedContingencies,
+                    Collections.emptyList(), true);
 
             // the map is indexed by lf actions as different kind of actions can be given on the same branch
             Map<LfAction, List<ComputedElement>> actionElementsIndexByLfAction = ComputedElement.createActionElementsIndexByLfAction(lfActionById, context.getEquationSystem(),
@@ -470,13 +480,15 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 (postContingencyConnectivityAnalysisResult, operatorStrategyLfActions) ->
                     ConnectivityBreakAnalysis.processPostContingencyAndPostOperatorStrategyConnectivityAnalysisResult(
                             context, postContingencyConnectivityAnalysisResult, connectivityBreakAnalysisResults.contingencyElementByBranch(), connectivityBreakAnalysisResults.contingenciesStates(),
-                            operatorStrategyLfActions, actionElementsIndexByLfAction, actionsStates);
+                            operatorStrategyLfActions, actionElementsIndexByLfAction, actionsStates, true);
 
             // function to compute post contingency and post operator strategy states
-            Function<ConnectivityAnalysisResult, double[]> toPostContingencyAndOperatorStrategyStates = postContingencyAndOperatorStrategyConnectivityAnalysisResult ->
+            BiFunction<ConnectivityAnalysisResult, Predicate<LfBranch>, double[]> toPostContingencyAndOperatorStrategyStates =
+                (postContingencyAndOperatorStrategyConnectivityAnalysisResult, isBranchDisabledByContingency) ->
                     calculatePostContingencyAndOperatorStrategyStates(context, connectivityBreakAnalysisResults.contingenciesStates(),
                             workingContingencyStates, postContingencyAndOperatorStrategyConnectivityAnalysisResult,
-                            connectivityBreakAnalysisResults.contingencyElementByBranch(), actionElementsIndexByLfAction, actionsStates, reportNode);
+                            connectivityBreakAnalysisResults.contingencyElementByBranch(), actionElementsIndexByLfAction, actionsStates,
+                            isBranchDisabledByContingency, reportNode);
             ToFastDcResults toFastDcResults = new ToFastDcResults(toPostContingencyStates, toPostContingencyAndOperatorStrategyConnectivityAnalysisResult, toPostContingencyAndOperatorStrategyStates);
 
             LOGGER.info("Processing post contingency results for contingencies with no connectivity break");
