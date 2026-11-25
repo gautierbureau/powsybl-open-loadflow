@@ -120,10 +120,16 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         final boolean[] active;
         final List<SingleEquationTerm<V, E>> terms;
         final List<Variable<V>> variables;
+        /**
+         * For each equation: true when all the terms it holds as objects are linear, which are then its terms of this
+         * table in the order of their creation. Most single equations: those of the zero impedance branches.
+         */
+        final boolean[] linearOnly;
 
         LinearTerms(int[] start, TIntArrayList slot, TDoubleArrayList coefficient, TIntArrayList destination,
-                    List<SingleEquationTerm<V, E>> terms, List<Variable<V>> variables) {
+                    List<SingleEquationTerm<V, E>> terms, List<Variable<V>> variables, boolean[] linearOnly) {
             this.start = start;
+            this.linearOnly = linearOnly;
             this.slot = slot.toArray();
             this.coefficient = coefficient.toArray();
             this.destination = destination.toArray();
@@ -138,6 +144,23 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             for (int i = 0; i < active.length; i++) {
                 active[i] = terms.get(i).isActive();
             }
+        }
+
+        /** The same for the terms of one equation only: one whose activity, or the activity of a term, changed. */
+        void updateActivity(int equation) {
+            for (int i = start[equation]; i < start[equation + 1]; i++) {
+                active[i] = terms.get(i).isActive();
+            }
+        }
+
+        /** For an assertion: the activity kept is the one of the terms now. */
+        boolean isActivityCurrent() {
+            for (int i = 0; i < active.length; i++) {
+                if (active[i] != terms.get(i).isActive()) {
+                    return false;
+                }
+            }
+            return true;
         }
     }
 
@@ -248,6 +271,14 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private final boolean[] fixesVariable;
     /** For each equation, the slots it may take besides its own, sorted: empty for most. */
     private final int[][] candidates;
+    /**
+     * For an equation that takes part in a chain of moves, whether an active term depends on the variable of its own
+     * slot, and of each of its candidates: what {@link #dependsOnNow} answers, kept from one placement to the next and
+     * refreshed for the equations whose terms changed activity. Only the placement asks, for these slots, thousands of
+     * times per placement around the zero impedance branches.
+     */
+    private final boolean[] ownSlotDependedOnNow;
+    private final boolean[][] candidatesDependedOnNow;
     /** For each slot, the equations that can hold it, built when first asked for. */
     private int[][] alternatives;
     /** For each equation, the terms it holds as objects: null when it has none. */
@@ -354,6 +385,13 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         });
         addCandidatesAgainstZeroDiagonals(candidateSlots, placement);
         candidateSlots.forEach((equation, slotList) -> candidates[equation] = sortedDistinct(slotList));
+        ownSlotDependedOnNow = new boolean[equationCount];
+        candidatesDependedOnNow = new boolean[equationCount][];
+        for (int equation = 0; equation < equationCount; equation++) {
+            if (movesInChain[equation]) {
+                candidatesDependedOnNow[equation] = new boolean[candidates[equation].length];
+            }
+        }
 
         for (int a = 0; a < arrays.size(); a++) {
             List<ArrayTerms<V, E>> termsOfArray = new ArrayList<>();
@@ -505,9 +543,38 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
      */
     boolean dependsOn(int equation, int slot) {
         if (movesInChain[equation]) {
-            return dependsOnNow(equation, slot);
+            boolean dependsNow;
+            if (slot == ownSlot[equation]) {
+                dependsNow = ownSlotDependedOnNow[equation];
+            } else {
+                int i = Arrays.binarySearch(candidates[equation], slot);
+                dependsNow = i >= 0 ? candidatesDependedOnNow[equation][i] : dependsOnNow(equation, slot);
+            }
+            assert dependsNow == dependsOnNow(equation, slot) : "What the equation depends on was not refreshed after a change of activity";
+            return dependsNow;
         }
         return slot == ownSlot[equation] ? dependsOnOwnSlot[equation] : Arrays.binarySearch(rows[equation], slot) >= 0;
+    }
+
+    /**
+     * Refreshes what an equation that takes part in a chain of moves depends on now, for its own slot and its
+     * candidates: after a change of the activity of the equation or of one of its terms.
+     */
+    void refreshDependedOnNow(int equation) {
+        if (movesInChain[equation]) {
+            ownSlotDependedOnNow[equation] = ownSlot[equation] >= 0 && dependsOnNow(equation, ownSlot[equation]);
+            int[] slotsOfCandidates = candidates[equation];
+            for (int i = 0; i < slotsOfCandidates.length; i++) {
+                candidatesDependedOnNow[equation][i] = dependsOnNow(equation, slotsOfCandidates[i]);
+            }
+        }
+    }
+
+    /** The same for every equation: for a new structure, or after a change the events do not locate. */
+    void refreshDependedOnNow() {
+        for (int equation = 0; equation < equationCount; equation++) {
+            refreshDependedOnNow(equation);
+        }
     }
 
     /** True when a term of the equation that is active now depends on the variable of the slot. */
@@ -618,10 +685,15 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             TIntArrayList destination = new TIntArrayList();
             List<SingleEquationTerm<V, E>> terms = new ArrayList<>();
             List<Variable<V>> termVariables = new ArrayList<>();
+            boolean[] linearOnly = new boolean[equationCount];
             for (int equation = 0; equation < equationCount; equation++) {
                 start[equation] = terms.size();
                 ObjectTerms<V, E> compiled = objectTerms.get(equation);
                 if (compiled != null && !mixed[equation]) {
+                    linearOnly[equation] = true;
+                    for (byte kind : compiled.kind) {
+                        linearOnly[equation] &= kind == LINEAR;
+                    }
                     for (int t = 0; t < compiled.row.length; t++) {
                         if (compiled.kind[t] == LINEAR) {
                             slot.add(compiled.row[t][0]);
@@ -634,7 +706,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
                 }
             }
             start[equationCount] = terms.size();
-            linearTerms = new LinearTerms<>(start, slot, coefficient, destination, terms, termVariables);
+            linearTerms = new LinearTerms<>(start, slot, coefficient, destination, terms, termVariables, linearOnly);
         }
         return linearTerms;
     }
@@ -1015,11 +1087,14 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
 
     /**
      * The column of every equation in OLF's index, as {@link #getColumnInEquationSystem(int)} gives it: the elements of
-     * an equation array are consecutive equations, whose columns are copied from the array at once.
+     * an equation array are consecutive equations, whose columns are copied from the array at once. The columns of the
+     * single equations are read only with {@code singles}: they are left as they are otherwise.
      */
-    public void getColumnsInEquationSystem(int[] columns) {
-        for (int equation = 0; equation < singleEquations.size(); equation++) {
-            columns[equation] = bound[equation] ? singleEquations.get(equation).getColumn() : -1;
+    public void getColumnsInEquationSystem(int[] columns, boolean singles) {
+        if (singles) {
+            for (int equation = 0; equation < singleEquations.size(); equation++) {
+                columns[equation] = bound[equation] ? singleEquations.get(equation).getColumn() : -1;
+            }
         }
         for (int a = 0; a < arrays.size(); a++) {
             int first = arrayFirstEquation[a];

@@ -7,11 +7,11 @@
  */
 package com.powsybl.openloadflow.network;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Function;
-import java.util.stream.Collectors;
 
 /**
  * @author Geoffroy Jamgotchian {@literal <geoffroy.jamgotchian at rte-france.com>}
@@ -46,7 +46,11 @@ public class ElementState<T extends LfElement> {
     public static <T extends LfElement, U extends ElementState<T>> List<U> save(Collection<T> elements, Function<T, U> save) {
         Objects.requireNonNull(elements);
         Objects.requireNonNull(save);
-        return elements.stream().map(save).collect(Collectors.toList());
+        List<U> states = new ArrayList<>(elements.size());
+        for (T element : elements) {
+            states.add(save.apply(element));
+        }
+        return states;
     }
 
     public static <T extends LfElement, U extends ElementState<T>> void restore(Collection<U> states) {

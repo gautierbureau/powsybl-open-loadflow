@@ -131,7 +131,13 @@ public class LfSynchronousNetworkImpl implements LfSynchronousNetwork {
 
     @Override
     public List<LfBus> getBuses() {
-        return lfNetwork.getBuses().stream().filter(b -> b.getNumSC() == numSC).toList();
+        List<LfBus> buses = new ArrayList<>();
+        for (LfBus bus : lfNetwork.getBuses()) {
+            if (bus.getNumSC() == numSC) {
+                buses.add(bus);
+            }
+        }
+        return Collections.unmodifiableList(buses);
     }
 
     public void invalidateSlackAndReference() {

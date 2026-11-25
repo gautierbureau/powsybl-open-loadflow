@@ -102,6 +102,12 @@ public class AcBranchVector {
     final double[] dq2da1;
     final double[] dq2dr1;
 
+    /**
+     * True for a branch that has terms for when it is closed at both sides: only these flows are read, a zero impedance
+     * branch has none.
+     */
+    final boolean[] closable;
+
     /** True for a branch that has terms for when it is open at side 1, and the numbers of these branches. */
     final boolean[] openableSide1;
     final TIntArrayList openableSide1Nums = new TIntArrayList();
@@ -191,6 +197,7 @@ public class AcBranchVector {
         dq2da1 = new double[size];
         dq2dr1 = new double[size];
 
+        closable = new boolean[size];
         openableSide1 = new boolean[size];
         openableSide2 = new boolean[size];
 
@@ -234,6 +241,14 @@ public class AcBranchVector {
 
     public int getSize() {
         return disabled.length;
+    }
+
+    /**
+     * Says that a branch has terms for when it is closed at both sides, when one is added to a term array: its flows are then
+     * computed at each state update.
+     */
+    void setClosable(int branchNum) {
+        closable[branchNum] = true;
     }
 
     /**

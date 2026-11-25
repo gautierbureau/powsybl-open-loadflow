@@ -56,6 +56,11 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
         double[][] evalDer();
 
         List<Derivative<V>> getDerivatives(int termElementNum);
+
+        /** Called when a term of the element is added to the array. */
+        default void onTermAdded(int termElementNum) {
+            // nothing to do by default
+        }
     }
 
     private final ElementType elementType;
@@ -160,6 +165,7 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
         termElementNums.add(termElementNum);
         termActive.add((byte) (evaluator.isDisabled(termElementNum) ? 0 : 1));
         termDerivatives.add(evaluator.getDerivatives(termElementNum));
+        evaluator.onTermAdded(termElementNum);
         equationArray.invalidateEquationDerivativeVectors();
         equationArray.getEquationSystem().notifyEquationTermArrayChange(this, termNum, EquationTermEventType.EQUATION_TERM_ADDED);
         return this;
