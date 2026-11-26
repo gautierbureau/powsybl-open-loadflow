@@ -106,6 +106,9 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
         private final FixedStructure<AcVariableType, AcEquationType> structure;
         private final int[] modes;
         private final double[] targets;
+        /** Reused by each record against this base: the columns of the positions and the positions that changed. */
+        private int[] columnsBuffer;
+        private int[] changedBuffer;
         private final List<LfGenerator> generators;
         /** For each bus, the number of its first generator and of its first load. */
         private final int[] firstGenerator;
@@ -295,11 +298,20 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
         int[] deltaModes = new int[0];
         double[] deltaTargets = new double[0];
         if (onBaseStructure) {
-            double[] targets = targetsByPosition(fixed, structure, targetVector);
-            int[] changed = new int[modes.length];
-            for (int position = 0; position < modes.length; position++) {
+            // the target of each position as targetsByPosition gives it, compared with the base in the same pass, on buffers
+            // the base keeps: no array of the size of the system by record
+            int variableCount = modes.length;
+            if (baseline.columnsBuffer == null || baseline.columnsBuffer.length != variableCount) {
+                baseline.columnsBuffer = new int[variableCount];
+                baseline.changedBuffer = new int[variableCount];
+            }
+            int[] columns = baseline.columnsBuffer;
+            int[] changed = baseline.changedBuffer;
+            fixed.getColumnsOfPositions(columns);
+            for (int position = 0; position < variableCount; position++) {
+                double target = columns[position] < 0 ? Double.NaN : targetVector[columns[position]];
                 if (modes[position] != baseline.modes[position]
-                        || Double.doubleToLongBits(targets[position]) != Double.doubleToLongBits(baseline.targets[position])) {
+                        || Double.doubleToLongBits(target) != Double.doubleToLongBits(baseline.targets[position])) {
                     changed[count++] = position;
                 }
             }
@@ -307,8 +319,9 @@ public record AcContingencyDelta(String contingencyId, double activePowerLoss, d
             deltaModes = new int[count];
             deltaTargets = new double[count];
             for (int i = 0; i < count; i++) {
-                deltaModes[i] = modes[positions[i]];
-                deltaTargets[i] = targets[positions[i]];
+                int position = positions[i];
+                deltaModes[i] = modes[position];
+                deltaTargets[i] = columns[position] < 0 ? Double.NaN : targetVector[columns[position]];
             }
         }
         List<Integer> generatorNums = new ArrayList<>();

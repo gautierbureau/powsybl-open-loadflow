@@ -99,8 +99,10 @@ final class AcKeptState {
         }
         bind(current);
         double[] state = equationSystem.getStateVector().get();
+        // the rows of the variables of the positions, as the pairing keeps them
+        int[] rows = fixed.getRowOfPositions();
         for (int position = 0; position < kind.length; position++) {
-            int row = structure.getVariable(position).getRow();
+            int row = rows[position];
             kept[position] = row >= 0 && kind[position] != OTHER;
             if (kept[position]) {
                 value[position] = state[row];
@@ -135,8 +137,9 @@ final class AcKeptState {
         } else {
             Arrays.fill(written, false);
         }
+        int[] rows = fixed.getRowOfPositions();
         for (int position = 0; position < kind.length; position++) {
-            int row = structure.getVariable(position).getRow();
+            int row = rows[position];
             if (row >= 0 && kept[position]) {
                 x[row] = value[position];
                 written[row] = true;
