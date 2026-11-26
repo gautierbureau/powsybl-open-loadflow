@@ -11,11 +11,9 @@ import com.powsybl.commons.PowsyblException;
 import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
-import com.powsybl.openloadflow.equations.EquationArray;
-import com.powsybl.openloadflow.equations.EquationSystem;
-import com.powsybl.openloadflow.equations.SingleEquation;
-import com.powsybl.openloadflow.equations.TargetVector;
+import com.powsybl.openloadflow.equations.*;
 import com.powsybl.openloadflow.network.*;
+import gnu.trove.list.array.TIntArrayList;
 
 import java.util.*;
 
@@ -209,6 +207,44 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
 
     private int computedCount;
 
+    /*
+     * The partial update of the equation arrays, which hold most of the columns: for each type of an equation array, by
+     * ordinal, the elements whose target was forgotten or whose activity changed since the last update (an inactive column of the
+     * index active again, or an element becoming one), or all of them. Only their columns are written again; the single
+     * equations, whose right hand side can change without an event, are all written again.
+     */
+    private final TIntArrayList[] changedElements = new TIntArrayList[TYPE_COUNT];
+    private final boolean[] allChanged = new boolean[TYPE_COUNT];
+    private boolean partialUpdateValid;
+
+    private final EquationSystemListener<AcVariableType, AcEquationType> activityListener = new EquationSystemListener<>() {
+
+        @Override
+        public void onEquationChange(SingleEquation<AcVariableType, AcEquationType> equation, EquationEventType eventType) {
+            // the single equations are all written again
+        }
+
+        @Override
+        public void onEquationTermChange(SingleEquationTerm<AcVariableType, AcEquationType> term, EquationTermEventType eventType) {
+            // no target changes
+        }
+
+        @Override
+        public void onEquationArrayChange(EquationArray<AcVariableType, AcEquationType> equationArray, int elementNum, EquationEventType eventType) {
+            changed(equationArray.getType().ordinal(), elementNum);
+        }
+
+        @Override
+        public void onEquationTermArrayChange(EquationTermArray<AcVariableType, AcEquationType> equationTermArray, int termNum, EquationTermEventType eventType) {
+            // no target changes
+        }
+
+        @Override
+        public void onEquationTermConstantsChange() {
+            // no target changes
+        }
+    };
+
     private final LfNetworkListener targetListener = new AbstractLfNetworkListener() {
 
         @Override
@@ -331,6 +367,34 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
         super(network, equationSystem, INITIALIZER);
         this.network = network;
         network.addListener(targetListener);
+        equationSystem.addListener(activityListener);
+    }
+
+    private void changed(int type, int elementNum) {
+        if (!allChanged[type]) {
+            TIntArrayList elements = changedElements[type];
+            if (elements == null) {
+                elements = new TIntArrayList();
+                changedElements[type] = elements;
+            }
+            elements.add(elementNum);
+        }
+    }
+
+    private void allChanged(int type) {
+        allChanged[type] = true;
+        if (changedElements[type] != null) {
+            changedElements[type].resetQuick();
+        }
+    }
+
+    private void clearChanges() {
+        Arrays.fill(allChanged, false);
+        for (TIntArrayList elements : changedElements) {
+            if (elements != null) {
+                elements.resetQuick();
+            }
+        }
     }
 
     /**
@@ -363,6 +427,7 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
         if (c != null && elementNum < c.length) {
             c[elementNum] = false;
         }
+        changed(type.ordinal(), elementNum);
     }
 
     private void forget(AcEquationType type) {
@@ -370,6 +435,7 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
         if (c != null) {
             Arrays.fill(c, false);
         }
+        allChanged(type.ordinal());
     }
 
     /**
@@ -402,6 +468,9 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
                 Arrays.fill(c, false);
             }
         }
+        for (int type = 0; type < TYPE_COUNT; type++) {
+            allChanged(type);
+        }
         invalidateValues();
     }
 
@@ -430,7 +499,8 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
         return t[elementNum];
     }
 
-    private void gather(double[] array) {
+    /** Writes every column; with {@code partial}, only the columns of the array elements that changed. */
+    private void gather(double[] array, boolean partial) {
         for (SingleEquation<AcVariableType, AcEquationType> equation : equationSystem.getIndex().getSortedSingleEquationsToSolve()) {
             int column = equation.getColumn();
             if (!equation.isActive()) {
@@ -453,16 +523,35 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
             boolean[] c = computed[ordinal];
             double[] t = targets[ordinal];
             int[] columns = equationArray.getElementNumToColumn();
-            for (int elementNum = 0; elementNum < elementCount; elementNum++) {
-                if (equationArray.isElementActive(elementNum)) {
-                    array[columns[elementNum]] = target(type, elementNum, c, t);
-                } else if (columns[elementNum] >= 0) {
-                    // an inactive column of the index: zero
-                    array[columns[elementNum]] = 0;
+            TIntArrayList elements = changedElements[ordinal];
+            if (partial && !allChanged[ordinal]) {
+                if (elements != null) {
+                    for (int i = 0; i < elements.size(); i++) {
+                        int elementNum = elements.getQuick(i);
+                        if (elementNum < elementCount) {
+                            write(equationArray, elementNum, columns, array, type, c, t);
+                        }
+                    }
+                }
+            } else {
+                for (int elementNum = 0; elementNum < elementCount; elementNum++) {
+                    write(equationArray, elementNum, columns, array, type, c, t);
                 }
             }
         }
+        clearChanges();
+        partialUpdateValid = true;
         assert sameAsComputedAgain(array);
+    }
+
+    private void write(EquationArray<AcVariableType, AcEquationType> equationArray, int elementNum, int[] columns, double[] array,
+                       AcEquationType type, boolean[] c, double[] t) {
+        if (equationArray.isElementActive(elementNum)) {
+            array[columns[elementNum]] = target(type, elementNum, c, t);
+        } else if (columns[elementNum] >= 0) {
+            // an inactive column of the index: zero
+            array[columns[elementNum]] = 0;
+        }
     }
 
     private boolean sameAsComputedAgain(double[] array) {
@@ -479,13 +568,14 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
     @Override
     protected double[] createArray() {
         double[] array = reuseOrCreateArray(equationSystem.getIndex().getColumnCount());
-        gather(array);
+        gather(array, false);
         return array;
     }
 
     @Override
     protected void updateArray(double[] array) {
-        gather(array);
+        // the columns are those of the last write as long as the vector is not created again
+        gather(array, partialUpdateValid);
     }
 
     /** How many targets were computed since the vector was created. */
@@ -497,5 +587,6 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
     public void close() {
         super.close();
         network.removeListener(targetListener);
+        equationSystem.removeListener(activityListener);
     }
 }
