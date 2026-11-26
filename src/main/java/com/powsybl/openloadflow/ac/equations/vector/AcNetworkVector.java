@@ -257,20 +257,16 @@ public class AcNetworkVector extends AbstractLfNetworkListener
                     double ph2 = state[branchVector.ph2Row[branchNum]];
                     double a1 = branchVector.a1State[branchNum];
 
-                    double theta1 = theta1(
-                            branchVector.ksi[branchNum],
-                            ph1,
-                            a1,
-                            ph2);
-                    double theta2 = theta2(
-                            branchVector.ksi[branchNum],
-                            ph1,
-                            a1,
-                            ph2);
-                    double sinTheta1 = FastMath.sinAndCos(theta1, w);
-                    double cosTheta1 = w.value;
-                    double sinTheta2 = FastMath.sinAndCos(theta2, w);
-                    double cosTheta2 = w.value;
+                    // theta1 = ksi + d and theta2 = ksi - d: one sine and cosine, combined with those of ksi, kept by branch
+                    double d = ph2 - ph1 - a1 + A2;
+                    double sinD = FastMath.sinAndCos(d, w);
+                    double cosD = w.value;
+                    double sinKsi = branchVector.sinKsi[branchNum];
+                    double cosKsi = branchVector.cosKsi[branchNum];
+                    double sinTheta1 = sinKsi * cosD + cosKsi * sinD;
+                    double cosTheta1 = cosKsi * cosD - sinKsi * sinD;
+                    double sinTheta2 = sinKsi * cosD - cosKsi * sinD;
+                    double cosTheta2 = cosKsi * cosD + sinKsi * sinD;
 
                     double v1 = state[branchVector.v1Row[branchNum]];
                     double v2 = state[branchVector.v2Row[branchNum]];

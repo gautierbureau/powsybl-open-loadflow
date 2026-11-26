@@ -55,6 +55,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class LoadModelEquationTermArrayTest {
 
+    /**
+     * The flows of the term arrays compute the sine and the cosine of the two angles of a branch from those of ksi and of
+     * their half difference: the same values as the objects to the last bits, not bit for bit.
+     */
+    private static final double FLOW_TOLERANCE = 1e-12;
+
     /** A network as an equation system, with its load model terms as objects or as arrays. */
     private record System(LfNetwork network, AcLoadFlowContext context) implements AutoCloseable {
 
@@ -205,8 +211,8 @@ class LoadModelEquationTermArrayTest {
                     loadCount++;
                 }
             }
-            assertEquals(bus.getP().eval(), sameBus.getP().eval(), 1e-14);
-            assertEquals(bus.getQ().eval(), sameBus.getQ().eval(), 1e-14);
+            assertEquals(bus.getP().eval(), sameBus.getP().eval(), FLOW_TOLERANCE);
+            assertEquals(bus.getQ().eval(), sameBus.getQ().eval(), FLOW_TOLERANCE);
         }
         assertEquals(3, loadCount);
         assertEquals(2, busCount);

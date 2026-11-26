@@ -48,6 +48,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ShuntCompensatorEquationTermArrayTest {
 
+    /**
+     * The flows of the term arrays compute the sine and the cosine of the two angles of a branch from those of ksi and of
+     * their half difference: the same values as the objects to the last bits, not bit for bit.
+     */
+    private static final double FLOW_TOLERANCE = 1e-12;
+
     /** A network as an equation system, with its shunt terms as objects or as arrays, away from the flat start. */
     private record System(LfNetwork network, AcLoadFlowContext context) implements AutoCloseable {
 
@@ -132,8 +138,8 @@ class ShuntCompensatorEquationTermArrayTest {
             assertEquals(aSusceptanceIsAVariable, susceptanceVariable);
             for (LfBus bus : objects.network().getBuses()) {
                 LfBus sameBus = arrays.network().getBus(bus.getNum());
-                assertEquals(bus.getP().eval(), sameBus.getP().eval(), 1e-14);
-                assertEquals(bus.getQ().eval(), sameBus.getQ().eval(), 1e-14);
+                assertEquals(bus.getP().eval(), sameBus.getP().eval(), FLOW_TOLERANCE);
+                assertEquals(bus.getQ().eval(), sameBus.getQ().eval(), FLOW_TOLERANCE);
             }
 
             // a susceptance changes, as an outer loop or a contingency does: the arrays follow at once

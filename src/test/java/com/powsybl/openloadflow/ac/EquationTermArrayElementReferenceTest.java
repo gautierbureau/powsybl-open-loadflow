@@ -59,6 +59,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class EquationTermArrayElementReferenceTest {
 
+    /**
+     * The flows of the term arrays compute the sine and the cosine of the two angles of a branch from those of ksi and of
+     * their half difference: the same values as the objects to the last bits, not bit for bit.
+     */
+    private static final double FLOW_TOLERANCE = 1e-12;
+
     /** A network as an equation system, with the flows of its balances as objects or as arrays. */
     private record System(LfNetwork network, AcLoadFlowContext context) implements AutoCloseable {
 
@@ -143,10 +149,10 @@ class EquationTermArrayElementReferenceTest {
                 assertEquals(objectTerm.getVariables().stream().map(EquationTermArrayElementReferenceTest::describe).toList(),
                         term.getVariables().stream().map(EquationTermArrayElementReferenceTest::describe).toList(), name);
                 if (equation.isActive() && term.isActive()) {
-                    assertEquals(objectTerm.eval(), term.eval(), name);
+                    assertEquals(objectTerm.eval(), term.eval(), FLOW_TOLERANCE, name);
                     for (Variable<AcVariableType> variable : objectTerm.getVariables()) {
                         Variable<AcVariableType> sameVariable = arrays.equations().getVariable(variable.getElementNum(), variable.getType());
-                        assertEquals(objectTerm.der(variable), term.der(sameVariable), name + ", " + describe(variable));
+                        assertEquals(objectTerm.der(variable), term.der(sameVariable), FLOW_TOLERANCE, name + ", " + describe(variable));
                     }
                 }
             }
