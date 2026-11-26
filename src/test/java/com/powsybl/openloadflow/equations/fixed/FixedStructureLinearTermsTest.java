@@ -8,7 +8,6 @@
 package com.powsybl.openloadflow.equations.fixed;
 
 import com.powsybl.iidm.network.*;
-import com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder;
 import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreationParameters;
 import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
@@ -22,7 +21,7 @@ import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkParameters;
 import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.network.util.UniformValueVoltageInitializer;
-import com.powsybl.openloadflow.test.networks.HvdcNetworkFactory;
+import com.powsybl.openloadflow.test.networks.VoltageControlNetworkFactory;
 import com.powsybl.openloadflow.test.networks.ZeroImpedanceNetworkFactory;
 import org.junit.jupiter.api.Test;
 
@@ -52,8 +51,9 @@ class FixedStructureLinearTermsTest {
     /**
      * Around a zero impedance line every term held as an object is a coefficient times one variable: the two angles in
      * the equation of the line, its flow in the balances of its two buses. The structure holds them in one table, with
-     * their position and their coefficient, and evaluates them from it. The balance of a bus of an HVDC line in AC
-     * emulation holds a term that is not of this kind: its object terms are evaluated one by one.
+     * their position and their coefficient, and evaluates them from it. In a system that is not vectorized, the equation
+     * that shares the reactive power between the generators that hold one voltage holds terms that are not of this
+     * kind, the reactive flows of the branches of these generators: its object terms are evaluated one by one.
      */
     @Test
     void linearTermsAreHeldInATable() {
@@ -96,16 +96,17 @@ class FixedStructureLinearTermsTest {
             assertEquals(Map.of(flow1, -1d, flow3, 1d), coefficients(fixed.getStructure().getLinearTerms(), balance, true));
         }
 
-        Network hvdcNetwork = hvdcInAcEmulation();
-        LfNetwork hvdcLfNetwork = load(hvdcNetwork);
-        EquationSystem<AcVariableType, AcEquationType> hvdcLfNetworkEquations = create(hvdcLfNetwork, true);
+        Network remoteControlNetwork = VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        LfNetwork remoteControlLfNetwork = load(remoteControlNetwork);
+        EquationSystem<AcVariableType, AcEquationType> remoteControlLfNetworkEquations = create(remoteControlLfNetwork, false);
         try (FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed =
-                     new FixedEquationSystemIndex<>(hvdcLfNetworkEquations, new AcVariablePairing(hvdcLfNetwork), FixedEquationSystemIndex.Scope.ALL)) {
+                     new FixedEquationSystemIndex<>(remoteControlLfNetworkEquations, new AcVariablePairing(remoteControlLfNetwork), FixedEquationSystemIndex.Scope.ALL)) {
             FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
-            LfBus converterBus = hvdcLfNetwork.getHvdcs().get(0).getBus1();
-            int balance = structure.getNumber(AcEquationType.BUS_TARGET_P, converterBus.getNum());
-            assertTrue(structure.isMixed(balance));
-            assertTrue(coefficients(structure.getLinearTerms(), balance, true).isEmpty());
+            int distribution = structure.getNumber(AcEquationType.DISTR_Q, remoteControlLfNetwork.getGeneratorById("g1").getBus().getNum());
+            assertTrue(distribution >= 0);
+            assertTrue(structure.isMixed(distribution));
+            assertTrue(coefficients(structure.getLinearTerms(), distribution, true).isEmpty());
+            assertEquals(0, structure.getElementTerms().terms.size());
         }
     }
 
@@ -118,16 +119,5 @@ class FixedStructureLinearTermsTest {
             }
         }
         return coefficients;
-    }
-
-    /** The HVDC line of the factory follows the angles of its two ends only with this extension. */
-    private static Network hvdcInAcEmulation() {
-        Network network = HvdcNetworkFactory.createWithHvdcInAcEmulation();
-        network.getHvdcLine("hvdc34").newExtension(HvdcAngleDroopActivePowerControlAdder.class)
-                .withDroop(180)
-                .withP0(0f)
-                .withEnabled(true)
-                .add();
-        return network;
     }
 }

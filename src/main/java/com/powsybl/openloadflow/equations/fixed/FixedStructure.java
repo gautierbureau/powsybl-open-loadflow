@@ -13,6 +13,7 @@ import com.powsybl.openloadflow.equations.Equation;
 import com.powsybl.openloadflow.equations.EquationArray;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationTermArray;
+import com.powsybl.openloadflow.equations.EquationTermArrayElementReference;
 import com.powsybl.openloadflow.equations.Quantity;
 import com.powsybl.openloadflow.equations.SingleEquation;
 import com.powsybl.openloadflow.equations.SingleEquationTerm;
@@ -25,6 +26,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.SortedSet;
@@ -86,19 +88,23 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         final int[][] row;
         /** For each variable of each term: the value index in the column of the position of the equation, -1 when the matrix structure lacks it. */
         final int[][] matrixElementIndex;
+        /** For each term: {@link #LINEAR}, {@link #ELEMENT} or {@link #OTHER}. */
+        final byte[] kind;
 
-        ObjectTerms(List<SingleEquationTerm<V, E>> terms) {
+        ObjectTerms(List<SingleEquationTerm<V, E>> terms, byte[] kind) {
             this.terms = terms;
+            this.kind = kind;
             row = new int[terms.size()][];
             matrixElementIndex = new int[terms.size()][];
         }
     }
 
     /**
-     * The terms that are a coefficient times one variable, of the equations that hold no other term as an object, one
-     * equation after the other. The equations that tie the buses of a zero impedance branch together, the flows of
-     * such a branch in the balances of its buses, the targets of the voltages, the taps and the susceptances are of
-     * this kind. They are evaluated in one loop over these arrays, without a call to an object.
+     * The terms that are a coefficient times one variable, of the equations whose terms held as objects are all of
+     * this kind or of the kind of {@link ElementTerms}, one equation after the other. The equations that tie the buses
+     * of a zero impedance branch together, the flows of such a branch in the balances of its buses, the targets of the
+     * voltages, the taps and the susceptances are of this kind. They are evaluated in one loop over these arrays,
+     * without a call to an object.
      */
     static final class LinearTerms<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> {
 
@@ -135,6 +141,84 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         }
     }
 
+    /**
+     * The terms that are a coefficient times an element of a term array, of the same equations, one equation after the
+     * other: the flows of the branches and of the shunts of the controller buses in a reactive power distribution
+     * equation, or the flow a phase shifter controls, which the balances of the buses already hold in term arrays.
+     * They are evaluated in one loop over these arrays, from the values and the derivatives the term arrays computed,
+     * without a call to an object.
+     */
+    static final class ElementTerms<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> {
+
+        /** For each equation, the index of its first term; a last entry closes the last equation. */
+        final int[] start;
+        /** The term arrays the terms refer to. */
+        final List<EquationTermArray<V, E>> termArrays;
+        /** For each term: the index of its term array in {@link #termArrays}. */
+        final int[] termArray;
+        /** For each term: its element, the index of its value and of its derivatives in the arrays of its term array. */
+        final int[] element;
+        /** For each term: its coefficient, or NaN when the term computes it at each evaluation. */
+        final double[] coefficient;
+        /** For each variable of each term: the array of its derivatives in {@code evalDer()}. */
+        final int[][] localIndex;
+        /** For each variable of each term: its position. */
+        final int[][] position;
+        /** For each variable of each term: the value index in the own column of its equation, -1 when the matrix structure lacks it. */
+        final int[][] matrixElementIndex;
+        /** For each term: whether it is active, as of the last call to {@link #updateActivity()}. */
+        final boolean[] active;
+        final List<SingleEquationTerm<V, E>> terms;
+        /** For each term array: its values and its derivatives, as of the last call to {@link #readTermArrays()}. */
+        final double[][] values;
+        final double[][][] derivatives;
+
+        ElementTerms(int[] start, List<EquationTermArray<V, E>> termArrays, TIntArrayList termArray, TIntArrayList element,
+                     TDoubleArrayList coefficient, List<int[]> localIndex, List<int[]> position, List<int[]> matrixElementIndex,
+                     List<SingleEquationTerm<V, E>> terms) {
+            this.start = start;
+            this.termArrays = termArrays;
+            this.termArray = termArray.toArray();
+            this.element = element.toArray();
+            this.coefficient = coefficient.toArray();
+            this.localIndex = localIndex.toArray(new int[0][]);
+            this.position = position.toArray(new int[0][]);
+            this.matrixElementIndex = matrixElementIndex.toArray(new int[0][]);
+            this.active = new boolean[terms.size()];
+            this.terms = terms;
+            values = new double[termArrays.size()][];
+            derivatives = new double[termArrays.size()][][];
+            updateActivity();
+        }
+
+        /** Reads again which terms are active: to call when an activation changed, before the terms are evaluated. */
+        void updateActivity() {
+            for (int i = 0; i < active.length; i++) {
+                active[i] = terms.get(i).isActive();
+            }
+        }
+
+        /** Takes the values and the derivatives the term arrays hold at the current state. */
+        void readTermArrays() {
+            for (int a = 0; a < values.length; a++) {
+                values[a] = termArrays.get(a).eval();
+                derivatives[a] = termArrays.get(a).evalDer();
+            }
+        }
+
+        /** The coefficient of a term that computes it at each evaluation. */
+        double computeCoefficient(int term) {
+            return ((SingleEquationTerm.MultiplyByScalarEquationTerm<V, E>) terms.get(term)).getScalar();
+        }
+    }
+
+    /** A term held as an object that is a coefficient times a variable. */
+    static final byte LINEAR = 0;
+    /** A term held as an object that is a coefficient times an element of a term array. */
+    static final byte ELEMENT = 1;
+    /** Any other term held as an object: it is evaluated by a call to it. */
+    static final byte OTHER = 2;
+
     private static final int[] NO_SLOT = new int[0];
 
     private final List<Variable<V>> variables;
@@ -162,10 +246,15 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private final int[][] controllerPositions;
     /** For each equation, the terms it holds as objects: null when it has none. */
     private final List<ObjectTerms<V, E>> objectTerms;
-    /** True for an equation that holds as an object a term that is not linear: its object terms are evaluated one by one. */
+    /**
+     * True for an equation that holds as an object a term that is neither a coefficient times a variable nor a
+     * coefficient times an element of a term array: its object terms are evaluated one by one.
+     */
     private final boolean[] mixed;
     /** The linear terms of the other equations: built when asked for, and again when an equation is compiled again. */
     private LinearTerms<V, E> linearTerms;
+    /** Their terms that refer to an element of a term array: built when asked for, and again when an equation is compiled again. */
+    private ElementTerms<V, E> elementTerms;
 
     private final List<ArrayTerms<V, E>> arrayTerms = new ArrayList<>();
     /** For each equation array, the terms of its term arrays. */
@@ -444,14 +533,17 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private ObjectTerms<V, E> compileObjectTerms(int equation) {
         List<SingleEquationTerm<V, E>> terms = List.copyOf(getSingleTerms(equation));
         linearTerms = null;
+        elementTerms = null;
         mixed[equation] = false;
-        for (SingleEquationTerm<V, E> term : terms) {
-            mixed[equation] |= !isLinear(term);
+        byte[] kind = new byte[terms.size()];
+        for (int t = 0; t < kind.length; t++) {
+            kind[t] = kind(terms.get(t));
+            mixed[equation] |= kind[t] == OTHER;
         }
         if (terms.isEmpty()) {
             return null;
         }
-        ObjectTerms<V, E> compiled = new ObjectTerms<>(terms);
+        ObjectTerms<V, E> compiled = new ObjectTerms<>(terms, kind);
         for (int t = 0; t < terms.size(); t++) {
             List<Variable<V>> termVariables = terms.get(t).getVariables();
             compiled.variables.add(termVariables);
@@ -469,14 +561,26 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         return compiled;
     }
 
-    /** A variable, or a variable multiplied by a scalar. */
-    private static boolean isLinear(SingleEquationTerm<?, ?> term) {
-        return term instanceof VariableEquationTerm
-                || term instanceof SingleEquationTerm.MultiplyByScalarEquationTerm<?, ?> multiple
-                        && multiple.getChildren().get(0) instanceof VariableEquationTerm;
+    /** A variable or an element of a term array, alone or multiplied by a scalar, is evaluated from arrays. */
+    private static byte kind(SingleEquationTerm<?, ?> term) {
+        SingleEquationTerm<?, ?> multiplied = multiplied(term);
+        if (multiplied instanceof VariableEquationTerm) {
+            return LINEAR;
+        }
+        // one derivative for each variable, so that the derivatives of the term are those of its variables, in their order
+        if (multiplied instanceof EquationTermArrayElementReference<?, ?> reference
+                && reference.getDerivatives().size() == reference.getVariables().size()) {
+            return ELEMENT;
+        }
+        return OTHER;
     }
 
-    /** The coefficient of a linear term: NaN when its scalar is not a constant. */
+    /** The term a scalar multiplies, or the term itself. */
+    private static SingleEquationTerm<?, ?> multiplied(SingleEquationTerm<?, ?> term) {
+        return term instanceof SingleEquationTerm.MultiplyByScalarEquationTerm<?, ?> multiple ? multiple.getChildren().get(0) : term;
+    }
+
+    /** The coefficient of a term evaluated from arrays: NaN when its scalar is not a constant. */
     private static double coefficient(SingleEquationTerm<?, ?> term) {
         if (term instanceof SingleEquationTerm.MultiplyByScalarEquationTerm<?, ?> multiple) {
             return multiple.isScalarConstant() ? multiple.getScalar() : Double.NaN;
@@ -484,7 +588,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         return 1;
     }
 
-    /** True for an equation whose object terms are evaluated one by one: one of them is not linear. */
+    /** True for an equation whose object terms are evaluated one by one: one of them is not evaluated from arrays. */
     boolean isMixed(int equation) {
         return mixed[equation];
     }
@@ -503,11 +607,13 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
                 ObjectTerms<V, E> compiled = objectTerms.get(equation);
                 if (compiled != null && !mixed[equation]) {
                     for (int t = 0; t < compiled.row.length; t++) {
-                        position.add(compiled.row[t][0]);
-                        coefficient.add(coefficient(compiled.terms.get(t)));
-                        matrixElementIndex.add(compiled.matrixElementIndex[t][0]);
-                        terms.add(compiled.terms.get(t));
-                        termVariables.add(compiled.variables.get(t).get(0));
+                        if (compiled.kind[t] == LINEAR) {
+                            position.add(compiled.row[t][0]);
+                            coefficient.add(coefficient(compiled.terms.get(t)));
+                            matrixElementIndex.add(compiled.matrixElementIndex[t][0]);
+                            terms.add(compiled.terms.get(t));
+                            termVariables.add(compiled.variables.get(t).get(0));
+                        }
                     }
                 }
             }
@@ -515,6 +621,48 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             linearTerms = new LinearTerms<>(start, position, coefficient, matrixElementIndex, terms, termVariables);
         }
         return linearTerms;
+    }
+
+    /** The terms of the equations that are not mixed that refer to an element of a term array. */
+    ElementTerms<V, E> getElementTerms() {
+        if (elementTerms == null) {
+            int[] start = new int[equationCount + 1];
+            List<EquationTermArray<V, E>> termArrays = new ArrayList<>();
+            Map<EquationTermArray<V, E>, Integer> termArrayIndices = new IdentityHashMap<>();
+            TIntArrayList termArray = new TIntArrayList();
+            TIntArrayList element = new TIntArrayList();
+            TDoubleArrayList coefficient = new TDoubleArrayList();
+            List<int[]> localIndex = new ArrayList<>();
+            List<int[]> position = new ArrayList<>();
+            List<int[]> matrixElementIndex = new ArrayList<>();
+            List<SingleEquationTerm<V, E>> terms = new ArrayList<>();
+            for (int equation = 0; equation < equationCount; equation++) {
+                start[equation] = terms.size();
+                ObjectTerms<V, E> compiled = objectTerms.get(equation);
+                if (compiled != null && !mixed[equation]) {
+                    for (int t = 0; t < compiled.row.length; t++) {
+                        if (compiled.kind[t] == ELEMENT) {
+                            @SuppressWarnings("unchecked")
+                            EquationTermArrayElementReference<V, E> reference = (EquationTermArrayElementReference<V, E>) multiplied(compiled.terms.get(t));
+                            termArray.add(termArrayIndices.computeIfAbsent(reference.getTermArray(), array -> {
+                                termArrays.add(array);
+                                return termArrays.size() - 1;
+                            }));
+                            element.add(reference.getTermElementNum());
+                            coefficient.add(coefficient(compiled.terms.get(t)));
+                            localIndex.add(reference.getDerivatives().stream().mapToInt(Derivative::getLocalIndex).toArray());
+                            // the arrays of the compiled term itself: its matrix element indices follow the position of the equation
+                            position.add(compiled.row[t]);
+                            matrixElementIndex.add(compiled.matrixElementIndex[t]);
+                            terms.add(compiled.terms.get(t));
+                        }
+                    }
+                }
+            }
+            start[equationCount] = terms.size();
+            elementTerms = new ElementTerms<>(start, termArrays, termArray, element, coefficient, localIndex, position, matrixElementIndex, terms);
+        }
+        return elementTerms;
     }
 
     private ArrayTerms<V, E> compile(EquationTermArray<V, E> termArray, int a) {
@@ -626,12 +774,14 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private void setObjectTermMatrixElementIndices(int equation) {
         ObjectTerms<V, E> compiled = objectTerms.get(equation);
         if (compiled != null) {
+            // the table of the linear terms holds a copy of their matrix element indices; the one of the element terms the arrays themselves
+            int linear = linearTerms != null && !mixed[equation] ? linearTerms.start[equation] : -1;
             for (int t = 0; t < compiled.row.length; t++) {
                 for (int k = 0; k < compiled.row[t].length; k++) {
                     compiled.matrixElementIndex[t][k] = pairedPosition[equation] >= 0 ? index(pairedPosition[equation], compiled.row[t][k]) : -1;
                 }
-                if (linearTerms != null && !mixed[equation]) {
-                    linearTerms.matrixElementIndex[linearTerms.start[equation] + t] = compiled.matrixElementIndex[t][0];
+                if (linear >= 0 && compiled.kind[t] == LINEAR) {
+                    linearTerms.matrixElementIndex[linear++] = compiled.matrixElementIndex[t][0];
                 }
             }
         }
@@ -703,6 +853,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             objectTerms.set(number, null);
             mixed[number] = false;
             linearTerms = null;
+            elementTerms = null;
         }
         return number >= 0;
     }

@@ -118,6 +118,17 @@ class FixedEquationSystemIndexTest {
         return network;
     }
 
+    /** The HVDC line of the factory follows the angles of its two ends only with this extension. */
+    private static Network hvdcInAcEmulation() {
+        Network network = HvdcNetworkFactory.createWithHvdcInAcEmulation();
+        network.getHvdcLine("hvdc34").newExtension(HvdcAngleDroopActivePowerControlAdder.class)
+                .withDroop(180)
+                .withP0(0f)
+                .withEnabled(true)
+                .add();
+        return network;
+    }
+
     private static List<Case> cases() {
         return List.of(
                 new Case("ieee14", IeeeCdfNetworkFactory::create14),
@@ -619,16 +630,5 @@ class FixedEquationSystemIndexTest {
 
     private static void assertClose(double expected, double actual, String message) {
         assertEquals(expected, actual, 1e-12 * Math.max(1, Math.abs(expected)), message);
-    }
-
-    /** The HVDC line of the factory follows the angles of its two ends only with this extension. */
-    private static Network hvdcInAcEmulation() {
-        Network network = HvdcNetworkFactory.createWithHvdcInAcEmulation();
-        network.getHvdcLine("hvdc34").newExtension(HvdcAngleDroopActivePowerControlAdder.class)
-                .withDroop(180)
-                .withP0(0f)
-                .withEnabled(true)
-                .add();
-        return network;
     }
 }
