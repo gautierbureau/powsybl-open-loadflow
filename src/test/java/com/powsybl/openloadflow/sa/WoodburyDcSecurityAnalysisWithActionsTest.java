@@ -841,4 +841,35 @@ class WoodburyDcSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnal
             assertEquals(650.0, getOperatorStrategyResult(result, "strategy").getNetworkResult().getBranchResult("L2").getP1(), DELTA_POWER);
         }
     }
+
+    /**
+     * A contingency on a line inside a bay that is dead in the base case (LX, behind the open breaker BX), with an action
+     * closing BX: the fast DC security analysis rejects the action, as when the contingency is not given, instead of failing
+     * on the contingency's states, the dead bay's buses having no row in the base case's system.
+     */
+    @Test
+    void testFastDcSaContingencyOnABranchToADeadBay() {
+        Network network = NodeBreakerNetworkFactory.create();
+        VoltageLevel vl2 = network.getVoltageLevel("VL2");
+        // the dead bay: BX open towards it, two buses inside it (a retained breaker BZ) joined by the line LX too
+        vl2.getNodeBreakerView().newBreaker().setId("BX").setNode1(0).setNode2(10).setOpen(true).add();
+        vl2.getNodeBreakerView().newBreaker().setId("BZ").setNode1(10).setNode2(12).setRetained(true).add();
+        vl2.newLoad().setId("LDX").setNode(13).setP0(50.0).setQ0(0.0).add();
+        vl2.getNodeBreakerView().newInternalConnection().setNode1(12).setNode2(13).add();
+        vl2.getNodeBreakerView().newInternalConnection().setNode1(10).setNode2(11).add();
+        vl2.getNodeBreakerView().newInternalConnection().setNode1(12).setNode2(14).add();
+        network.newLine().setId("LX").setVoltageLevel1("VL2").setNode1(11).setVoltageLevel2("VL2").setNode2(14)
+                .setR(3.0).setX(33.0).setB1(0.0).setB2(0.0).add();
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")),
+                new Contingency("LX", new BranchContingency("LX")));
+        List<Action> actions = List.of(new SwitchAction("closeBX", "BX", false));
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("strategy", ContingencyContext.specificContingency("L1"), new TrueCondition(), List.of("closeBX")));
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(true);
+
+        CompletionException exception = assertThrows(CompletionException.class, () -> runSecurityAnalysis(network, contingencies,
+                createAllBranchesMonitors(network), securityAnalysisParameters, operatorStrategies, actions, ReportNode.NO_OP));
+        assertEquals("Action 'closeBX' connects branch 'BX' to bus 'VL2_10', which is not energized in the base case: "
+                + "not supported in fast DC security analysis", exception.getCause().getMessage());
+    }
 }

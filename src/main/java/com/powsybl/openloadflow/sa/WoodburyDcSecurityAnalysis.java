@@ -438,12 +438,15 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                     securityAnalysisParameters.getIncreasedViolationsParameters(), limitScalings,
                     securityAnalysisParameters.getModifiedMonitoredElementsParameters());
 
-            // compute states with +1 -1 to model the contingencies and run connectivity analysis
-            ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivityBreakAnalysisResults = ConnectivityBreakAnalysis.run(context, propagatedContingencies);
-
+            // built before the contingencies' states: an action closing a branch towards a bus dead in the base case is
+            // rejected here, and that bus, kept in the network for that action only, would otherwise fail the contingency
+            // columns of a branch touching it first
             // the map is indexed by lf actions as different kind of actions can be given on the same branch
             Map<LfAction, List<ComputedElement>> actionElementsIndexByLfAction = ComputedElement.createActionElementsIndexByLfAction(lfActionById, context.getEquationSystem(),
                     context.getParameters().getEquationSystemCreationParameters());
+
+            // compute states with +1 -1 to model the contingencies and run connectivity analysis
+            ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivityBreakAnalysisResults = ConnectivityBreakAnalysis.run(context, propagatedContingencies);
 
             // compute states with +1 -1 to model the actions in Woodbury engine
             // note that the number of columns in the matrix depends on the number of distinct branches affected by the action elements
