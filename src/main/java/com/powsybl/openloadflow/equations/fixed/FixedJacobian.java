@@ -56,7 +56,7 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     private int pivotingCount;
 
     public FixedJacobian(EquationSystem<V, E> equationSystem, VariablePairing<V, E> pairing, MatrixFactory matrixFactory) {
-        this.fixed = new FixedEquationSystemIndex<>(equationSystem, pairing);
+        this.fixed = new FixedEquationSystemIndex<>(equationSystem, pairing, FixedEquationSystemIndex.Scope.ALL);
         this.matrixFactory = matrixFactory;
     }
 

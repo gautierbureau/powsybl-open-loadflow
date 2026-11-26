@@ -23,8 +23,7 @@ import com.powsybl.openloadflow.ac.equations.AcStateVectorUtil;
 import com.powsybl.openloadflow.ac.equations.AcVariablePairing;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
-import com.powsybl.openloadflow.equations.fixed.FixedEquationSystemIndex;
-import com.powsybl.openloadflow.equations.fixed.FixedStructure;
+import com.powsybl.openloadflow.equations.fixed.*;
 import com.powsybl.openloadflow.equations.fixed.FixedStructures;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
@@ -32,6 +31,7 @@ import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfShunt;
 import com.powsybl.openloadflow.network.LfSynchronousNetwork;
+import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.network.util.UniformValueVoltageInitializer;
 import com.powsybl.openloadflow.test.networks.DistributedSlackNetworkFactory;
@@ -145,7 +145,10 @@ class FixedEquationSystemIndexTest {
     }
 
     private static Stream<Arguments> arguments() {
-        return cases().stream().flatMap(c -> Stream.of(Arguments.of(c, false), Arguments.of(c, true)));
+        return cases().stream().flatMap(c -> Stream.of(
+                Arguments.of(c, false, FixedEquationSystemIndex.Scope.ALL),
+                Arguments.of(c, true, FixedEquationSystemIndex.Scope.ALL),
+                Arguments.of(c, true, FixedEquationSystemIndex.Scope.ACTIVE)));
     }
 
     private static AcLoadFlowParameters acParameters(Network network, LoadFlowParameters parameters, boolean breakers, boolean vectorized) {
@@ -154,9 +157,9 @@ class FixedEquationSystemIndexTest {
                 .setVectorized(vectorized);
     }
 
-    @ParameterizedTest(name = "{0}, vectorized = {1}")
+    @ParameterizedTest(name = "{0}, vectorized = {1}, scope = {2}")
     @MethodSource("arguments")
-    void matchesTheEquationSystem(Case c, boolean vectorized) {
+    void matchesTheEquationSystem(Case c, boolean vectorized, FixedEquationSystemIndex.Scope scope) {
         Network network = c.network().get();
         LoadFlowParameters parameters = new LoadFlowParameters();
         c.configuration().accept(parameters);
@@ -164,7 +167,7 @@ class FixedEquationSystemIndexTest {
         LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
         try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
              FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed =
-                     new FixedEquationSystemIndex<>(context.getEquationSystem(), new AcVariablePairing(lfNetwork))) {
+                     new FixedEquationSystemIndex<>(context.getEquationSystem(), new AcVariablePairing(lfNetwork), scope)) {
             check(lfNetwork, context, fixed, "base state");
             checkNewtonStep(context, fixed);
 
@@ -185,7 +188,9 @@ class FixedEquationSystemIndexTest {
             assertEquals(1, fixed.getStructureBuildCount());
             // and with every equation and every controller position in it from the start, the matrix structure is built once: also when
             // a reactive balance first takes the position of a tap, of a susceptance or of a remote generator bus
-            assertEquals(1, fixed.getMatrixStructureBuildCount());
+            if (scope == FixedEquationSystemIndex.Scope.ALL) {
+                assertEquals(1, fixed.getMatrixStructureBuildCount());
+            }
         }
     }
 
@@ -201,24 +206,55 @@ class FixedEquationSystemIndexTest {
         LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
         try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
              FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed =
-                     new FixedEquationSystemIndex<>(context.getEquationSystem(), new AcVariablePairing(lfNetwork))) {
-            String rows01 = " | BUS_V:0 BUS_PHI:0 BUS_V:1 BUS_PHI:1\n";
-            String rows012 = " | BUS_V:0 BUS_PHI:0 BUS_V:1 BUS_PHI:1 BUS_V:2 BUS_PHI:2\n";
-            String rows123 = " | BUS_V:1 BUS_PHI:1 BUS_V:2 BUS_PHI:2 BUS_V:3 BUS_PHI:3\n";
-            String rows23 = " | BUS_V:2 BUS_PHI:2 BUS_V:3 BUS_PHI:3\n";
-            String firstPositions = "BUS_V:0 <- BUS_TARGET_V:0" + rows01
-                    + "BUS_PHI:0 <- BUS_TARGET_P:0" + rows01
-                    + "BUS_V:1 <- BUS_TARGET_Q:1" + rows012
-                    + "BUS_PHI:1 <- BUS_TARGET_PHI:1" + rows012
-                    + "BUS_V:2 <- BUS_TARGET_Q:2" + rows123
-                    + "BUS_PHI:2 <- BUS_TARGET_P:2" + rows123;
-            assertEquals(firstPositions + "BUS_V:3 <- BUS_TARGET_Q:3" + rows23 + "BUS_PHI:3 <- BUS_TARGET_P:3" + rows23, write(fixed));
+                     new FixedEquationSystemIndex<>(context.getEquationSystem(), AcVariablePairing.INSTANCE, FixedEquationSystemIndex.Scope.ALL)) {
+            String matrixStructure01 = " | BUS_V:0 BUS_PHI:0 BUS_V:1 BUS_PHI:1\n";
+            String matrixStructure012 = " | BUS_V:0 BUS_PHI:0 BUS_V:1 BUS_PHI:1 BUS_V:2 BUS_PHI:2\n";
+            String matrixStructure123 = " | BUS_V:1 BUS_PHI:1 BUS_V:2 BUS_PHI:2 BUS_V:3 BUS_PHI:3\n";
+            String matrixStructure23 = " | BUS_V:2 BUS_PHI:2 BUS_V:3 BUS_PHI:3\n";
+            String firstPositions = "BUS_V:0 <- BUS_TARGET_V:0" + matrixStructure01
+                    + "BUS_PHI:0 <- BUS_TARGET_P:0" + matrixStructure01
+                    + "BUS_V:1 <- BUS_TARGET_Q:1" + matrixStructure012
+                    + "BUS_PHI:1 <- BUS_TARGET_PHI:1" + matrixStructure012
+                    + "BUS_V:2 <- BUS_TARGET_Q:2" + matrixStructure123
+                    + "BUS_PHI:2 <- BUS_TARGET_P:2" + matrixStructure123;
+            assertEquals(firstPositions + "BUS_V:3 <- BUS_TARGET_Q:3" + matrixStructure23 + "BUS_PHI:3 <- BUS_TARGET_P:3" + matrixStructure23, write(fixed));
 
             LfBus lost = lfNetwork.getBusById("VLLOAD_0");
             lost.setDisabled(true);
             lost.getBranches().forEach(branch -> branch.setDisabled(true));
-            assertEquals(firstPositions + "BUS_V:3 <- none" + rows23 + "BUS_PHI:3 <- none" + rows23, write(fixed));
+            assertEquals(firstPositions + "BUS_V:3 <- none" + matrixStructure23 + "BUS_PHI:3 <- none" + matrixStructure23, write(fixed));
             assertEquals(1, fixed.getMatrixStructureBuildCount());
+        }
+    }
+
+    /**
+     * A bus at an end of a zero impedance branch is off before the equation system is created, like the far side of an
+     * open switch that is kept for an action. Its positions hold nothing, and those of the branch hold the two equations
+     * that fix its flows to zero. The two equations that tie the buses together are off, and they cannot be evaluated:
+     * one of their variables is not in the system. The positions they are paired with have no balance.
+     */
+    @Test
+    void noBalanceWhereAVariableIsNotInTheSystem() {
+        Network network = ZeroImpedanceNetworkFactory.createWithVoltageControl();
+        AcLoadFlowParameters acParameters = acParameters(network, new LoadFlowParameters(), false, true);
+        LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
+        LfBranch branch = lfNetwork.getBranches().stream().filter(b -> b.isZeroImpedance(LoadFlowModel.AC)).findFirst().orElseThrow();
+        LfBus off = branch.getBus1().isSlack() || branch.getBus1().isReference() ? branch.getBus2() : branch.getBus1();
+        off.setDisabled(true);
+        off.getBranches().forEach(b -> b.setDisabled(true));
+        try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
+             FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed =
+                     new FixedEquationSystemIndex<>(context.getEquationSystem(), AcVariablePairing.INSTANCE, FixedEquationSystemIndex.Scope.ALL)) {
+            check(lfNetwork, context, fixed, "bus off");
+            FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
+            for (AcVariableType flow : List.of(AcVariableType.DUMMY_P, AcVariableType.DUMMY_Q)) {
+                int position = structure.getPosition(context.getEquationSystem().getVariable(branch.getNum(), flow));
+                assertTrue(AcVariablePairing.INSTANCE.fixesVariable(structure.getType(fixed.getEquationOfPosition(position))));
+                assertTrue(Double.isNaN(fixed.getBalance()[position]));
+            }
+            for (AcVariableType voltage : List.of(AcVariableType.BUS_PHI, AcVariableType.BUS_V)) {
+                assertEquals(-1, fixed.getEquationOfPosition(structure.getPosition(context.getEquationSystem().getVariable(off.getNum(), voltage))));
+            }
         }
     }
 
@@ -234,7 +270,7 @@ class FixedEquationSystemIndexTest {
         LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
         try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
              FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed =
-                     new FixedEquationSystemIndex<>(context.getEquationSystem(), new AcVariablePairing(lfNetwork))) {
+                     new FixedEquationSystemIndex<>(context.getEquationSystem(), new AcVariablePairing(lfNetwork), FixedEquationSystemIndex.Scope.ALL)) {
             check(lfNetwork, context, fixed, "base state");
             int[] rowIndices = fixed.getStructure().getRowIndices();
 
@@ -265,7 +301,7 @@ class FixedEquationSystemIndexTest {
         LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
         try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
              FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed =
-                     new FixedEquationSystemIndex<>(context.getEquationSystem(), new AcVariablePairing(lfNetwork))) {
+                     new FixedEquationSystemIndex<>(context.getEquationSystem(), new AcVariablePairing(lfNetwork), FixedEquationSystemIndex.Scope.ALL)) {
             check(lfNetwork, context, fixed, "base state");
             assertEquals("BUS_TARGET_PHI:1", equationOn(context, fixed, AcVariableType.BUS_PHI, 1));
             assertEquals("ZERO_PHI:1", equationOn(context, fixed, AcVariableType.BUS_PHI, 2));
@@ -310,7 +346,7 @@ class FixedEquationSystemIndexTest {
         LfShunt shunt1 = lfNetwork.getBus(2).getControllerShunt().orElseThrow();
         try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
              FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed =
-                     new FixedEquationSystemIndex<>(context.getEquationSystem(), new AcVariablePairing(lfNetwork))) {
+                     new FixedEquationSystemIndex<>(context.getEquationSystem(), new AcVariablePairing(lfNetwork), FixedEquationSystemIndex.Scope.ALL)) {
             shunt0.setVoltageControlEnabled(true);
             shunt1.setVoltageControlEnabled(true);
             check(lfNetwork, context, fixed, "both shunts hold the voltage");
@@ -343,7 +379,7 @@ class FixedEquationSystemIndexTest {
         LfNetwork lfNetwork = Networks.load(network, acParameters.getNetworkParameters()).get(0);
         try (AcLoadFlowContext context = new AcLoadFlowContext(lfNetwork, acParameters);
              FixedEquationSystemIndex<AcVariableType, AcEquationType> fixed =
-                     new FixedEquationSystemIndex<>(context.getEquationSystem(), new AcVariablePairing(lfNetwork))) {
+                     new FixedEquationSystemIndex<>(context.getEquationSystem(), new AcVariablePairing(lfNetwork), FixedEquationSystemIndex.Scope.ALL)) {
             FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
             assertTrue(structure.getSingleEquationCount() > 10);
             for (int equation = 1; equation < structure.getSingleEquationCount(); equation++) {
@@ -448,6 +484,7 @@ class FixedEquationSystemIndexTest {
         equationSystem.getStateVector().set(x);
 
         DenseMatrix reference = (DenseMatrix) context.getJacobianMatrix().getMatrix();
+        double[] referenceValues = context.getEquationVector().getArray();
         fixed.updateDer();
         FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
         int variableCount = structure.getVariableCount();
@@ -466,6 +503,7 @@ class FixedEquationSystemIndexTest {
             if (position >= 0) {
                 activeCount++;
                 int referenceColumn = structure.getColumnInEquationSystem(equation);
+                assertClose(referenceValues[referenceColumn], fixed.getEquationValues()[position], name);
                 for (int row = 0; row < variableCount; row++) {
                     int referenceRow = structure.getVariable(row).getRow();
                     double expected = referenceRow >= 0 ? reference.get(referenceRow, referenceColumn) : 0;
@@ -480,12 +518,23 @@ class FixedEquationSystemIndexTest {
         }
         for (int position = 0; position < variableCount; position++) {
             if (fixed.getEquationOfPosition(position) < 0) {
+                assertEquals(0, fixed.getEquationValues()[position], state);
                 for (int row = 0; row < variableCount; row++) {
                     assertEquals(row == position ? 1 : 0, column[position][row], state + ", unpaired position " + structure.getVariable(position));
                 }
             }
         }
 
+        // the balances are the active and reactive balance of every bus, whatever its positions hold: a bus that holds its
+        // voltage has no active reactive equation, and its reactive balance is what the reactive limits are checked on
+        for (LfBus bus : lfNetwork.getBuses()) {
+            int phi = structure.getPosition(equationSystem.getVariable(bus.getNum(), AcVariableType.BUS_PHI));
+            int v = structure.getPosition(equationSystem.getVariable(bus.getNum(), AcVariableType.BUS_V));
+            if (!bus.isDisabled() && phi >= 0 && v >= 0) {
+                assertClose(bus.getP().eval(), fixed.getBalance()[phi], state + ", active balance of " + bus.getId());
+                assertClose(bus.getQ().eval(), fixed.getBalance()[v], state + ", reactive balance of " + bus.getId());
+            }
+        }
     }
 
     /**
@@ -510,18 +559,18 @@ class FixedEquationSystemIndexTest {
 
     private static boolean place(FixedStructure<AcVariableType, AcEquationType> structure, int equation, int[] equationOfPosition, boolean[] visited) {
         int own = structure.getOwnPosition(equation);
-        if (own >= 0 && pairOn(structure, equation, own, equationOfPosition, visited)) {
+        if (own >= 0 && placeOn(structure, equation, own, equationOfPosition, visited)) {
             return true;
         }
         for (int position : FixedStructures.getRows(structure, equation)) {
-            if (pairOn(structure, equation, position, equationOfPosition, visited)) {
+            if (placeOn(structure, equation, position, equationOfPosition, visited)) {
                 return true;
             }
         }
         return false;
     }
 
-    private static boolean pairOn(FixedStructure<AcVariableType, AcEquationType> structure, int equation, int position, int[] equationOfPosition, boolean[] visited) {
+    private static boolean placeOn(FixedStructure<AcVariableType, AcEquationType> structure, int equation, int position, int[] equationOfPosition, boolean[] visited) {
         if (visited[position] || structure.getVariable(position).getRow() < 0 || !FixedStructures.dependsOnNow(structure, equation, position)) {
             return false;
         }
@@ -540,7 +589,10 @@ class FixedEquationSystemIndexTest {
             referenceStep[i] -= targets[i];
         }
         double[] mismatch = referenceStep.clone();
-        context.getJacobianMatrix().solveTransposed(referenceStep);
+        // OLF's step on the matrix in the numbering of the index: the Jacobian of the context itself solves on a fixed matrix
+        try (LUDecomposition lu = context.getJacobianMatrix().getMatrix().decomposeLU()) {
+            lu.solveTransposed(referenceStep);
+        }
 
         FixedStructure<AcVariableType, AcEquationType> structure = fixed.getStructure();
         int variableCount = structure.getVariableCount();

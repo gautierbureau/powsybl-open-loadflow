@@ -31,29 +31,48 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * OLF's equation system seen as a matrix whose shape does not change: one column per variable, a position, and in each
- * column the equation that stands there in the current state. A position no equation holds keeps its variable where it is
- * ({@code x = x}).
- *
- * <p>The matrix structure holds from the start, in each column, every alternative of the position (the equations paired with its
- * variable) and every equation a control may send there (its controller positions). What OLF activates or deactivates then only
- * changes which equation stands in each column, the pairing, and the values: not the matrix structure, so that a solver
- * creates and analyses its matrix once. The matrix structure grows only when an equation has to take a position that is neither.
+ * OLF's equation system seen as a matrix whose shape does not change: one position per variable, and each active equation
+ * written in the column of the variable it is paired with. A position no equation holds keeps its variable where it is
+ * ({@code x = x}). What OLF activates or deactivates changes the values and which equation a position holds, not the
+ * matrix structure.
  *
  * <p>Nothing of the model is re-derived: the equations, the terms, the formulas and the activations are OLF's, read
- * through its own API and followed through its events. The only model knowledge is the {@link VariablePairing}. When OLF
- * creates an equation the structure has not seen, the arrays are compiled again, and the matrix structure is kept if the new
- * arrays fit in it.
+ * through its own API and followed through its events. The only model knowledge is the {@link VariablePairing}.
  *
- * <p>A fill computes the Jacobian values, on the matrix structure of the {@link FixedStructure}.
+ * <p>A fill computes three arrays:
+ * <ul>
+ * <li>the Jacobian values, on the matrix structure of the {@link FixedStructure};</li>
+ * <li>the value of the equation each position holds, 0 for a position that holds none;</li>
+ * <li>the <b>balance</b> of each position: the value of the equation paired with it that does not fix its variable (a
+ *     bus's active or reactive balance), whether or not that equation is active. The reactive balance of a bus that
+ *     holds its voltage and the active balance of the slack bus are entries of it: what the outer loops read. It is
+ *     NaN where the equation cannot be evaluated: a disabled bus's.</li>
+ * </ul>
+ *
+ * <p>The matrix structure only grows, and only when an active equation needs entries it does not hold. With
+ * {@link Scope#ALL} it holds from the start every equation on its own position and on the controller positions its
+ * {@link VariablePairing} gives: it then grows only when an equation takes a position that is neither. With
+ * {@link Scope#ACTIVE} it also grows the first time an equation becomes active.
+ *
+ * <p>When OLF creates an equation the structure has not seen, the arrays are compiled again, and the matrix structure is
+ * kept if the new arrays fit in it.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity>
         implements EquationSystemListener<V, E>, AutoCloseable {
 
+    /** Which equations have their entries in the matrix structure from the start. */
+    public enum Scope {
+        /** Every equation OLF created, on the position it is paired with and on its controller positions. */
+        ALL,
+        /** The active equations only. */
+        ACTIVE
+    }
+
     private final EquationSystem<V, E> equationSystem;
     private final VariablePairing<V, E> pairing;
+    private final Scope scope;
 
     private FixedStructure<V, E> structure;
     /** The structure that was discarded, until the arrays are compiled again: the new one takes its matrix structure if it can. */
@@ -62,7 +81,7 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     private final TIntArrayList pairedPositions = new TIntArrayList();
     /** The pairings the matrix structure holds: the equations on their own position as a bit set, the others as pairs. */
     private final BitSet inStructureAtOwnPosition = new BitSet();
-    private final Set<Long> inStructure = new HashSet<>();
+    private final Set<Long> paired = new HashSet<>();
     private boolean matrixStructureValid;
     private boolean pairingValid;
     /** The single equations that have other terms than when their rows were computed. */
@@ -73,15 +92,20 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     /** For the search of a pairing: the positions already tried for the equation being paired. */
     private int[] visited;
     private int stamp;
+    /** For an equation that took a unpaired position: the position, kept as long as it is free, so that the matrix structure stops growing. */
+    private int[] movedTo;
 
     private double[] values;
+    private double[] balance;
+    private double[] equationValues;
 
     private int structureBuildCount;
     private int matrixStructureBuildCount;
 
-    public FixedEquationSystemIndex(EquationSystem<V, E> equationSystem, VariablePairing<V, E> pairing) {
+    public FixedEquationSystemIndex(EquationSystem<V, E> equationSystem, VariablePairing<V, E> pairing, Scope scope) {
         this.equationSystem = equationSystem;
         this.pairing = pairing;
+        this.scope = scope;
         equationSystem.addListener(this);
     }
 
@@ -99,23 +123,28 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
             structure = new FixedStructure<>(equationSystem, pairing);
             structureBuildCount++;
             positionOfEquation = new int[structure.getEquationCount()];
+            movedTo = new int[structure.getEquationCount()];
+            Arrays.fill(movedTo, -1);
             equationOfPosition = new int[structure.getVariableCount()];
             visited = new int[structure.getVariableCount()];
             stamp = 0;
-            inStructure.clear();
+            balance = new double[structure.getVariableCount()];
+            equationValues = new double[structure.getVariableCount()];
+            paired.clear();
             inStructureAtOwnPosition.clear();
             pairedEquations.resetQuick();
             pairedPositions.resetQuick();
             matrixStructureValid = discarded != null && structure.adoptMatrixStructure(discarded);
             discarded = null;
             pairingValid = false;
-            // every equation on its own position and on its controller positions: the matrix structure holds all the alternatives of each position
-            for (int equation = 0; equation < structure.getEquationCount(); equation++) {
-                if (structure.getOwnPosition(equation) >= 0) {
-                    addToMatrixStructure(equation, structure.getOwnPosition(equation));
-                }
-                for (int position : structure.getControllerPositions(equation)) {
-                    addToMatrixStructure(equation, position);
+            if (scope == Scope.ALL) {
+                for (int equation = 0; equation < structure.getEquationCount(); equation++) {
+                    if (structure.getOwnPosition(equation) >= 0) {
+                        addToMatrixStructure(equation, structure.getOwnPosition(equation));
+                    }
+                    for (int position : structure.getControllerPositions(equation)) {
+                        addToMatrixStructure(equation, position);
+                    }
                 }
             }
         }
@@ -156,7 +185,7 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
                 return;
             }
             inStructureAtOwnPosition.set(equation);
-        } else if (!inStructure.add(((long) equation << 32) | position)) {
+        } else if (!paired.add(((long) equation << 32) | position)) {
             return;
         }
         pairedEquations.add(equation);
@@ -166,7 +195,7 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     }
 
     /**
-     * Gives each active equation a position. The variable of a position is to find when an active term depends on it: OLF's index keeps
+     * Gives each active equation a position. A position is live when an active term depends on its variable: OLF's index keeps
      * a row for exactly those variables. Each equation takes the position it is paired with, when it depends on its
      * variable; when two claim one, the one that fixes the variable keeps it. The others are paired one by one on a
      * position they may take and whose variable they depend on: the one they had before or a controller position, which are in the
@@ -206,7 +235,7 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
             }
         }
         // what is left has no such position. It takes one it may take all the same, which leaves a zero on the diagonal
-        // and keeps the matrix structure; only then any unpaired one
+        // and keeps the matrix structure; only then any free one
         for (int i = 0; i < left.size(); i++) {
             int equation = left.getQuick(i);
             stamp++;
@@ -227,6 +256,9 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
         for (int equation = 0; equation < positionOfEquation.length; equation++) {
             int position = positionOfEquation[equation];
             if (position >= 0) {
+                if (position != structure.getOwnPosition(equation)) {
+                    movedTo[equation] = position;
+                }
                 structure.setPairedPosition(equation, position);
                 addToMatrixStructure(equation, position);
             }
@@ -241,7 +273,8 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
      */
     private boolean move(int equation, boolean dependent) {
         int own = structure.getOwnPosition(equation);
-        if (own >= 0 && moveTo(equation, own, dependent)) {
+        if (own >= 0 && moveTo(equation, own, dependent)
+                || movedTo[equation] >= 0 && moveTo(equation, movedTo[equation], dependent)) {
             return true;
         }
         for (int position : structure.getControllerPositions(equation)) {
@@ -279,6 +312,9 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     }
 
     private int findUnpairedPosition(int equation) {
+        if (movedTo[equation] >= 0 && isUnpaired(movedTo[equation])) {
+            return movedTo[equation];
+        }
         for (int position : structure.getControllerPositions(equation)) {
             if (isUnpaired(position)) {
                 return position;
@@ -297,7 +333,7 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
         return -1;
     }
 
-    /** Computes the Jacobian values at the current state of OLF's equation system. */
+    /** Computes the Jacobian values, the equation values and the balances at the current state of OLF's equation system. */
     public void updateDer() {
         update();
         updateDer(values);
@@ -306,9 +342,6 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     /**
      * The same, with the Jacobian values written at the start of the given array: the value array of a sparse matrix
      * built on the matrix structure of {@link #getStructure()}, so that a solver fills its matrix in place.
-     *
-     * <p>Each paired equation writes its derivatives in the column of its position, at the matrix element indices the structure
-     * computed for that position. A position that holds no equation gets 1 on its diagonal: its variable does not move.
      */
     public void updateDer(double[] jacobianValues) {
         update();
@@ -316,52 +349,93 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
             throw new IllegalArgumentException("The matrix structure has " + structure.getValueCount() + " values, the array " + jacobianValues.length);
         }
         Arrays.fill(jacobianValues, 0, structure.getValueCount(), 0);
+        Arrays.fill(balance, 0);
         for (FixedStructure.ArrayTerms<V, E> terms : structure.getArrayTerms()) {
+            double[] termValues = terms.termArray.eval();
             double[][] termDerivatives = terms.termArray.evalDer();
             for (int term = 0; term < terms.equation.length; term++) {
-                if (terms.termArray.isTermActive(term) && positionOfEquation[terms.equation[term]] >= 0) {
+                if (terms.termArray.isTermActive(term)) {
+                    int equation = terms.equation[term];
                     int element = terms.element[term];
+                    int own = structure.getOwnPosition(equation);
+                    int position = positionOfEquation[equation];
                     int[] localIndex = terms.localIndex[term];
-                    int[] matrixElementIndex = terms.matrixElementIndex[term];
-                    for (int k = 0; k < matrixElementIndex.length; k++) {
-                        jacobianValues[matrixElementIndex[k]] += termDerivatives[localIndex[k]][element];
+                    balance[own] += termValues[element];
+                    if (position >= 0) {
+                        // the matrix element indices are for the position the equation holds, its own or another
+                        int[] matrixElementIndex = terms.matrixElementIndex[term];
+                        for (int k = 0; k < matrixElementIndex.length; k++) {
+                            jacobianValues[matrixElementIndex[k]] += termDerivatives[localIndex[k]][element];
+                        }
                     }
                 }
             }
         }
         for (int equation : structure.getArrayElementsWithSingleTerms()) {
-            if (positionOfEquation[equation] >= 0) {
-                addSingleTerms(jacobianValues, equation);
-            }
+            balance[structure.getOwnPosition(equation)] += addSingleTerms(jacobianValues, equation, positionOfEquation[equation]);
         }
+        // the single equations: derivatives where one is paired; its value there, and as the balance of its own position
         for (int equation = 0; equation < structure.getSingleEquationCount(); equation++) {
-            if (positionOfEquation[equation] >= 0) {
-                addSingleTerms(jacobianValues, equation);
+            int position = positionOfEquation[equation];
+            boolean isBalance = structure.getOwnPosition(equation) >= 0 && !structure.fixesVariable(equation);
+            if (position >= 0 || isBalance) {
+                double value = addSingleTerms(jacobianValues, equation, position);
+                if (position >= 0) {
+                    equationValues[position] = value;
+                }
+                if (isBalance) {
+                    balance[structure.getOwnPosition(equation)] = value;
+                }
             }
         }
         int[] diagonal = structure.getDiagonal();
         for (int position = 0; position < equationOfPosition.length; position++) {
-            if (equationOfPosition[position] < 0) {
+            int equation = equationOfPosition[position];
+            if (equation < 0) {
                 jacobianValues[diagonal[position]] = 1;
+                equationValues[position] = 0;
+            } else if (structure.isArrayElement(equation)) {
+                equationValues[position] = balance[structure.getOwnPosition(equation)];
             }
         }
     }
 
-    /** Adds the derivatives of the active object terms of a paired equation in the column of its position. */
-    private void addSingleTerms(double[] jacobianValues, int equation) {
+    /**
+     * Adds the derivatives of the active object terms of an equation in a column (none when negative) and returns their
+     * value. An equation that holds no position can have an active term on a variable that left the system, a disabled
+     * bus's: it then has no value, and the result is NaN.
+     */
+    private double addSingleTerms(double[] jacobianValues, int equation, int column) {
         FixedStructure.ObjectTerms<V, E> compiled = structure.getObjectTerms(equation);
         if (compiled == null) {
-            return;
+            return 0;
         }
+        double value = 0;
         for (int t = 0; t < compiled.row.length; t++) {
             SingleEquationTerm<V, E> term = compiled.terms.get(t);
             if (term.isActive()) {
                 List<Variable<V>> variables = compiled.variables.get(t);
-                for (int k = 0; k < compiled.row[t].length; k++) {
-                    jacobianValues[compiled.matrixElementIndex[t][k]] += term.der(variables.get(k));
+                if (column < 0 && !isInSystem(variables)) {
+                    return Double.NaN;
+                }
+                value += term.eval();
+                if (column >= 0) {
+                    for (int k = 0; k < compiled.row[t].length; k++) {
+                        jacobianValues[compiled.matrixElementIndex[t][k]] += term.der(variables.get(k));
+                    }
                 }
             }
         }
+        return value;
+    }
+
+    private boolean isInSystem(List<Variable<V>> variables) {
+        for (int k = 0; k < variables.size(); k++) {
+            if (variables.get(k).getRow() < 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -476,6 +550,14 @@ public class FixedEquationSystemIndex<V extends Enum<V> & Quantity, E extends En
     /** The Jacobian values of the last {@link #updateDer()}. */
     public double[] getValues() {
         return values;
+    }
+
+    public double[] getEquationValues() {
+        return equationValues;
+    }
+
+    public double[] getBalance() {
+        return balance;
     }
 
     /** How many times the arrays were compiled: once, plus once per equation or term OLF created or removed afterwards. */

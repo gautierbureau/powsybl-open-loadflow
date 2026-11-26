@@ -30,29 +30,19 @@ import java.util.TreeSet;
 import java.util.function.Consumer;
 
 /**
- * An equation system compiled into arrays, with a Jacobian matrix structure that holds every equation where it may stand.
- * Nothing here depends on what is active.
+ * An equation system compiled into arrays. Nothing here depends on what is active.
  *
  * <ul>
  * <li><b>Positions.</b> One per variable that a term of the system can depend on, in the order of the variables. A position is
- *     a row (its variable) and a column (the equation that determines that variable).</li>
- * <li><b>Equations.</b> Numbered once, by type and element: the single equations, then the elements of each equation
- *     array. Each knows the positions of the variables it depends on (its rows). A single equation that is removed and
- *     created again keeps its number: it is the same one, with other terms.</li>
- * <li><b>Own position.</b> The position of the variable the {@link VariablePairing} pairs an equation with: a bus's reactive balance
- *     and its voltage target with its voltage, its active balance and the reference angle with its angle. The
- *     equations that share an own position are the <b>alternatives</b> of that position: OLF activates one of them at a time,
- *     and switching between them (a bus going from PV to PQ, a control switched on or off) is what makes its index
- *     change.</li>
- * <li><b>Controller positions.</b> The other positions an equation may take, given by the {@link VariablePairing} from the controls of the
- *     network: the reactive balance of a bus whose voltage a remote generator holds goes to the position of that
- *     generator's bus voltage, which the control frees. Also the moves that keep zeros off the diagonal: an equation
- *     that does not depend on the variable it is paired with, or on the one a control sends it to, exchanges its position
- *     with an equation paired with a variable it depends on.</li>
- * <li><b>Matrix structure.</b> For each position, the sorted rows of every equation that may stand there, plus the diagonal: the
- *     Jacobian by columns, one column per position. It is built from a list of pairings and only ever grows.</li>
- * <li><b>Matrix element indices.</b> For each derivative of each term, the index of its value in the column of the position its
- *     equation stands in, so that a fill writes each derivative without looking for its entry.</li>
+ *     a row (the variable) and a column (the equation that determines it).</li>
+ * <li><b>Equations.</b> Numbered once: the single equations, then the elements of each equation array. Each knows the
+ *     positions of the variables it depends on, and its own position: the one its {@link VariablePairing} pairs it with. A single
+ *     equation that is removed and created again keeps its number: it is the same one, with other terms.</li>
+ * <li><b>Matrix structure.</b> The transposed Jacobian by columns, which is the Jacobian by rows: for each position, the sorted rows
+ *     of every equation paired there, plus the diagonal. It is built from a list of pairings and only ever
+ *     grows.</li>
+ * <li><b>Matrix element indices.</b> For each term of a term array and each of its derivatives, the index of its value in the
+ *     own column of its equation.</li>
  * </ul>
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
@@ -113,10 +103,6 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     private final boolean[] bound;
     private final List<EquationArray<V, E>> arrays;
     private final int[] arrayFirstEquation;
-    /** For each equation that is an element of an equation array: the index of its array; -1 for a single equation. */
-    private final int[] arrayIndexOfEquation;
-    /** For each equation that is an element of an equation array: its element number; -1 for a single equation. */
-    private final int[] elementNumOfEquation;
     private final int equationCount;
     private final int[][] rows;
     private final int[] ownPosition;
@@ -162,16 +148,6 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
             count += arrays.get(a).getElementCount();
         }
         equationCount = count;
-        arrayIndexOfEquation = new int[equationCount];
-        elementNumOfEquation = new int[equationCount];
-        Arrays.fill(arrayIndexOfEquation, 0, singleEquations.size(), -1);
-        Arrays.fill(elementNumOfEquation, 0, singleEquations.size(), -1);
-        for (int a = 0; a < arrays.size(); a++) {
-            for (int element = 0; element < arrays.get(a).getElementCount(); element++) {
-                arrayIndexOfEquation[arrayFirstEquation[a] + element] = a;
-                elementNumOfEquation[arrayFirstEquation[a] + element] = element;
-            }
-        }
 
         SortedSet<Variable<V>> sorted = new TreeSet<>();
         for (int equation = 0; equation < equationCount; equation++) {
@@ -708,7 +684,11 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
     }
 
     private int getArrayIndex(int equation) {
-        return arrayIndexOfEquation[equation];
+        int a = arrays.size() - 1;
+        while (arrayFirstEquation[a] > equation) {
+            a--;
+        }
+        return a;
     }
 
     private EquationArray<V, E> getArray(int equation) {
@@ -760,7 +740,7 @@ public final class FixedStructure<V extends Enum<V> & Quantity, E extends Enum<E
         if (equation < singleEquations.size()) {
             return bound[equation] ? singleEquations.get(equation).getColumn() : -1;
         }
-        return arrays.get(arrayIndexOfEquation[equation]).getElementNumToColumn(elementNumOfEquation[equation]);
+        return getArray(equation).getElementNumToColumn(getElementNum(equation));
     }
 
     /** The terms held as objects: all the terms of a single equation, the additional terms of an array element. */

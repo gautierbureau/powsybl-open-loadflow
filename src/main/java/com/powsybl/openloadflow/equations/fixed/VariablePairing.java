@@ -10,15 +10,8 @@ package com.powsybl.openloadflow.equations.fixed;
 import com.powsybl.openloadflow.equations.Quantity;
 
 /**
- * The only model knowledge a {@link FixedEquationSystemIndex} needs: where each equation may stand.
- * <ul>
- * <li>Its own position: the variable an equation is paired with. The equations paired with one variable are the
- *     alternatives of its position, the ones OLF switches between.</li>
- * <li>Which of two alternatives keeps the position when both are active: the one that fixes the variable.</li>
- * <li>Its controller positions: the other positions it may take, where a control sends it.</li>
- * <li>The kind of each variable: an equation moved to keep a zero off the diagonal stays among variables of its
- *     kind.</li>
- * </ul>
+ * Which variable an equation is paired with: its column is that variable's position. The only model knowledge a
+ * {@link FixedEquationSystemIndex} needs.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -26,13 +19,13 @@ public interface VariablePairing<V extends Enum<V> & Quantity, E extends Enum<E>
 
     /**
      * The type of the variable, of the equation's own element, that an equation of this type is paired with, or null
-     * when it has none: the equation then takes a position that the active equations leave unpaired.
+     * when it has none: the equation then takes a position that the active equations leave free.
      */
     V variableType(E equationType);
 
     /**
      * True for an equation that fixes its variable ({@code x = target}). When two active equations are paired with one
-     * variable, this one keeps the position and the other takes an unpaired one.
+     * variable, this one keeps the position and the other takes a free one.
      */
     boolean fixesVariable(E equationType);
 

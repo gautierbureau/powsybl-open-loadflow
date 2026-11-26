@@ -15,30 +15,31 @@ import com.powsybl.openloadflow.network.LfElement;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.VoltageControl;
 
-import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
- * Where the AC equations may stand in a {@link FixedEquationSystemIndex}.
+ * The pairing of the AC equations for a {@link FixedEquationSystemIndex}: a balance with the angle or the magnitude of its bus, a control equation with the
+ * variable it frees or fixes. The equations OLF toggles in pairs share a variable, so they share a position.
  *
- * <p>Own positions: a balance with the angle or the magnitude of its bus, a control equation with the variable it fixes
- * or frees. The equations OLF switches between share a variable, so they are alternatives of one position: the reactive
- * balance and the voltage target of a bus, the active balance and the reference angle, the target and the distribution
- * equation of a tap or of a susceptance.
+ * <p>The equations left without a pairing here find their position by themselves: the reactive balance of a bus whose
+ * voltage is held by a remote generator, a transformer or a shunt takes the position that control frees, and so does
+ * {@code BRANCH_TARGET_Q1} and {@code BRANCH_TARGET_Q2}.
  *
- * <p>Controller positions, from the controls of the network: the reactive balance of a controlled bus may go to the position of any
- * controller of its voltage control, or of the controls merged with it (the generator voltage, tap or susceptance the
- * control frees); the equation of a controlled branch to the position of its controller. The equations without an own
- * position, {@code BRANCH_TARGET_Q1} and {@code BRANCH_TARGET_Q2}, take a position that way.
+ * <p>With a network, the controls of the network say beforehand which positions these are: the controller positions. The balance
+ * of a controlled bus may go to the position of any controller of its control, or of the controls merged with it; the
+ * equation of a controlled branch to the position of its controllers. The matrix structure then holds them from the start.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public final class AcVariablePairing implements VariablePairing<AcVariableType, AcEquationType> {
 
+    /** Without a network: no controller position is known, and the matrix structure grows as the pairings are met. */
+    public static final AcVariablePairing INSTANCE = new AcVariablePairing(null);
+
     private final LfNetwork network;
 
     public AcVariablePairing(LfNetwork network) {
-        this.network = Objects.requireNonNull(network);
+        this.network = network;
     }
 
     @Override
@@ -78,6 +79,9 @@ public final class AcVariablePairing implements VariablePairing<AcVariableType, 
 
     @Override
     public void forEachControllerVariable(ControllerVariableConsumer<AcVariableType, AcEquationType> consumer) {
+        if (network == null) {
+            return;
+        }
         for (LfBus bus : network.getBuses()) {
             for (VoltageControl<?> voltageControl : bus.getVoltageControls()) {
                 if (voltageControl.getControlledBus() == bus) {
