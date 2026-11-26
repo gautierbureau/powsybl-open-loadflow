@@ -9,10 +9,13 @@ package com.powsybl.openloadflow.ac.solver;
 
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.math.matrix.MatrixException;
+import com.powsybl.openloadflow.ac.AcFixedJacobianMatrix;
+import com.powsybl.openloadflow.ac.AcJacobianMatrix;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcStateVectorUtil;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.equations.*;
+import com.powsybl.openloadflow.equations.fixed.FixedEquationSystemIndex;
 import com.powsybl.openloadflow.lf.util.LfReports;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -43,7 +46,11 @@ public class NewtonRaphson extends AbstractAcSolver {
                          boolean detailedReport) {
         super(network, equationSystem, j, targetVector, equationVector, detailedReport);
         this.parameters = Objects.requireNonNull(parameters);
+        keptState = j instanceof AcJacobianMatrix ? new AcKeptState(network) : null;
     }
+
+    /** The state of the last solve, by position, that the next one starts from (null when the Jacobian is not on a fixed system). */
+    private final AcKeptState keptState;
 
     @Override
     public String getName() {
@@ -99,10 +106,21 @@ public class NewtonRaphson extends AbstractAcSolver {
         }
     }
 
+    private FixedEquationSystemIndex<AcVariableType, AcEquationType> getFixedEquationSystemIndex() {
+        return ((AcFixedJacobianMatrix) j).getFixedJacobian().getFixedEquationSystemIndex();
+    }
+
+    /** How many solves started from the state the last one kept. */
+    public int getKeptStateStartCount() {
+        return keptState != null ? keptState.getStartCount() : 0;
+    }
+
     @Override
     public AcSolverResult run(VoltageInitializer voltageInitializer, ReportNode reportNode) {
-        // initialize state vector
-        AcStateVectorUtil.initStateVector(network, equationSystem, voltageInitializer);
+        // initialize state vector: from the state the last solve kept when it can, else from the network
+        if (keptState == null || !keptState.initStateVector(equationSystem, getFixedEquationSystemIndex(), voltageInitializer)) {
+            AcStateVectorUtil.initStateVector(network, equationSystem, voltageInitializer);
+        }
 
         Vectors.minus(equationVector.getArray(), targetVector.getArray());
 
@@ -136,6 +154,11 @@ public class NewtonRaphson extends AbstractAcSolver {
 
         if (status == AcSolverStatus.CONVERGED || parameters.isAlwaysUpdateNetwork()) {
             AcSolverUtil.updateNetwork(network, equationSystem);
+            if (keptState != null) {
+                keptState.keep(equationSystem, getFixedEquationSystemIndex());
+            }
+        } else if (keptState != null) {
+            keptState.forget();
         }
 
         Map<Integer, Double> slackBusActivePowerMismatch = new TreeMap<>();

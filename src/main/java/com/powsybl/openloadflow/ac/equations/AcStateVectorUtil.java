@@ -24,62 +24,57 @@ public final class AcStateVectorUtil {
     public static void initStateVector(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem, VoltageInitializer initializer) {
         double[] x = new double[equationSystem.getIndex().getSortedVariablesToFind().size()];
         for (Variable<AcVariableType> v : equationSystem.getIndex().getSortedVariablesToFind()) {
-            switch (v.getType()) {
-                case BUS_V:
-                    x[v.getRow()] = initializer.getMagnitude(network.getBus(v.getElementNum()));
-                    break;
-
-                case BUS_PHI:
-                    x[v.getRow()] = initializer.getAngle(network.getBus(v.getElementNum()));
-                    break;
-
-                case SHUNT_B:
-                    x[v.getRow()] = network.getShunt(v.getElementNum()).getB();
-                    break;
-
-                case BRANCH_ALPHA1:
-                    x[v.getRow()] = network.getBranch(v.getElementNum()).getPiModel().getA1();
-                    break;
-
-                case BRANCH_RHO1:
-                    x[v.getRow()] = network.getBranch(v.getElementNum()).getPiModel().getR1();
-                    break;
-
-                case DUMMY_P,
-                     DUMMY_Q,
-                     BUS_PHI_ZERO,
-                     BUS_PHI_NEGATIVE:
-                    x[v.getRow()] = 0;
-                    break;
-
-                case BUS_V_ZERO,
-                     BUS_V_NEGATIVE:
-                    // when balanced, zero and negative sequence should be zero
-                    // v_zero and v_negative initially set to zero will bring a singularity to the Jacobian
-                    // We chose to set the initial value to a small one, but different from zero
-                    // By construction if the system does not carry any asymmetry in its structure,
-                    // the resolution of the system on the three sequences will bring a singularity
-                    // Therefore, if the system is balanced by construction, we should run a balanced load flow only
-                    x[v.getRow()] = 0.1;
-                    break;
-
-                case DC_BUS_V:
-                    x[v.getRow()] = initializer.getDcVoltage(network.getDcBus(v.getElementNum()));
-                    break;
-
-                case CONV_P_AC:
-                    double p = network.getVoltageSourceConverter(v.getElementNum()).getPac();
-                    x[v.getRow()] = Double.isNaN(p) || !(initializer instanceof PreviousValueVoltageInitializer) ? 0.0 : p;
-                    break;
-
-                case CONV_Q_AC:
-                    double q = network.getVoltageSourceConverter(v.getElementNum()).getQac();
-                    x[v.getRow()] = Double.isNaN(q) || !(initializer instanceof PreviousValueVoltageInitializer) ? 0.0 : q;
-                    break;
-                default:
-                    throw new IllegalStateException("Unknown variable type " + v.getType());
-            }
+            x[v.getRow()] = initValue(network, v, initializer);
         }
         equationSystem.getStateVector().set(x);
+    }
+
+    /** The initial value of a variable. */
+    public static double initValue(LfNetwork network, Variable<AcVariableType> v, VoltageInitializer initializer) {
+        switch (v.getType()) {
+            case BUS_V:
+                return initializer.getMagnitude(network.getBus(v.getElementNum()));
+
+            case BUS_PHI:
+                return initializer.getAngle(network.getBus(v.getElementNum()));
+
+            case SHUNT_B:
+                return network.getShunt(v.getElementNum()).getB();
+
+            case BRANCH_ALPHA1:
+                return network.getBranch(v.getElementNum()).getPiModel().getA1();
+
+            case BRANCH_RHO1:
+                return network.getBranch(v.getElementNum()).getPiModel().getR1();
+
+            case DUMMY_P,
+                 DUMMY_Q,
+                 BUS_PHI_ZERO,
+                 BUS_PHI_NEGATIVE:
+                return 0;
+
+            case BUS_V_ZERO,
+                 BUS_V_NEGATIVE:
+                // when balanced, zero and negative sequence should be zero
+                // v_zero and v_negative initially set to zero will bring a singularity to the Jacobian
+                // We chose to set the initial value to a small one, but different from zero
+                // By construction if the system does not carry any asymmetry in its structure,
+                // the resolution of the system on the three sequences will bring a singularity
+                // Therefore, if the system is balanced by construction, we should run a balanced load flow only
+                return 0.1;
+
+            case DC_BUS_V:
+                return initializer.getDcVoltage(network.getDcBus(v.getElementNum()));
+
+            case CONV_P_AC:
+                double p = network.getVoltageSourceConverter(v.getElementNum()).getPac();
+                return Double.isNaN(p) || !(initializer instanceof PreviousValueVoltageInitializer) ? 0.0 : p;
+
+            case CONV_Q_AC:
+                double q = network.getVoltageSourceConverter(v.getElementNum()).getQac();
+                return Double.isNaN(q) || !(initializer instanceof PreviousValueVoltageInitializer) ? 0.0 : q;
+            default:
+                throw new IllegalStateException("Unknown variable type " + v.getType());
+        }
     }
 }
