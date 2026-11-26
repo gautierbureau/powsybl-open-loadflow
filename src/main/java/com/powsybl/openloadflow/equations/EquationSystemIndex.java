@@ -199,8 +199,12 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
             newEquations.clear();
             newVariables.clear();
             removeInactiveColumns();
+            // the equations are numbered again; the variables only when some were added or orphans removed, as
+            // without keeping the inactive columns: a voltage control switching from PV to PQ changes the equations only
             equationsIndexValid = false;
-            variablesIndexValid = false;
+            if (!addedVariables.isEmpty()) {
+                variablesIndexValid = false;
+            }
             for (Variable<V> variable : addedVariables) {
                 notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.ADDED);
             }
@@ -253,8 +257,10 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
             sortedMapVariablesToFindRefCount.remove(variable);
         }
         inactiveColumns = new int[0];
-        if (!inactiveEquations.isEmpty() || arrayInactiveColumns || !orphans.isEmpty()) {
+        if (!inactiveEquations.isEmpty() || arrayInactiveColumns) {
             equationsIndexValid = false;
+        }
+        if (!orphans.isEmpty()) {
             variablesIndexValid = false;
         }
         for (Variable<V> variable : orphans) {
