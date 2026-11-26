@@ -103,14 +103,16 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
      *                         without exceeding reactive limits when in voltage control.
      *  (2) A remote reactive controller can reach its Q limits: the control is switch off.
      */
-    private void gatherControllerBus(ReactiveLimitsVector r, int i, LfBus controllerBus) {
+    private void gatherControllerBus(ReactiveLimitsVector r, int i, LfBus controllerBus, double[] minMaxQ) {
         r.busNum[i] = controllerBus.getNum();
         r.controlEnabled[i] = true;
-        r.minQ[i] = controllerBus.getMinQ();
-        r.maxQ[i] = controllerBus.getMaxQ();
+        controllerBus.getMinMaxQ(minMaxQ);
+        r.minQ[i] = minMaxQ[0];
+        r.maxQ[i] = minMaxQ[1];
         r.q[i] = controllerBus.getQ().eval() + controllerBus.getLoadTargetQ();
         r.v[i] = controllerBus.getV();
-        r.remoteController[i] = isGeneratorRemoteController(controllerBus);
+        GeneratorVoltageControl voltageControl = controllerBus.getGeneratorVoltageControl().orElse(null);
+        r.remoteController[i] = voltageControl != null && voltageControl.getControlledBus() != controllerBus;
         // the target Q a realistic-voltage switch freezes
         r.initialTargetQ[i] = robustMode && r.remoteController[i] ? getInitialGenerationTargetQ(controllerBus) : Double.NaN;
         r.qLimitType[i] = ReactiveLimitsDecisions.LIMIT_NONE;
@@ -123,18 +125,21 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
      *  - if Q is equal to Qmax and V is greater than targetV: it means that the PQ bus can be unlocked in order to decrease the reactive power and reach its targetV.
      * A PQ bus can have its Qmin or Qmax limit updated after a change in targetP of the generator or a change of the voltage magnitude of the bus.
      */
-    private void gatherPqBus(ReactiveLimitsVector r, int i, LfBus controllerCapableBus) {
+    private static void gatherPqBus(ReactiveLimitsVector r, int i, LfBus controllerCapableBus, double[] minMaxQ) {
         r.busNum[i] = controllerCapableBus.getNum();
         r.controlEnabled[i] = false;
         // we don't support switching PQ to PV for bus with one controller with slope.
         r.canSwitchToPv[i] = !controllerCapableBus.hasGeneratorsWithSlope();
-        r.minQ[i] = controllerCapableBus.getMinQ(); // the actual minQ.
-        r.maxQ[i] = controllerCapableBus.getMaxQ(); // the actual maxQ.
+        controllerCapableBus.getMinMaxQ(minMaxQ);
+        r.minQ[i] = minMaxQ[0]; // the actual minQ.
+        r.maxQ[i] = minMaxQ[1]; // the actual maxQ.
         r.frozenTargetQ[i] = controllerCapableBus.getGenerationTargetQ();
-        r.qLimitType[i] = controllerCapableBus.getQLimitType().map(ReactiveLimitsOuterLoop::toLimitType).orElse(ReactiveLimitsDecisions.LIMIT_NONE);
-        if (r.qLimitType[i] != ReactiveLimitsDecisions.LIMIT_NONE) {
-            r.controlledV[i] = getBusV(controllerCapableBus);
-            r.targetV[i] = getBusTargetV(controllerCapableBus);
+        LfBus.QLimitType qLimitType = controllerCapableBus.getQLimitType().orElse(null);
+        r.qLimitType[i] = qLimitType != null ? toLimitType(qLimitType) : ReactiveLimitsDecisions.LIMIT_NONE;
+        if (qLimitType != null) {
+            GeneratorVoltageControl voltageControl = controllerCapableBus.getGeneratorVoltageControl().orElse(null);
+            r.controlledV[i] = voltageControl != null ? voltageControl.getControlledBus().getV() : Double.NaN;
+            r.targetV[i] = voltageControl != null ? voltageControl.getTargetValue() : Double.NaN;
         }
     }
 
@@ -314,10 +319,6 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
         return controllerBus.getGenerators().stream().mapToDouble(LfGenerator::getTargetQ).sum();
     }
 
-    private boolean isGeneratorRemoteController(LfBus controllerBus) {
-        return controllerBus.getGeneratorVoltageControl().map(c -> c.getControlledBus() != controllerBus).orElse(false);
-    }
-
     private boolean switchReactiveControllerBusPq(ReactiveLimitsVector r, LfNetwork network, ReportNode reportNode) {
         int switchCount = 0;
 
@@ -366,10 +367,6 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
         return bus.getGeneratorVoltageControl().map(GeneratorVoltageControl::getTargetValue).orElse(Double.NaN);
     }
 
-    private static double getBusV(LfBus bus) {
-        return bus.getGeneratorVoltageControl().map(vc -> vc.getControlledBus().getV()).orElse(Double.NaN);
-    }
-
     public static List<LfBus> getReactivePowerControllerElements(LfNetwork network) {
         return network.getBuses().stream()
                 .filter(LfBus::hasGeneratorReactivePowerControl)
@@ -399,12 +396,13 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
         List<LfBus> voltageControllerBuses = network.<LfBus>getControllerElements(VoltageControl.Type.GENERATOR);
         voltageControllers.reset(voltageControllerBuses.size());
         int busesWithUpdatedQLimitsCount = 0;
+        double[] minMaxQ = new double[2];
         for (int i = 0; i < voltageControllers.count; i++) {
             LfBus bus = voltageControllerBuses.get(i);
             if (bus.isGeneratorVoltageControlEnabled()) {
-                gatherControllerBus(voltageControllers, i, bus);
+                gatherControllerBus(voltageControllers, i, bus, minMaxQ);
             } else {
-                gatherPqBus(voltageControllers, i, bus);
+                gatherPqBus(voltageControllers, i, bus, minMaxQ);
             }
             voltageControllers.pvPqSwitchCount[i] = contextData.pvPqSwitchCount[bus.getNum()];
             ReactiveLimitsDecisions.decideEntry(voltageControllers, i, maxReactivePowerMismatch, robustMode, minRealisticV, maxRealisticV);
@@ -425,7 +423,7 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
         reactivePowerControllers.reset(reactivePowerControllerBuses.size());
         for (int i = 0; i < reactivePowerControllers.count; i++) {
             LfBus bus = reactivePowerControllerBuses.get(i);
-            gatherControllerBus(reactivePowerControllers, i, bus);
+            gatherControllerBus(reactivePowerControllers, i, bus, minMaxQ);
             ReactiveLimitsDecisions.decideEntry(reactivePowerControllers, i, maxReactivePowerMismatch, robustMode, minRealisticV, maxRealisticV);
             applyBeforeSwitches(reactivePowerControllers, i, bus);
         }
