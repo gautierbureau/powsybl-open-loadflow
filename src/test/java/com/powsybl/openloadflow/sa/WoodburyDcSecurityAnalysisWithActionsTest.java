@@ -26,6 +26,7 @@ import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.results.BranchResult;
+import com.powsybl.security.results.NetworkResult;
 import com.powsybl.security.results.OperatorStrategyResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -812,5 +813,66 @@ class WoodburyDcSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnal
         assertEquals(0, operatorStrategyResult.getLimitViolationsResult().getLimitViolations().size());
         // in fast dc mode, no branch result is created for disabled branches on one side
         assertEquals(1, operatorStrategyResult.getNetworkResult().getBranchResults().size());
+    }
+
+    /**
+     * An action opening the retained breaker C, already open in the base case, between two bus bars both kept energized
+     * (BBS1 through L1), C being in the network for another strategy closing it: the action changes nothing, as in the DC
+     * security analysis, instead of the Woodbury update removing from the flows the power of a branch that carries none.
+     */
+    @Test
+    void testFastDcSaOpeningAnAlreadyOpenSwitch() {
+        Network network = createNetworkWithParallelLine();
+        network.getSwitch("C").setOpen(true);
+        assertFastDcEqualsDcOnStrategy(network, new SwitchAction("openC", "C", true), new SwitchAction("closeC", "C", false));
+    }
+
+    /**
+     * An action closing the retained breaker C, already closed in the base case, another strategy opening it: the action
+     * changes nothing, as in the DC security analysis.
+     */
+    @Test
+    void testFastDcSaClosingAnAlreadyClosedSwitch() {
+        assertFastDcEqualsDcOnStrategy(createNetworkWithParallelLine(), new SwitchAction("closeC", "C", false),
+                new SwitchAction("openC", "C", true));
+    }
+
+    /** The node-breaker network with a line LY in parallel to L2, between the bus bars BBS2 and BBS3 (breakers BY1, BY2). */
+    private static Network createNetworkWithParallelLine() {
+        Network network = NodeBreakerNetworkFactory.create();
+        network.getVoltageLevel("VL1").getNodeBreakerView().newBreaker().setId("BY1").setNode1(1).setNode2(7).add();
+        network.getVoltageLevel("VL2").getNodeBreakerView().newBreaker().setId("BY2").setNode1(0).setNode2(4).add();
+        network.newLine().setId("LY").setVoltageLevel1("VL1").setNode1(7).setVoltageLevel2("VL2").setNode2(4)
+                .setR(3.0).setX(33.0).setB1(0.0).setB2(0.0).add();
+        return network;
+    }
+
+    /**
+     * The action in a strategy on the contingency of LY, the other action in another strategy: on the first, the fast DC
+     * security analysis gives the DC security analysis' flows.
+     */
+    private void assertFastDcEqualsDcOnStrategy(Network network, Action action, Action otherAction) {
+        List<Contingency> contingencies = List.of(new Contingency("LY", new BranchContingency("LY")));
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("strategy", ContingencyContext.specificContingency("LY"), new TrueCondition(), List.of(action.getId())),
+                new OperatorStrategy("other", ContingencyContext.specificContingency("LY"), new TrueCondition(), List.of(otherAction.getId())));
+        List<Action> actions = List.of(action, otherAction);
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(false);
+        SecurityAnalysisResult expected = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(true);
+        SecurityAnalysisResult fast = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+
+        NetworkResult expectedStrategy = getOperatorStrategyResult(expected, "strategy").getNetworkResult();
+        NetworkResult fastStrategy = getOperatorStrategyResult(fast, "strategy").getNetworkResult();
+        assertFalse(expectedStrategy.getBranchResults().isEmpty());
+        for (BranchResult branchResult : expectedStrategy.getBranchResults()) {
+            if (!Double.isNaN(branchResult.getP1())) {
+                assertEquals(branchResult.getP1(), fastStrategy.getBranchResult(branchResult.getBranchId()).getP1(), DELTA_POWER, branchResult.getBranchId());
+            }
+        }
     }
 }

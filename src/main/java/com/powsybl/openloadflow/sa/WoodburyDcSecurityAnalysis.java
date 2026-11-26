@@ -23,6 +23,7 @@ import com.powsybl.openloadflow.dc.DcLoadFlowContext;
 import com.powsybl.openloadflow.dc.DcLoadFlowParameters;
 import com.powsybl.openloadflow.dc.fastdc.ComputedContingencyElement;
 import com.powsybl.openloadflow.dc.fastdc.ComputedElement;
+import com.powsybl.openloadflow.dc.fastdc.ComputedSwitchBranchElement;
 import com.powsybl.openloadflow.dc.fastdc.ConnectivityBreakAnalysis;
 import com.powsybl.openloadflow.dc.fastdc.ConnectivityBreakAnalysis.ConnectivityAnalysisResult;
 import com.powsybl.openloadflow.dc.fastdc.WoodburyEngine;
@@ -143,6 +144,10 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 .filter(Objects::nonNull)
                 .flatMap(Collection::stream)
                 .filter(actionElement -> !elementsToReconnect.contains(actionElement.getLfBranch().getId()))
+                // opening a branch already open in the base case (in the network for another action closing it) changes
+                // nothing: the Woodbury update would remove the power of a branch that carries none
+                .filter(actionElement -> !(actionElement instanceof ComputedSwitchBranchElement switchElement && !switchElement.isEnabled()
+                        && switchElement.getLfBranch().isDisabled()))
                 .toList();
 
         var lfNetwork = loadFlowContext.getNetwork();
