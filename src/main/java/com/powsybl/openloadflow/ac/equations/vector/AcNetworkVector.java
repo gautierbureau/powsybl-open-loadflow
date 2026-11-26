@@ -12,6 +12,7 @@ import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.openloadflow.ac.equations.*;
 import com.powsybl.openloadflow.equations.*;
 import com.powsybl.openloadflow.network.*;
+import gnu.trove.list.array.TIntArrayList;
 import net.jafama.DoubleWrapper;
 import net.jafama.FastMath;
 import org.slf4j.Logger;
@@ -49,6 +50,28 @@ public class AcNetworkVector extends AbstractLfNetworkListener
      * computed again. The GPU fuses this evaluation with its fill and has nothing to keep.
      */
     private double[] computedState;
+
+    /*
+     * The flows of the closed branches computed for a state that was set (a start of a solve), kept to be copied back
+     * when a solve starts again from the same state: in a security analysis each contingency starts from the voltages of
+     * the base case, restored. A snapshot reused is kept; one never reused is replaced by the next state set. The
+     * branches whose parameters changed since the snapshot are computed again. It is dropped when the rows change.
+     */
+    private double[] snapshotState;
+    private double[][] snapshotValues;
+    private boolean[][] snapshotFlags;
+    /** For each branch, whether the snapshot holds its r1 and a1 (closed and enabled), and its flows (connected too). */
+    private boolean[] snapshotHasClosed;
+    private boolean[] snapshotHasFlows;
+    private boolean snapshotHit;
+    private boolean[] changedSinceSnapshot;
+    private final TIntArrayList changedBranches = new TIntArrayList();
+    private final TIntArrayList keptClosed = new TIntArrayList();
+    private final TIntArrayList keptFlows = new TIntArrayList();
+    private final TIntArrayList recomputed = new TIntArrayList();
+    private double[] keptValues;
+    private long lastSetCount = -1;
+    private int snapshotReuseCount;
     private boolean inputsChanged = true;
     private int skipCount;
 
@@ -192,6 +215,8 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         LOGGER.debug("AC variable vector update in {} us", stopwatch.elapsed(TimeUnit.MICROSECONDS));
 
         variablesInvalid = false;
+        // other rows: the snapshot of the flows is for a state laid out on the previous ones
+        snapshotState = null;
     }
 
     public void copyVariablesToBranches() {
@@ -240,58 +265,208 @@ public class AcNetworkVector extends AbstractLfNetworkListener
      * Update the power flows and their derivatives of the branches that have terms for when they are closed at both
      * sides (not of a zero impedance branch).
      */
+    /** The values the closed branch flows write, by branch: the state of r1 and a1, the flows and their derivatives. */
+    private double[][] closedBranchValues() {
+        AcBranchVector b = branchVector;
+        return new double[][] {b.r1State, b.a1State, b.v1OfI, b.v2OfI,
+            b.p1, b.dp1dv1, b.dp1dv2, b.dp1dph1, b.dp1dph2, b.dp1da1, b.dp1dr1,
+            b.q1, b.dq1dv1, b.dq1dv2, b.dq1dph1, b.dq1dph2, b.dq1da1, b.dq1dr1,
+            b.p2, b.dp2dv1, b.dp2dv2, b.dp2dph1, b.dp2dph2, b.dp2da1, b.dp2dr1,
+            b.q2, b.dq2dv1, b.dq2dv2, b.dq2dph1, b.dq2dph2, b.dq2da1, b.dq2dr1};
+    }
+
+    private boolean[][] closedBranchFlags() {
+        return new boolean[][] {branchVector.i1Computed, branchVector.i2Computed};
+    }
+
+    private void takeSnapshot(double[] state) {
+        double[][] values = closedBranchValues();
+        boolean[][] flags = closedBranchFlags();
+        if (snapshotValues == null) {
+            snapshotValues = new double[values.length][];
+            snapshotFlags = new boolean[flags.length][];
+            changedSinceSnapshot = new boolean[branchVector.getSize()];
+            snapshotHasClosed = new boolean[branchVector.getSize()];
+            snapshotHasFlows = new boolean[branchVector.getSize()];
+        }
+        for (int branchNum = 0; branchNum < branchVector.getSize(); branchNum++) {
+            snapshotHasClosed[branchNum] = isWritten(branchNum, false);
+            snapshotHasFlows[branchNum] = isWritten(branchNum, true);
+        }
+        for (int i = 0; i < values.length; i++) {
+            snapshotValues[i] = values[i].clone();
+        }
+        for (int i = 0; i < flags.length; i++) {
+            snapshotFlags[i] = flags[i].clone();
+        }
+        snapshotState = state.clone();
+        snapshotHit = false;
+        for (int i = 0; i < changedBranches.size(); i++) {
+            changedSinceSnapshot[changedBranches.getQuick(i)] = false;
+        }
+        changedBranches.resetQuick();
+    }
+
+    /**
+     * The flows of the snapshot, for the branches the full computation writes now (the closed branches enabled, and
+     * their flows when connected at both sides), and the branches whose parameters changed since computed again: what
+     * {@link #updateClosedBranches(double[])} writes, without computing it.
+     */
+    private void restoreSnapshot(double[] state) {
+        snapshotHit = true;
+        snapshotReuseCount++;
+        double[][] values = closedBranchValues();
+        boolean[][] flags = closedBranchFlags();
+        int size = branchVector.getSize();
+        // the branches the full computation leaves as they are now (disabled, or not closed, or open at one side): few,
+        // their values are kept across the copy of the whole arrays
+        keptClosed.resetQuick();
+        keptFlows.resetQuick();
+        recomputed.resetQuick();
+        for (int branchNum = 0; branchNum < size; branchNum++) {
+            boolean closed = isWritten(branchNum, false);
+            boolean flows = closed && isWritten(branchNum, true);
+            if (!closed) {
+                keptClosed.add(branchNum);
+            }
+            if (!flows) {
+                keptFlows.add(branchNum);
+            }
+            if (closed && !snapshotHasClosed[branchNum] || flows && !snapshotHasFlows[branchNum]) {
+                // computed now, not held by the snapshot (disabled or open when it was taken)
+                recomputed.add(branchNum);
+            }
+        }
+        int keptValueCount = 2 * keptClosed.size() + (values.length - 2) * keptFlows.size() + flags.length * keptFlows.size();
+        if (keptValues == null || keptValues.length < keptValueCount) {
+            keptValues = new double[Math.max(keptValueCount, 16)];
+        }
+        int k = 0;
+        for (int i = 0; i < values.length; i++) {
+            TIntArrayList kept = i < 2 ? keptClosed : keptFlows;
+            for (int j = 0; j < kept.size(); j++) {
+                keptValues[k++] = values[i][kept.getQuick(j)];
+            }
+        }
+        for (boolean[] flag : flags) {
+            for (int j = 0; j < keptFlows.size(); j++) {
+                keptValues[k++] = flag[keptFlows.getQuick(j)] ? 1 : 0;
+            }
+        }
+        for (int i = 0; i < values.length; i++) {
+            System.arraycopy(snapshotValues[i], 0, values[i], 0, size);
+        }
+        for (int i = 0; i < flags.length; i++) {
+            System.arraycopy(snapshotFlags[i], 0, flags[i], 0, size);
+        }
+        k = 0;
+        for (int i = 0; i < values.length; i++) {
+            TIntArrayList kept = i < 2 ? keptClosed : keptFlows;
+            for (int j = 0; j < kept.size(); j++) {
+                values[i][kept.getQuick(j)] = keptValues[k++];
+            }
+        }
+        for (boolean[] flag : flags) {
+            for (int j = 0; j < keptFlows.size(); j++) {
+                flag[keptFlows.getQuick(j)] = keptValues[k++] != 0;
+            }
+        }
+        var w = new DoubleWrapper();
+        for (int i = 0; i < recomputed.size(); i++) {
+            updateClosedBranch(recomputed.getQuick(i), state, w);
+        }
+        for (int i = 0; i < changedBranches.size(); i++) {
+            updateClosedBranch(changedBranches.getQuick(i), state, w);
+        }
+        assert snapshotSameAsComputedAgain(state);
+    }
+
+    private boolean isWritten(int branchNum, boolean flows) {
+        return !branchVector.disabled[branchNum] && branchVector.closable[branchNum]
+                && (!flows || isBranchConnectedSide1(branchNum) && isBranchConnectedSide2(branchNum));
+    }
+
+    private boolean snapshotSameAsComputedAgain(double[] state) {
+        double[][] values = closedBranchValues();
+        double[][] kept = new double[values.length][];
+        for (int i = 0; i < values.length; i++) {
+            kept[i] = values[i].clone();
+        }
+        updateClosedBranches(state);
+        for (int i = 0; i < values.length; i++) {
+            if (!Arrays.equals(kept[i], values[i])) {
+                throw new AssertionError("A flow copied from the snapshot differs from the one computed again");
+            }
+        }
+        return true;
+    }
+
+    /** How many state updates took the flows of the closed branches from the snapshot. */
+    public int getSnapshotReuseCount() {
+        return snapshotReuseCount;
+    }
+
+    private void onBranchParametersChange(int branchNum) {
+        if (changedSinceSnapshot != null && !changedSinceSnapshot[branchNum]) {
+            changedSinceSnapshot[branchNum] = true;
+            changedBranches.add(branchNum);
+        }
+    }
+
     public void updateClosedBranches(double[] state) {
         var w = new DoubleWrapper();
-
         for (int branchNum = 0; branchNum < branchVector.getSize(); branchNum++) {
+            updateClosedBranch(branchNum, state, w);
+        }
+    }
 
-            if (!branchVector.disabled[branchNum] && branchVector.closable[branchNum]) {
+    private void updateClosedBranch(int branchNum, double[] state, DoubleWrapper w) {
+        if (!branchVector.disabled[branchNum] && branchVector.closable[branchNum]) {
 
-                branchVector.r1State[branchNum] = branchVector.r1Row[branchNum] != -1 ? state[branchVector.r1Row[branchNum]]
-                        : branchVector.r1[branchNum];
-                branchVector.a1State[branchNum] = branchVector.a1Row[branchNum] != -1 ? state[branchVector.a1Row[branchNum]]
-                        : branchVector.a1[branchNum];
+            branchVector.r1State[branchNum] = branchVector.r1Row[branchNum] != -1 ? state[branchVector.r1Row[branchNum]]
+                    : branchVector.r1[branchNum];
+            branchVector.a1State[branchNum] = branchVector.a1Row[branchNum] != -1 ? state[branchVector.a1Row[branchNum]]
+                    : branchVector.a1[branchNum];
 
-                if (isBranchConnectedSide1(branchNum) && isBranchConnectedSide2(branchNum)) {
-                    double ph1 = state[branchVector.ph1Row[branchNum]];
-                    double ph2 = state[branchVector.ph2Row[branchNum]];
-                    double a1 = branchVector.a1State[branchNum];
+            if (isBranchConnectedSide1(branchNum) && isBranchConnectedSide2(branchNum)) {
+                double ph1 = state[branchVector.ph1Row[branchNum]];
+                double ph2 = state[branchVector.ph2Row[branchNum]];
+                double a1 = branchVector.a1State[branchNum];
 
-                    // theta1 = ksi + d and theta2 = ksi - d: one sine and cosine, combined with those of ksi, kept by branch
-                    double d = ph2 - ph1 - a1 + A2;
-                    double sinD = FastMath.sinAndCos(d, w);
-                    double cosD = w.value;
-                    double sinKsi = branchVector.sinKsi[branchNum];
-                    double cosKsi = branchVector.cosKsi[branchNum];
-                    double sinTheta1 = sinKsi * cosD + cosKsi * sinD;
-                    double cosTheta1 = cosKsi * cosD - sinKsi * sinD;
-                    double sinTheta2 = sinKsi * cosD - cosKsi * sinD;
-                    double cosTheta2 = cosKsi * cosD + sinKsi * sinD;
+                // theta1 = ksi + d and theta2 = ksi - d: one sine and cosine, combined with those of ksi, kept by branch
+                double d = ph2 - ph1 - a1 + A2;
+                double sinD = FastMath.sinAndCos(d, w);
+                double cosD = w.value;
+                double sinKsi = branchVector.sinKsi[branchNum];
+                double cosKsi = branchVector.cosKsi[branchNum];
+                double sinTheta1 = sinKsi * cosD + cosKsi * sinD;
+                double cosTheta1 = cosKsi * cosD - sinKsi * sinD;
+                double sinTheta2 = sinKsi * cosD - cosKsi * sinD;
+                double cosTheta2 = cosKsi * cosD + sinKsi * sinD;
 
-                    double v1 = state[branchVector.v1Row[branchNum]];
-                    double v2 = state[branchVector.v2Row[branchNum]];
-                    double r1 = branchVector.r1State[branchNum];
+                double v1 = state[branchVector.v1Row[branchNum]];
+                double v2 = state[branchVector.v2Row[branchNum]];
+                double r1 = branchVector.r1State[branchNum];
 
-                    // p1
-                    updateP1AndDerivatives(branchNum, v1, r1, v2, sinTheta1, cosTheta1);
+                // p1
+                updateP1AndDerivatives(branchNum, v1, r1, v2, sinTheta1, cosTheta1);
 
-                    // q1
-                    updateQ1AndDerivatives(branchNum, v1, r1, v2, sinTheta1, cosTheta1);
+                // q1
+                updateQ1AndDerivatives(branchNum, v1, r1, v2, sinTheta1, cosTheta1);
 
-                    // i1, computed when read
-                    branchVector.v1OfI[branchNum] = v1;
-                    branchVector.i1Computed[branchNum] = true;
+                // i1, computed when read
+                branchVector.v1OfI[branchNum] = v1;
+                branchVector.i1Computed[branchNum] = true;
 
-                    // p2
-                    updateP2AndDerivatives(branchNum, v1, r1, v2, sinTheta2, cosTheta2);
+                // p2
+                updateP2AndDerivatives(branchNum, v1, r1, v2, sinTheta2, cosTheta2);
 
-                    // q2
-                    updateQ2AndDerivatives(branchNum, v1, r1, v2, sinTheta2, cosTheta2);
+                // q2
+                updateQ2AndDerivatives(branchNum, v1, r1, v2, sinTheta2, cosTheta2);
 
-                    // i2, computed when read
-                    branchVector.v2OfI[branchNum] = v2;
-                    branchVector.i2Computed[branchNum] = true;
-                }
+                // i2, computed when read
+                branchVector.v2OfI[branchNum] = v2;
+                branchVector.i2Computed[branchNum] = true;
             }
         }
     }
@@ -438,7 +613,17 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         }
         inputsChanged = false;
         updateBuses(state);
-        updateClosedBranches(state);
+        long setCount = equationSystem.getStateVector().getSetCount();
+        boolean started = setCount != lastSetCount;
+        lastSetCount = setCount;
+        if (started && snapshotState != null && Arrays.equals(snapshotState, state)) {
+            restoreSnapshot(state);
+        } else {
+            updateClosedBranches(state);
+            if (started && !snapshotHit) {
+                takeSnapshot(state);
+            }
+        }
         updateOpenBranches();
         updateShunts(state);
         updateHvdcs();
@@ -472,6 +657,7 @@ public class AcNetworkVector extends AbstractLfNetworkListener
     @Override
     public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition, boolean modifiedTapPosition) {
         PiModel piModel = branch.getPiModel();
+        onBranchParametersChange(branch.getNum());
 
         if (modifiedTapPosition) {
             double y = piModel.getY();

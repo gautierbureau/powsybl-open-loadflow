@@ -28,9 +28,17 @@ public class StateVector {
         this.array = array;
     }
 
+    /** How many times a state was set, as opposed to updated by {@link #minus(double[])}: a new start. */
+    private long setCount;
+
     public void set(double[] array) {
         this.array = Objects.requireNonNull(array);
+        setCount++;
         notifyStateUpdate();
+    }
+
+    public long getSetCount() {
+        return setCount;
     }
 
     public double[] get() {
