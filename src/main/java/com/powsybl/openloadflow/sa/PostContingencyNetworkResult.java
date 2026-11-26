@@ -142,10 +142,10 @@ public class PostContingencyNetworkResult extends AbstractNetworkResult {
     @Override
     protected void storeInitialPhaseTapChangerInfo() {
         var preContingencyChangedTaps = preContingencyNetworkResult.getChangedPhaseTapChangers();
-        // a loop on the branches, at each contingency and each strategy: few of them have a phase tap changer
+        // at each contingency and each strategy: the few branches that can control a phase, kept by the pre-contingency result
         Map<LfBranch, Integer> infos = new HashMap<>();
-        for (LfBranch b : network.getBranches()) {
-            if (!b.isDisabled() && b.hasPhaseControllerCapability()) {
+        for (LfBranch b : preContingencyNetworkResult.getPhaseControllerBranches()) {
+            if (!b.isDisabled()) {
                 // Finding if phase tap has been changed in previous pre contingency state
                 ChangedPhaseTapChanger changedPhaseTapChanger = preContingencyChangedTaps.getOrDefault(b, null);
                 // Creating initial info with either network initial tap, or pre contingency tap if it has been changed

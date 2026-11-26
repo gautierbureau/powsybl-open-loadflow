@@ -98,8 +98,10 @@ final class AcKeptState {
         }
         bind(current);
         double[] state = equationSystem.getStateVector().get();
+        // the rows of the variables of the slots, as the placement keeps them
+        int[] rows = fixed.getRowOfSlots();
         for (int slot = 0; slot < kind.length; slot++) {
-            int row = structure.getVariable(slot).getRow();
+            int row = rows[slot];
             kept[slot] = row >= 0 && kind[slot] != OTHER;
             if (kept[slot]) {
                 value[slot] = state[row];
@@ -134,8 +136,9 @@ final class AcKeptState {
         } else {
             Arrays.fill(written, false);
         }
+        int[] rows = fixed.getRowOfSlots();
         for (int slot = 0; slot < kind.length; slot++) {
-            int row = structure.getVariable(slot).getRow();
+            int row = rows[slot];
             if (row >= 0 && kept[slot]) {
                 x[row] = value[slot];
                 written[row] = true;

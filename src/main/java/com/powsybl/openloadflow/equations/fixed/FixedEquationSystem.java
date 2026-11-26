@@ -130,7 +130,9 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
     /** False when the first pass has to be computed for every equation: a new structure, an equation created or removed. */
     private boolean firstPassValid;
     /** The equations whose activity, or the activity of a term, changed since the last placement. */
-    private final TIntHashSet changedEquations = new TIntHashSet();
+    private final TIntArrayList changedEquations = new TIntArrayList();
+    /** Whether an equation is in {@link #changedEquations}: a hash set is iterated over its whole table, kept at its largest. */
+    private boolean[] changedEquationMarks = new boolean[0];
     /**
      * The equations whose activity, or the activity of a term, changed, as the last placement found them: the linear
      * terms read again the activity of theirs only. Null when the activity of every term is read again.
@@ -420,8 +422,8 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
         // what the equations of the chains depend on is kept from the last placement, for those whose activity did not change
         if (firstPassValid) {
             activityChangedEquations = new TIntArrayList(changedEquations.size());
-            for (TIntIterator it = changedEquations.iterator(); it.hasNext();) {
-                int equation = it.next();
+            for (int i = 0; i < changedEquations.size(); i++) {
+                int equation = changedEquations.getQuick(i);
                 structure.refreshDependedOnNow(equation);
                 activityChangedEquations.add(equation);
             }
@@ -509,7 +511,14 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
         Arrays.fill(rowOfSlot, -1);
         firstPassValid = false;
         lastPlacementValid = false;
-        changedEquations.clear();
+        clearChangedEquations();
+    }
+
+    private void clearChangedEquations() {
+        for (int i = 0; i < changedEquations.size(); i++) {
+            changedEquationMarks[changedEquations.getQuick(i)] = false;
+        }
+        changedEquations.resetQuick();
     }
 
     /** Resolves the first pass again for every slot, or for the slots that may have changed only. */
@@ -526,8 +535,8 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
             }
             firstPassValid = true;
         } else {
-            for (TIntIterator it = changedEquations.iterator(); it.hasNext();) {
-                int equation = it.next();
+            for (int i = 0; i < changedEquations.size(); i++) {
+                int equation = changedEquations.getQuick(i);
                 int own = structure.getOwnSlot(equation);
                 if (own >= 0) {
                     changedSlots.add(own);
@@ -539,7 +548,7 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
                 resolveSlot(it.next());
             }
         }
-        changedEquations.clear();
+        clearChangedEquations();
     }
 
     /** The first pass on one slot: what the full pass does for the equations whose own slot it is, in their order. */
@@ -989,7 +998,13 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
         if (structure != null && firstPassValid) {
             int equation = structure.getNumber(type, elementNum);
             if (equation >= 0) {
-                changedEquations.add(equation);
+                if (equation >= changedEquationMarks.length) {
+                    changedEquationMarks = Arrays.copyOf(changedEquationMarks, Math.max(equation + 1, 2 * changedEquationMarks.length));
+                }
+                if (!changedEquationMarks[equation]) {
+                    changedEquationMarks[equation] = true;
+                    changedEquations.add(equation);
+                }
             } else {
                 firstPassValid = false;
             }
@@ -1125,6 +1140,24 @@ public class FixedEquationSystem<V extends Enum<V> & Quantity, E extends Enum<E>
         for (int slot = 0; slot < equationOfSlot.length; slot++) {
             int equation = equationOfSlot[slot];
             rows[slot] = rowOfSlot[slot];
+            columns[slot] = equation < 0 ? -1 : columnOfEquation[equation];
+        }
+    }
+
+    /**
+     * The row in OLF's index of the variable of each slot, -1 for a variable out of the system: the array of the
+     * placement, as the rows of the variables give them, not to be modified.
+     */
+    public int[] getRowOfSlots() {
+        update();
+        return rowOfSlot;
+    }
+
+    /** The column in OLF's index of the equation each slot holds, -1 for a slot that holds none. */
+    public void getColumnsOfSlots(int[] columns) {
+        update();
+        for (int slot = 0; slot < equationOfSlot.length; slot++) {
+            int equation = equationOfSlot[slot];
             columns[slot] = equation < 0 ? -1 : columnOfEquation[equation];
         }
     }
