@@ -41,7 +41,7 @@
       "contingencyActivePowerLossDistribution" : "Default",
       "startWithFrozenACEmulation" : false,
       "keepOnlyNecessarySwitches" : true,
-      "reusePivots" : true
+      "reusePivots" : false
     }
   }
 }

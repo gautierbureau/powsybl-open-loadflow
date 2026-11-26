@@ -98,9 +98,9 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         assertTrue(parametersExt.isKeepOnlyNecessarySwitches());
         testCount++;
 
-        assertFalse(parametersExt.isReusePivots());
-        parametersExt.setReusePivots(true);
         assertTrue(parametersExt.isReusePivots());
+        parametersExt.setReusePivots(false);
+        assertFalse(parametersExt.isReusePivots());
         testCount++;
 
         assertEquals(OpenSecurityAnalysisParameters.SPECIFIC_PARAMETERS_NAMES.size(), testCount);
@@ -117,7 +117,7 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         moduleConfig.setStringProperty("threadCount", "3");
         moduleConfig.setStringProperty("contingencyActivePowerLossDistribution", "Default");
         moduleConfig.setStringProperty("keepOnlyNecessarySwitches", "true");
-        moduleConfig.setStringProperty("reusePivots", "true");
+        moduleConfig.setStringProperty("reusePivots", "false");
 
         OpenSecurityAnalysisParameters parametersExt = (OpenSecurityAnalysisParameters) provider.loadSpecificParameters(platformConfig).orElseThrow();
         assertTrue(parametersExt.isCreateResultExtension());
@@ -126,7 +126,7 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         assertFalse(parametersExt.isStartWithFrozenACEmulation());
         assertEquals(3, parametersExt.getThreadCount());
         assertTrue(parametersExt.isKeepOnlyNecessarySwitches());
-        assertTrue(parametersExt.isReusePivots());
+        assertFalse(parametersExt.isReusePivots());
         // check test completeness
 
         assertEquals(OpenSecurityAnalysisParameters.SPECIFIC_PARAMETERS_NAMES.size(), moduleConfig.getPropertyNames().size());
@@ -150,7 +150,7 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
                 "startWithFrozenACEmulation", "false",
                 "contingencyActivePowerLossDistribution", "Default",
                 "keepOnlyNecessarySwitches", "true",
-                "reusePivots", "true");
+                "reusePivots", "false");
         OpenSecurityAnalysisParameters parametersExt = (OpenSecurityAnalysisParameters) provider.loadSpecificParameters(properties).orElseThrow();
         assertTrue(parametersExt.isCreateResultExtension());
         assertFalse(parametersExt.isContingencyPropagation());
@@ -159,7 +159,7 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
         assertFalse(parametersExt.isStartWithFrozenACEmulation());
         assertEquals("Default", parametersExt.getContingencyActivePowerLossDistribution());
         assertTrue(parametersExt.isKeepOnlyNecessarySwitches());
-        assertTrue(parametersExt.isReusePivots());
+        assertFalse(parametersExt.isReusePivots());
 
         // check test completeness
         assertEquals(OpenSecurityAnalysisParameters.SPECIFIC_PARAMETERS_NAMES.size(), properties.size());
@@ -175,7 +175,7 @@ class OpenSecurityAnalysisProviderTest extends AbstractSerDeTest {
                 .setThreadCount(3)
                 .setStartWithFrozenACEmulation(false)
                 .setKeepOnlyNecessarySwitches(true)
-                .setReusePivots(true);
+                .setReusePivots(false);
         parameters.addExtension(OpenSecurityAnalysisParameters.class, parametersExt);
         roundTripTest(parameters, JsonSecurityAnalysisParameters::write, JsonSecurityAnalysisParameters::read, "/sa-params.json");
     }

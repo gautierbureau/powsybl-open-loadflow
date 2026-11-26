@@ -52,7 +52,7 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
     public static final String KEEP_ONLY_NECESSARY_SWITCHES_PARAM_NAME = "keepOnlyNecessarySwitches";
     public static final boolean KEEP_ONLY_NECESSARY_SWITCHES_DEFAULT_VALUE = false;
     public static final String REUSE_PIVOTS_PARAM_NAME = "reusePivots";
-    public static final boolean REUSE_PIVOTS_DEFAULT_VALUE = false;
+    public static final boolean REUSE_PIVOTS_DEFAULT_VALUE = true;
     public static final List<String> SPECIFIC_PARAMETERS_NAMES = List.of(CREATE_RESULT_EXTENSION_PARAM_NAME,
             CONTINGENCY_PROPAGATION_PARAM_NAME,
             THREAD_COUNT_PARAM_NAME,
@@ -144,11 +144,12 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
     }
 
     /**
-     * When false (the default), each simulation of the AC security analysis (a contingency, an operator strategy)
-     * factorises its Jacobian with pivots chosen from its own matrices: its results do not depend on the simulations
-     * run before it. When true, it refactorises on the pivots the previous simulation ended with, and chooses new ones
-     * only when one of them is no longer good: this saves a full numerical factorisation per simulation, but the last
-     * bits of the results may then depend on the simulations run before (their order, the number of threads).
+     * When true (the default), each simulation of the AC security analysis (a contingency, an operator strategy)
+     * refactorises its Jacobian on the pivots the previous simulation ended with, and chooses new ones only when one of
+     * them is no longer good: this saves a full numerical factorisation per simulation, but the last bits of the
+     * results may then depend on the simulations run before (their order, the number of threads). When false, each
+     * simulation factorises its Jacobian with pivots chosen from its own matrices: its results do not depend on the
+     * simulations run before it.
      */
     public boolean isReusePivots() {
         return reusePivots;
