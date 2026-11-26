@@ -26,6 +26,7 @@ import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.results.BranchResult;
+import com.powsybl.security.results.NetworkResult;
 import com.powsybl.security.results.OperatorStrategyResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -812,5 +813,37 @@ class WoodburyDcSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnal
         assertEquals(0, operatorStrategyResult.getLimitViolationsResult().getLimitViolations().size());
         // in fast dc mode, no branch result is created for disabled branches on one side
         assertEquals(1, operatorStrategyResult.getNetworkResult().getBranchResults().size());
+    }
+
+    /**
+     * A tap position action on a transformer that is not in the network the analysis runs on (PS1 disconnected on both
+     * sides): it changes nothing, as in the DC security analysis.
+     */
+    @Test
+    void testFastDcSaTapActionOnATransformerOutsideTheNetwork() {
+        Network network = PhaseControlFactory.createWithOneT2wtTwoLines();
+        network.getTwoWindingsTransformer("PS1").getTerminal1().disconnect();
+        network.getTwoWindingsTransformer("PS1").getTerminal2().disconnect();
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<Action> actions = List.of(new PhaseTapChangerTapPositionAction("pstAbsChange", "PS1", false, 0));
+        List<OperatorStrategy> operatorStrategies = List.of(
+                new OperatorStrategy("strategy", ContingencyContext.specificContingency("L1"), new TrueCondition(), List.of("pstAbsChange")));
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(false);
+        SecurityAnalysisResult expected = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(true);
+        SecurityAnalysisResult fast = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+
+        NetworkResult expectedStrategy = getOperatorStrategyResult(expected, "strategy").getNetworkResult();
+        NetworkResult fastStrategy = getOperatorStrategyResult(fast, "strategy").getNetworkResult();
+        assertFalse(expectedStrategy.getBranchResults().isEmpty());
+        for (BranchResult branchResult : expectedStrategy.getBranchResults()) {
+            if (!Double.isNaN(branchResult.getP1())) {
+                assertEquals(branchResult.getP1(), fastStrategy.getBranchResult(branchResult.getBranchId()).getP1(), DELTA_POWER, branchResult.getBranchId());
+            }
+        }
     }
 }

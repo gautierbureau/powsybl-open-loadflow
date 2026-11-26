@@ -169,7 +169,9 @@ public interface ComputedElement {
                 // a pure phase shift (no impedance/ratio change) does not modify the branch power and is fully
                 // handled through the target vector: it must not produce a Woodbury element, otherwise its
                 // diagonal term (1 / (oldPower - newPower)) would be infinite and corrupt the alpha solve
-                if (changesBranchPower(change, creationParameters)) {
+                // no change: the transformer is not in this component's network (the action is not valid here, as in
+                // LfAction.apply), so it changes nothing here
+                if (change != null && changesBranchPower(change, creationParameters)) {
                     elements.add(new ComputedTapPositionChangeElement(change, equationSystem));
                 }
             }
