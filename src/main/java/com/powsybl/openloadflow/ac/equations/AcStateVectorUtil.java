@@ -34,12 +34,33 @@ public final class AcStateVectorUtil {
     public static void initStateVector(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem, VoltageInitializer initializer) {
         EquationSystemIndex<AcVariableType, AcEquationType> index = equationSystem.getIndex();
         double[] x = stateArray(equationSystem, index.getSortedVariablesToFind().size());
+        // the previous values of the voltages and the angles of the buses, straight from the arrays the network keeps
+        // them in, as LfBus.getV and getAngle read them, without going through each bus
+        boolean previousValues = initializer.getClass() == PreviousValueVoltageInitializer.class;
         // by type, from the rows and element numbers of the index: each variable is given its value at its row
         for (AcVariableType type : AcVariableType.values()) {
             int[] rows = index.getRowsOfType(type);
             int[] elementNums = index.getElementNumsOfType(type);
-            for (int i = 0; i < rows.length; i++) {
-                x[rows[i]] = initValue(network, type, elementNums[i], initializer);
+            if (previousValues && type == AcVariableType.BUS_V) {
+                double[] busVoltages = network.getBusVoltages();
+                double[] busNominalVoltages = network.getBusNominalVoltages();
+                for (int i = 0; i < rows.length; i++) {
+                    int num = elementNums[i];
+                    double v = busVoltages[num] / busNominalVoltages[num];
+                    // an undefined voltage: the initializer decides, a default or an exception
+                    x[rows[i]] = Double.isNaN(v) ? initValue(network, type, num, initializer) : v;
+                }
+            } else if (previousValues && type == AcVariableType.BUS_PHI) {
+                double[] busAngles = network.getBusAngles();
+                for (int i = 0; i < rows.length; i++) {
+                    int num = elementNums[i];
+                    double angle = busAngles[num];
+                    x[rows[i]] = Double.isNaN(angle) ? initValue(network, type, num, initializer) : angle;
+                }
+            } else {
+                for (int i = 0; i < rows.length; i++) {
+                    x[rows[i]] = initValue(network, type, elementNums[i], initializer);
+                }
             }
         }
         equationSystem.getStateVector().set(x);
