@@ -138,8 +138,18 @@ public interface ComputedElement {
 
     static Map<LfAction, List<ComputedElement>> createActionElementsIndexByLfAction(Map<String, LfAction> lfActionById, EquationSystem<DcVariableType, DcEquationType> equationSystem,
                                                                                     DcEquationSystemCreationParameters creationParameters) {
+        return createActionElementsIndexByLfAction(lfActionById, equationSystem, creationParameters, EnergizableIslands.none());
+    }
+
+    /**
+     * The actions' Woodbury elements, with the islands they may energize in the base case's system: closing an island's
+     * anchor needs no element, closing another branch towards it also disables the anchor.
+     */
+    static Map<LfAction, List<ComputedElement>> createActionElementsIndexByLfAction(Map<String, LfAction> lfActionById, EquationSystem<DcVariableType, DcEquationType> equationSystem,
+                                                                                    DcEquationSystemCreationParameters creationParameters,
+                                                                                    EnergizableIslands islands) {
         Map<LfAction, List<ComputedElement>> computedElements = lfActionById.values().stream()
-            .flatMap(lfAction -> computeActionElementsIndexByLfAction(lfAction, equationSystem, creationParameters))
+            .flatMap(lfAction -> computeActionElementsIndexByLfAction(lfAction, equationSystem, creationParameters, islands))
             .filter(e -> e.getValue().stream().filter(b -> b.getLfBranchEquation() == null).findAny().isEmpty())
             .collect(Collectors.toMap(
                 Map.Entry::getKey,
@@ -167,14 +177,24 @@ public interface ComputedElement {
 
     private static Stream<Map.Entry<LfAction, List<ComputedElement>>> computeActionElementsIndexByLfAction(LfAction lfAction,
                                                                                                     EquationSystem<DcVariableType, DcEquationType> equationSystem,
-                                                                                                    DcEquationSystemCreationParameters creationParameters) {
+                                                                                                    DcEquationSystemCreationParameters creationParameters,
+                                                                                                    EnergizableIslands islands) {
         List<ComputedElement> elements = new ArrayList<>();
         switch (lfAction.getType()) {
             case SwitchAction.NAME, TerminalsConnectionAction.NAME -> {
                 AbstractLfBranchAction<?> lfBranchAction = (AbstractLfBranchAction<?>) lfAction;
                 if (!lfBranchAction.getEnabledBranches().isEmpty()) {
-                    lfBranchAction.getEnabledBranches().forEach(b -> checkEnergizedBuses(lfAction, b, equationSystem));
-                    elements.addAll(lfBranchAction.getEnabledBranches().stream().map(b -> ComputedSwitchBranchElement.create(b, true, equationSystem)).toList());
+                    for (LfBranch b : lfBranchAction.getEnabledBranches()) {
+                        if (islands.isAnchor(b)) {
+                            continue; // already closed in the base case's system: the island's injections only
+                        }
+                        checkEnergizedBuses(lfAction, b, equationSystem);
+                        elements.add(ComputedSwitchBranchElement.create(b, true, equationSystem));
+                        LfBranch anchor = islands.replacedAnchor(b);
+                        if (anchor != null) {
+                            elements.add(ComputedSwitchBranchElement.create(anchor, false, equationSystem));
+                        }
+                    }
                 } else if (!lfBranchAction.getDisabledBranches().isEmpty()) {
                     elements.addAll(lfBranchAction.getDisabledBranches().stream().map(b -> ComputedSwitchBranchElement.create(b, false, equationSystem)).toList());
                 }
