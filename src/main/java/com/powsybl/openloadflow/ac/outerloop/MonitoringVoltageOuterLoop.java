@@ -24,6 +24,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 
@@ -162,8 +163,8 @@ public class MonitoringVoltageOuterLoop implements AcOuterLoop {
         List<PqToPvBus> pqToPvBuses = new ArrayList<>();
         boolean[] monitoredBuses = getMonitoredBuses(context.getNetwork());
         if (monitoredBuses != null) {
-            for (LfBus bus : context.getNetwork().<LfBus>getControllerElements(VoltageControl.Type.GENERATOR)) {
-                if (monitoredBuses[bus.getNum()] && !bus.isGeneratorVoltageControlEnabled()) {
+            for (LfBus bus : getMonitoredControllerBuses(context.getNetwork(), monitoredBuses)) {
+                if (!bus.isGeneratorVoltageControlEnabled()) {
                     getControlledBusVoltageLimits(bus).ifPresent(voltageLimits -> checkPqBusForVoltageLimits(bus, pqToPvBuses, voltageLimits));
                 }
             }
@@ -177,40 +178,52 @@ public class MonitoringVoltageOuterLoop implements AcOuterLoop {
         return new OuterLoopResult(this, status);
     }
 
-    /**
-     * Needed when a monitored bus that holds its own voltage is a controller element of the generator voltage controls,
-     * with voltage limits. The few monitored buses are tested one by one, instead of computing the controller elements
-     * of every voltage control of the network: a bus is one when the main voltage control of its group is visible and
-     * counts it among its controller elements, and it is enabled ({@link LfNetwork#getControllerElements}).
-     */
+    /** Needed when a monitored bus that holds its own voltage is a controller element of the generator voltage controls, with voltage limits. */
     @Override
     public boolean isNeeded(AcLoadFlowContext context) {
         LfNetwork network = context.getNetwork();
         boolean[] monitoredBuses = getMonitoredBuses(network);
-        if (monitoredBuses == null) {
-            return false;
-        }
-        boolean needed = false;
-        for (int num = 0; num < monitoredBuses.length && !needed; num++) {
+        return monitoredBuses != null && getMonitoredControllerBuses(network, monitoredBuses).stream()
+                .filter(LfBus::isGeneratorVoltageControlled)
+                .anyMatch(bus -> getControlledBusVoltageLimits(bus).isPresent());
+    }
+
+    /**
+     * The monitored buses that are controller elements of the generator voltage controls, in the order of
+     * {@link LfNetwork#getControllerElements}: the few monitored buses are tested one by one, instead of computing the
+     * controller elements of every voltage control of the network, after each change of the controls. A bus is one when
+     * the main voltage control of its group is visible and counts it among its controller elements, and it is enabled;
+     * they are listed by the controlled bus of that control, then in its order of the controller elements.
+     */
+    private static List<LfBus> getMonitoredControllerBuses(LfNetwork network, boolean[] monitoredBuses) {
+        List<LfBus> buses = new ArrayList<>(2);
+        for (int num = 0; num < monitoredBuses.length; num++) {
             if (monitoredBuses[num]) {
                 LfBus bus = network.getBus(num);
-                needed = bus.isGeneratorVoltageControlled() && isControllerElement(bus)
-                        && getControlledBusVoltageLimits(bus).isPresent();
+                if (isControllerElement(bus)) {
+                    buses.add(bus);
+                }
             }
         }
-        assert needed == network.<LfBus>getControllerElements(VoltageControl.Type.GENERATOR).stream()
-                .filter(bus -> monitoredBuses[bus.getNum()])
-                .filter(LfBus::isGeneratorVoltageControlled)
-                .anyMatch(bus -> getControlledBusVoltageLimits(bus).isPresent())
+        if (buses.size() > 1) {
+            buses.sort(Comparator.<LfBus>comparingInt(bus -> mainControl(bus).getControlledBus().getNum())
+                    .thenComparingInt(bus -> mainControl(bus).getMergedControllerElements().indexOf(bus)));
+        }
+        assert buses.equals(network.<LfBus>getControllerElements(VoltageControl.Type.GENERATOR).stream()
+                .filter(bus -> monitoredBuses[bus.getNum()]).toList())
                 : "The monitored buses tested one by one are not those of the controller elements";
-        return needed;
+        return buses;
+    }
+
+    private static GeneratorVoltageControl mainControl(LfBus bus) {
+        return bus.getGeneratorVoltageControl().orElseThrow().getMainVoltageControl();
     }
 
     private static boolean isControllerElement(LfBus bus) {
-        if (bus.isDisabled()) {
+        if (bus.isDisabled() || bus.getGeneratorVoltageControl().isEmpty()) {
             return false;
         }
-        GeneratorVoltageControl main = bus.getGeneratorVoltageControl().orElseThrow().getMainVoltageControl();
+        GeneratorVoltageControl main = mainControl(bus);
         return main.getMergeStatus() == VoltageControl.MergeStatus.MAIN && main.isVisible()
                 && main.getMergedControllerElements().contains(bus);
     }
