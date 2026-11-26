@@ -47,6 +47,12 @@ public class LimitViolationManager {
 
     private final Map<Pair<Object, String>, LimitViolation> violations = new LinkedHashMap<>(); // All limit violations indexed by network element and OperationalLimitsGroup (if it exists)
 
+    /**
+     * As a reference: the voltage violation of each bus, by bus number, or null; read from {@link #violations} once it
+     * is complete, at the first post-contingency detection, instead of a key built and looked up for each bus.
+     */
+    private LimitViolation[] busViolationsByNum;
+
     public LimitViolationManager(LimitViolationManager reference, List<LimitScaling> limitScalings,
                                  SecurityAnalysisParameters.IncreasedViolationsParameters parameters) {
         this.reference = reference;
@@ -431,9 +437,25 @@ public class LimitViolationManager {
         if (reference == null) {
             return false;
         }
-        LimitViolation referenceLimitViolation = reference.violations.get(Pair.of(bus.getId(), null));
+        LimitViolation referenceLimitViolation = reference.getBusViolation(bus);
         return referenceLimitViolation != null
                 && violationWeakenedOrEquivalent(referenceLimitViolation, type, limit, value, parameters);
+    }
+
+    /** The voltage violation of a bus, as {@code violations.get(Pair.of(bus.getId(), null))} gives it. */
+    private LimitViolation getBusViolation(LfBus bus) {
+        LimitViolation[] byNum = busViolationsByNum;
+        if (byNum == null) {
+            List<LfBus> buses = bus.getNetwork().getBuses();
+            byNum = new LimitViolation[buses.size()];
+            if (!violations.isEmpty()) {
+                for (LfBus b : buses) {
+                    byNum[b.getNum()] = violations.get(Pair.of(b.getId(), null));
+                }
+            }
+            busViolationsByNum = byNum;
+        }
+        return byNum[bus.getNum()];
     }
 
     private void detectBusViolations(LfBus bus) {
