@@ -305,7 +305,9 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
 
         @Override
         public void onDisableChange(LfElement element, boolean disabled) {
-            if (element.getType() == ElementType.BUS || element.getType() == ElementType.BRANCH) {
+            if (element.getType() == ElementType.BRANCH) {
+                forgetBranch((LfBranch) element);
+            } else if (element.getType() == ElementType.BUS) {
                 forgetElement(element.getNum());
             } else {
                 forgetAll();
@@ -354,7 +356,7 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
 
         @Override
         public void onBranchConnectionStatusChange(LfBranch branch, TwoSides side, boolean connected) {
-            forgetElement(branch.getNum());
+            forgetBranch(branch);
         }
 
         @Override
@@ -460,6 +462,24 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
         }
         forget(AcEquationType.BUS_DISTR_SLACK_P);
         forgetVoltageTargets();
+    }
+
+    /**
+     * A branch disabled or enabled, or connected or disconnected at one side: the targets of its number, of every type
+     * (more than needed). The voltage targets and the distributions read buses and their voltage controls, not the
+     * branches: a zero impedance network split or merged forgets them with its own event. Only a branch that controls
+     * a voltage can change them, its voltage control being disabled with it.
+     */
+    private void forgetBranch(LfBranch branch) {
+        if (branch.isVoltageController()) {
+            forgetElement(branch.getNum());
+            return;
+        }
+        int num = branch.getNum();
+        for (AcEquationType type : TYPES) {
+            forget(type, num);
+        }
+        invalidateValues();
     }
 
     private void forgetAll() {
