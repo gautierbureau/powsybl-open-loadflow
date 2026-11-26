@@ -23,16 +23,20 @@ public final class AcSolverUtil {
     }
 
     public static void updateNetwork(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
-        // update state variable
+        // update state variable: the voltages and angles of the buses straight into the arrays the network keeps them
+        // in, as LfBus.setV and setAngle would write them, without going through each bus
         StateVector stateVector = equationSystem.getStateVector();
+        double[] busVoltages = network.getBusVoltages();
+        double[] busAngles = network.getBusAngles();
+        double[] busNominalVoltages = network.getBusNominalVoltages();
         for (Variable<AcVariableType> v : equationSystem.getIndex().getSortedVariablesToFind()) {
             switch (v.getType()) {
                 case BUS_V:
-                    network.getBus(v.getElementNum()).setV(stateVector.get(v.getRow()));
+                    busVoltages[v.getElementNum()] = stateVector.get(v.getRow()) * busNominalVoltages[v.getElementNum()];
                     break;
 
                 case BUS_PHI:
-                    network.getBus(v.getElementNum()).setAngle(stateVector.get(v.getRow()));
+                    busAngles[v.getElementNum()] = stateVector.get(v.getRow());
                     break;
 
                 case BUS_V_ZERO:
@@ -84,5 +88,6 @@ public final class AcSolverUtil {
                     throw new IllegalStateException("Unknown variable type " + v.getType());
             }
         }
+        network.onStateWrite();
     }
 }

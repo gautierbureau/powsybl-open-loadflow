@@ -51,7 +51,7 @@ class LfNetworkCopyFieldGuardTest {
                 "apparentPowerLimits2", "piModel", "phaseControl", "phaseControlEnabled", "voltageControl", "voltageControlEnabled", "transformerReactivePowerControl",
                 "zeroImpedanceContextByModel", "a1", "generatorReactivePowerControl", "asymLine"));
         expected.put(innerClass(AbstractLfBranch.class, "ZeroImpedanceContext"), Set.of("spanningTreeEdge", "zeroImpedance"));
-        expected.put(AbstractLfBus.class, Set.of("slack", "reference", "v", "calculatedV", "angle", "hasGeneratorsWithSlope", "generatorVoltageControlEnabled",
+        expected.put(AbstractLfBus.class, Set.of("slack", "reference", "initialV", "calculatedV", "initialAngle", "hasGeneratorsWithSlope", "generatorVoltageControlEnabled",
                 "generatorReactivePowerControlEnabled", "generationTargetP", "generationTargetQ", "invalidatedGenerationTargetQ", "qLimitType", "generators",
                 "converters", "shunt", "controllerShunt", "svcShunt", "distributedOnConformLoad", "loads", "loadTargetP", "loadTargetQ", "branches", "hvdcs",
                 "generatorVoltageControl", "generatorReactivePowerControl", "transformerVoltageControl", "voltageSourceConverterVoltageControl", "shuntVoltageControl",
@@ -92,7 +92,8 @@ class LfNetworkCopyFieldGuardTest {
         expected.put(LfNetwork.class, Set.of("numCC", "synchronousNetworks", "slackBusSelector", "referenceBusSelector", "maxSlackBusCount", "busesById", "busesByIndex",
                 "branches", "branchesById", "branchesByOriginalId", "shuntCount", "shuntsByIndex", "shuntsById", "generatorsById", "loadsById", "areasById", "areas", "hvdcs",
                 "hvdcsById", "dcBusByIndex", "dcBusById", "dcBranchesByIndex", "voltageSourceConvertersByIndex", "listeners", "validity", "connectivityFactory", "connectivity",
-                "zeroImpedanceNetworksByModel", "reportNode", "secondaryVoltageControls", "voltageAngleLimits", "overloadManagementSystems", "connectivityRemovedBranches", "stateWriteCount"));
+                "zeroImpedanceNetworksByModel", "reportNode", "secondaryVoltageControls", "voltageAngleLimits", "overloadManagementSystems", "connectivityRemovedBranches", "stateWriteCount",
+                "busVoltages", "busAngles", "busNominalVoltages"));
         expected.put(LfNetwork.LfVoltageAngleLimit.class, Set.of("id", "from", "to", "highValue", "lowValue"));
         expected.put(LfOverloadManagementSystem.class, Set.of("monitoredBranch", "monitoredSide", "branchTrippingList"));
         expected.put(LfOverloadManagementSystem.LfBranchTripping.class, Set.of("branchOpen", "threshold", "branchToOperate"));

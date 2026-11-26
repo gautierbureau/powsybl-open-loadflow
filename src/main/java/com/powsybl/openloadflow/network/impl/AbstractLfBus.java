@@ -39,11 +39,15 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     protected boolean reference = false;
 
-    protected double v;
+    /*
+     * The voltage (kV) and the angle until the bus is added to its network, which keeps them from then on, by bus
+     * number ({@link LfNetwork#getBusVoltages()}, {@link LfNetwork#getBusAngles()}).
+     */
+    private double initialV;
 
     protected Evaluable calculatedV = NAN;
 
-    protected double angle;
+    private double initialAngle;
 
     private boolean hasGeneratorsWithSlope;
 
@@ -111,8 +115,8 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     protected AbstractLfBus(LfNetwork network, double v, double angle, int numSC, LfNetworkParameters parameters) {
         super(network);
-        this.v = v;
-        this.angle = angle;
+        this.initialV = v;
+        this.initialAngle = angle;
         this.numSC = numSC;
         this.distributedOnConformLoad = parameters.isDistributedOnConformLoad();
         this.forceTargetQInReactiveLimits = parameters.isForceTargetQInReactiveLimits() && parameters.isReactiveLimits();
@@ -121,8 +125,8 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
     protected AbstractLfBus(AbstractLfBus other, LfNetwork network) {
         super(network);
         this.numSC = other.numSC;
-        this.v = other.v;
-        this.angle = other.angle;
+        this.initialV = other.getVoltageKv();
+        this.initialAngle = other.getAngle();
         this.distributedOnConformLoad = other.distributedOnConformLoad;
         this.forceTargetQInReactiveLimits = other.forceTargetQInReactiveLimits;
 
@@ -597,13 +601,33 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
     }
 
     @Override
+    public void setNum(int num) {
+        super.setNum(num);
+        network.getBusVoltages()[num] = initialV;
+        network.getBusAngles()[num] = initialAngle;
+        // the network keeps them from now on
+        initialV = Double.NaN;
+        initialAngle = Double.NaN;
+    }
+
+    /** The voltage in kV. */
+    protected double getVoltageKv() {
+        return num >= 0 ? network.getBusVoltages()[num] : initialV;
+    }
+
+    @Override
     public double getV() {
-        return v / getNominalV();
+        return getVoltageKv() / getNominalV();
     }
 
     @Override
     public void setV(double v) {
-        this.v = v * getNominalV();
+        double kv = v * getNominalV();
+        if (num >= 0) {
+            network.getBusVoltages()[num] = kv;
+        } else {
+            initialV = kv;
+        }
         network.onStateWrite();
     }
 
@@ -619,12 +643,16 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     @Override
     public double getAngle() {
-        return angle;
+        return num >= 0 ? network.getBusAngles()[num] : initialAngle;
     }
 
     @Override
     public void setAngle(double angle) {
-        this.angle = angle;
+        if (num >= 0) {
+            network.getBusAngles()[num] = angle;
+        } else {
+            initialAngle = angle;
+        }
         network.onStateWrite();
     }
 

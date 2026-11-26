@@ -118,6 +118,14 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
     /** How many times a bus voltage or angle was written: a state kept from a solve is valid while it does not move. */
     private long stateWriteCount;
 
+    /*
+     * The voltage (kV) and the angle of each bus, and its nominal voltage, by bus number: the buses keep their state
+     * here rather than in their objects, so that a solver writes it into arrays (see AbstractLfBus#getV).
+     */
+    private double[] busVoltages = new double[16];
+    private double[] busAngles = new double[16];
+    private double[] busNominalVoltages = new double[16];
+
     private Validity validity = Validity.VALID;
 
     private final GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory;
@@ -350,7 +358,15 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
 
     public void addBus(LfBus bus) {
         Objects.requireNonNull(bus);
-        bus.setNum(busesByIndex.size());
+        int num = busesByIndex.size();
+        if (num >= busVoltages.length) {
+            int length = Math.max(2 * busVoltages.length, num + 1);
+            busVoltages = Arrays.copyOf(busVoltages, length);
+            busAngles = Arrays.copyOf(busAngles, length);
+            busNominalVoltages = Arrays.copyOf(busNominalVoltages, length);
+        }
+        busNominalVoltages[num] = bus.getNominalV();
+        bus.setNum(num);
         busesByIndex.add(bus);
         busesById.put(bus.getId(), bus);
         // Create a new LfSynchronousNetwork if this bus belongs to a synchronous component not stored yet
@@ -1216,6 +1232,21 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
     /** Notes that a bus voltage or angle was written. */
     public void onStateWrite() {
         stateWriteCount++;
+    }
+
+    /** The voltage of each bus in kV, by bus number. */
+    public double[] getBusVoltages() {
+        return busVoltages;
+    }
+
+    /** The angle of each bus in radians, by bus number. */
+    public double[] getBusAngles() {
+        return busAngles;
+    }
+
+    /** The nominal voltage of each bus in kV, by bus number. */
+    public double[] getBusNominalVoltages() {
+        return busNominalVoltages;
     }
 
     public List<LfNetworkListener> getListeners() {
