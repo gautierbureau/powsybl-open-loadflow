@@ -71,6 +71,8 @@ public class AcNetworkVector extends AbstractLfNetworkListener
     private final TIntArrayList recomputed = new TIntArrayList();
     private double[] keptValues;
     private long lastSetCount = -1;
+    /** True when the update in progress is for a state that was set: a start, not a Newton step. */
+    private boolean startUpdate;
     private int snapshotReuseCount;
     private boolean inputsChanged = true;
     private int skipCount;
@@ -613,9 +615,8 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         }
         inputsChanged = false;
         updateBuses(state);
-        long setCount = equationSystem.getStateVector().getSetCount();
-        boolean started = setCount != lastSetCount;
-        lastSetCount = setCount;
+        boolean started = startUpdate;
+        startUpdate = false;
         if (started && snapshotState != null && Arrays.equals(snapshotState, state)) {
             restoreSnapshot(state);
         } else {
@@ -731,6 +732,10 @@ public class AcNetworkVector extends AbstractLfNetworkListener
 
     @Override
     public void onStateUpdate() {
+        // a start is noted before an update found unnecessary: the next one, a Newton step, is not a start
+        long setCount = equationSystem.getStateVector().getSetCount();
+        startUpdate = setCount != lastSetCount;
+        lastSetCount = setCount;
         if (!variablesInvalid && !inputsChanged && Arrays.equals(equationSystem.getStateVector().get(), computedState)) {
             // computed for this state already, and nothing else changed since
             skipCount++;

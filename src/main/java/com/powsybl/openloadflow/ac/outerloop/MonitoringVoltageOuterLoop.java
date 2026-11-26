@@ -13,6 +13,7 @@ import com.powsybl.openloadflow.ac.AcOuterLoopContext;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopResult;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
 import com.powsybl.openloadflow.lf.util.LfReports;
+import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -176,12 +177,41 @@ public class MonitoringVoltageOuterLoop implements AcOuterLoop {
         return new OuterLoopResult(this, status);
     }
 
+    /**
+     * Needed when a monitored bus that holds its own voltage is a controller element of the generator voltage controls,
+     * with voltage limits. The few monitored buses are tested one by one, instead of computing the controller elements
+     * of every voltage control of the network: a bus is one when the main voltage control of its group is visible and
+     * counts it among its controller elements, and it is enabled ({@link LfNetwork#getControllerElements}).
+     */
     @Override
     public boolean isNeeded(AcLoadFlowContext context) {
-        boolean[] monitoredBuses = getMonitoredBuses(context.getNetwork());
-        return monitoredBuses != null && context.getNetwork().<LfBus>getControllerElements(VoltageControl.Type.GENERATOR).stream()
+        LfNetwork network = context.getNetwork();
+        boolean[] monitoredBuses = getMonitoredBuses(network);
+        if (monitoredBuses == null) {
+            return false;
+        }
+        boolean needed = false;
+        for (int num = 0; num < monitoredBuses.length && !needed; num++) {
+            if (monitoredBuses[num]) {
+                LfBus bus = network.getBus(num);
+                needed = bus.isGeneratorVoltageControlled() && isControllerElement(bus)
+                        && getControlledBusVoltageLimits(bus).isPresent();
+            }
+        }
+        assert needed == network.<LfBus>getControllerElements(VoltageControl.Type.GENERATOR).stream()
                 .filter(bus -> monitoredBuses[bus.getNum()])
                 .filter(LfBus::isGeneratorVoltageControlled)
-                .anyMatch(bus -> getControlledBusVoltageLimits(bus).isPresent());
+                .anyMatch(bus -> getControlledBusVoltageLimits(bus).isPresent())
+                : "The monitored buses tested one by one are not those of the controller elements";
+        return needed;
+    }
+
+    private static boolean isControllerElement(LfBus bus) {
+        if (bus.isDisabled()) {
+            return false;
+        }
+        GeneratorVoltageControl main = bus.getGeneratorVoltageControl().orElseThrow().getMainVoltageControl();
+        return main.getMergeStatus() == VoltageControl.MergeStatus.MAIN && main.isVisible()
+                && main.getMergedControllerElements().contains(bus);
     }
 }
