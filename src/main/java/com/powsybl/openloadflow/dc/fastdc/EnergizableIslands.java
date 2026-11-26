@@ -176,27 +176,43 @@ public final class EnergizableIslands {
 
     /**
      * Energizes, on the network, the islands these actions close a branch towards: their injections back, and the anchor
-     * disabled when another branch attaches the island. Undone by restoring the network state saved after
+     * disabled when another branch alone attaches the island. Undone by restoring the network state saved after
      * {@link #prepare}.
      */
     public void energize(List<LfAction> actions) {
         if (isEmpty()) {
             return;
         }
+        Set<LfBranch> closed = closedBranches(actions);
         Set<Island> energized = new HashSet<>();
-        for (LfAction action : actions) {
-            if (action instanceof AbstractLfBranchAction<?> branchAction) {
-                for (LfBranch branch : branchAction.getEnabledBranches()) {
-                    Island island = islandByEntryBranch.get(branch);
-                    if (island != null && energized.add(island)) {
-                        restoreInjections(island);
-                    }
-                    if (island != null && island.anchor() != branch) {
-                        island.anchor().setDisabled(true);
-                    }
-                }
+        for (LfBranch branch : closed) {
+            Island island = islandByEntryBranch.get(branch);
+            if (island != null && energized.add(island)) {
+                restoreInjections(island);
+            }
+            if (island != null && island.anchor() != branch && !closed.contains(island.anchor())) {
+                island.anchor().setDisabled(true);
             }
         }
+    }
+
+    /**
+     * Whether this action element opens an anchor that these actions also close: it comes with another branch closed
+     * towards the island (see {@link #replacedAnchor}), and the anchor then stays closed, so the element is not applied.
+     */
+    public boolean opensAnchorClosedBy(ComputedElement element, List<LfAction> actions) {
+        return element instanceof ComputedSwitchBranchElement switchElement && !switchElement.isEnabled()
+                && isAnchor(switchElement.getLfBranch()) && closedBranches(actions).contains(switchElement.getLfBranch());
+    }
+
+    private static Set<LfBranch> closedBranches(List<LfAction> actions) {
+        Set<LfBranch> closed = new LinkedHashSet<>();
+        for (LfAction action : actions) {
+            if (action instanceof AbstractLfBranchAction<?> branchAction) {
+                closed.addAll(branchAction.getEnabledBranches());
+            }
+        }
+        return closed;
     }
 
     private static void restoreInjections(Island island) {

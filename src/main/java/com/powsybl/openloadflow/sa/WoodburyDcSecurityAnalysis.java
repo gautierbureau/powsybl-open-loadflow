@@ -147,6 +147,8 @@ public class WoodburyDcSecurityAnalysis extends DcSecurityAnalysis {
                 .filter(Objects::nonNull)
                 .flatMap(Collection::stream)
                 .filter(actionElement -> !elementsToReconnect.contains(actionElement.getLfBranch().getId()))
+                // an island's anchor stays closed when the strategy closes it too
+                .filter(actionElement -> !energizableIslands.opensAnchorClosedBy(actionElement, operatorStrategyLfActions))
                 .toList();
 
         var lfNetwork = loadFlowContext.getNetwork();

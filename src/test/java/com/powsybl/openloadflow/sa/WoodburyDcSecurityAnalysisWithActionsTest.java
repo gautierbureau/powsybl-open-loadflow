@@ -861,6 +861,48 @@ class WoodburyDcSecurityAnalysisWithActionsTest extends AbstractOpenSecurityAnal
         assertEquals(650.0, getOperatorStrategyResult(fast, "L1-BX").getNetworkResult().getBranchResult("L2").getP1(), DELTA_POWER);
     }
 
+    /**
+     * A dead part with two entries at different points: a load bay of VL2 (BX from the bus bar BBS3) and, through the line
+     * LZ, a bay of VL1 (BW from the bus bar BBS2). Closing both puts LZ in parallel with L2: the fast DC results are the DC
+     * security analysis's, as when only one entry is closed.
+     */
+    @Test
+    void testFastDcSaEnergizesDeadPartThroughTwoEntries() {
+        Network network = NodeBreakerNetworkFactory.create();
+        VoltageLevel vl1 = network.getVoltageLevel("VL1");
+        VoltageLevel vl2 = network.getVoltageLevel("VL2");
+        vl2.getNodeBreakerView().newBreaker().setId("BX").setNode1(0).setNode2(10).setOpen(true).add();
+        vl2.newLoad().setId("LDX").setNode(10).setP0(50.0).setQ0(0.0).add();
+        vl2.getNodeBreakerView().newInternalConnection().setNode1(10).setNode2(11).add();
+        vl1.getNodeBreakerView().newBreaker().setId("BW").setNode1(1).setNode2(20).setOpen(true).add();
+        network.newLine().setId("LZ").setVoltageLevel1("VL1").setNode1(20).setVoltageLevel2("VL2").setNode2(11)
+                .setR(3.0).setX(33.0).setB1(0.0).setB2(0.0).add();
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")),
+                new Contingency("L2", new BranchContingency("L2")));
+        List<Action> actions = List.of(new SwitchAction("closeBX", "BX", false), new SwitchAction("closeBW", "BW", false));
+        List<OperatorStrategy> operatorStrategies = new ArrayList<>();
+        for (Contingency contingency : contingencies) {
+            String c = contingency.getId();
+            operatorStrategies.add(new OperatorStrategy(c + "-BX", ContingencyContext.specificContingency(c), new TrueCondition(), List.of("closeBX")));
+            operatorStrategies.add(new OperatorStrategy(c + "-BW", ContingencyContext.specificContingency(c), new TrueCondition(), List.of("closeBW")));
+            operatorStrategies.add(new OperatorStrategy(c + "-both", ContingencyContext.specificContingency(c), new TrueCondition(), List.of("closeBX", "closeBW")));
+        }
+        List<StateMonitor> monitors = createAllBranchesMonitors(network);
+
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(false);
+        SecurityAnalysisResult expected = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+        securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class).setDcFastMode(true);
+        SecurityAnalysisResult fast = runSecurityAnalysis(network, contingencies, monitors, securityAnalysisParameters,
+                operatorStrategies, actions, ReportNode.NO_OP);
+
+        assertAll(operatorStrategies.stream().map(strategy -> () -> assertSameBranchResults(
+                getOperatorStrategyResult(expected, strategy.getId()).getNetworkResult(),
+                getOperatorStrategyResult(fast, strategy.getId()).getNetworkResult())));
+        // with L1 lost, both entries closed: LZ carries part of the flow from BBS2 to BBS3
+        assertTrue(Math.abs(getOperatorStrategyResult(expected, "L1-both").getNetworkResult().getBranchResult("LZ").getP1()) > 1.0);
+    }
+
     private static void assertSameBranchResults(NetworkResult expected, NetworkResult actual) {
         for (BranchResult branchResult : expected.getBranchResults()) {
             BranchResult other = actual.getBranchResult(branchResult.getBranchId());
