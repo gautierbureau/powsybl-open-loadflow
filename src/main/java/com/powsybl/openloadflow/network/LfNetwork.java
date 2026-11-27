@@ -31,7 +31,6 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
-import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -1361,14 +1360,21 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
 
     @SuppressWarnings("unchecked")
     public <E extends LfElement> List<E> getControllerElements(VoltageControl.Type type) {
-        return busesByIndex.stream()
-                .filter(bus -> bus.isVoltageControlled(type))
-                .filter(bus -> bus.getVoltageControl(type).orElseThrow().getMergeStatus() == VoltageControl.MergeStatus.MAIN)
-                .filter(bus -> bus.getVoltageControl(type).orElseThrow().isVisible())
-                .flatMap(bus -> bus.getVoltageControl(type).orElseThrow().getMergedControllerElements().stream())
-                .filter(Predicate.not(LfElement::isDisabled))
-                .map(element -> (E) element)
-                .toList();
+        // a loop on the buses: it runs again after each change of the controls, and most buses are not controlled
+        List<E> controllerElements = new ArrayList<>();
+        for (LfBus bus : busesByIndex) {
+            if (bus.isVoltageControlled(type)) {
+                VoltageControl<?> voltageControl = bus.getVoltageControl(type).orElseThrow();
+                if (voltageControl.getMergeStatus() == VoltageControl.MergeStatus.MAIN && voltageControl.isVisible()) {
+                    for (LfElement element : voltageControl.getMergedControllerElements()) {
+                        if (!element.isDisabled()) {
+                            controllerElements.add((E) element);
+                        }
+                    }
+                }
+            }
+        }
+        return Collections.unmodifiableList(controllerElements);
     }
 
     public List<LfBus> getControlledBuses(VoltageControl.Type type) {
@@ -1388,7 +1394,11 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
     }
 
     public void setGeneratorsInitialTargetPToTargetP() {
-        getBuses().stream().flatMap(b -> b.getGenerators().stream()).forEach(LfGenerator::setInitialTargetPToTargetP);
+        for (LfBus bus : getBuses()) {
+            for (LfGenerator generator : bus.getGenerators()) {
+                generator.setInitialTargetPToTargetP();
+            }
+        }
     }
 
     @Override

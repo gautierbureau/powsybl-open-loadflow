@@ -550,6 +550,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
                 // save base state for later restoration after each contingency
                 NetworkState networkState = NetworkState.save(lfNetwork);
+                // and collect what the contingencies, the actions and the simulations modify: only that is restored
+                ModifiedElementsCollector modifiedElements = new ModifiedElementsCollector(lfNetwork);
+                lfNetwork.addListener(modifiedElements);
 
                 // Reset parameters for next component
                 Consumer<P> componentParametersResetter = createParametersResetter(p);
@@ -573,8 +576,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                                 createResultExtension, preContingencyLimitViolationManager,
                                 preContingencyNetworkResult, postContingencyResults,
                                 contingencyParametersResetter, operatorStrategiesByContingencyId,
-                                operatorStrategyResults, contingencyIt));
+                                operatorStrategyResults, contingencyIt, modifiedElements));
                 }
+                lfNetwork.removeListener(modifiedElements);
 
                 // Restore parameters in case they are used for another component
                 componentParametersResetter.accept(p);
@@ -750,6 +754,18 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 operatorStrategy.getContingencyContext().getContingencyId(), network, stopwatch.elapsed(TimeUnit.MILLISECONDS));
     }
 
+    /**
+     * Restores the base state after a contingency: the elements that changed since the last restore, and the voltage
+     * of every bus, which each simulation writes. The rest of the network is as it was saved.
+     */
+    private static void restoreBaseState(NetworkState networkState, ModifiedElementsCollector modifiedElements) {
+        modifiedElements.setEnabled(false);
+        networkState.restore(modifiedElements.getBuses(), modifiedElements.getBranches());
+        modifiedElements.setEnabled(true);
+        modifiedElements.reset();
+        assert networkState.findDifference() == null : "Not restored after a contingency, " + networkState.findDifference();
+    }
+
     private void processContingency(LfNetwork lfNetwork, SecurityAnalysisParameters securityAnalysisParameters,
                                     List<LimitScaling> limitScalings, ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution,
                                     ReportNode networkReportNode, LfContingency lfContingency, P p, NetworkState networkState,
@@ -758,7 +774,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                                     boolean createResultExtension, LimitViolationManager preContingencyLimitViolationManager,
                                     PreContingencyNetworkResult preContingencyNetworkResult, List<PostContingencyResult> postContingencyResults,
                                     Consumer<P> contingencyParametersResetter, Map<String, List<Indexed<OperatorStrategy>>> operatorStrategiesByContingencyId,
-                                    List<OperatorStrategyResult> operatorStrategyResults, Iterator<PropagatedContingency> contingencyIt) {
+                                    List<OperatorStrategyResult> operatorStrategyResults, Iterator<PropagatedContingency> contingencyIt,
+                                    ModifiedElementsCollector modifiedElements) {
         ReportNode postContSimReportNode = LfReports.createPostContingencySimulation(networkReportNode, lfContingency.getId());
         lfNetwork.setReportNode(postContSimReportNode);
 
@@ -768,6 +785,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         }
 
         lfContingency.apply(loadFlowParameters.getBalanceType());
+        modifiedElements.add(lfContingency);
 
         double preDistributedActivePower = contingencyActivePowerLossDistribution.run(lfNetwork, lfContingency,
             propagatedContingency.getContingency(), securityAnalysisParameters, contingencyLoadFlowParameters, postContSimReportNode);
@@ -822,7 +840,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         }
         if (contingencyIt.hasNext()) {
             // restore base state
-            networkState.restore();
+            restoreBaseState(networkState, modifiedElements);
             if (contingencyLoadFlowParameters != null &&
                 Objects.equals(ContingencyLoadFlowParameters.Scope.CONTINGENCY_AND_OPERATOR_STRATEGY, contingencyLoadFlowParameters.getScope())) {
                 // reset parameters

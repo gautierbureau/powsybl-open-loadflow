@@ -57,7 +57,10 @@ public class LfContingency {
         this.disconnectedGenerationActivePower = 0.0;
         this.disconnectedElementIds = new HashSet<>();
 
-        for (LfBus bus : disabledNetwork.getBuses()) {
+        // in the order of the buses, not in the order of the set: it changes from one run to the next, and so would the
+        // last digits of the two sums
+        List<LfBus> lostBuses = disabledNetwork.getBuses().stream().sorted(Comparator.comparingInt(LfBus::getNum)).toList();
+        for (LfBus bus : lostBuses) {
             disconnectedLoadActivePower += bus.getLoadTargetP();
             disconnectedGenerationActivePower += getBusLostGenerationTargetP(bus);
             disconnectedElementIds.addAll(bus.getGenerators().stream().map(LfGenerator::getOriginalId).toList());

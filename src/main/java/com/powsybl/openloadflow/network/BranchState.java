@@ -62,6 +62,27 @@ public class BranchState extends ElementState<LfBranch> {
         }
     }
 
+    @Override
+    String findDifference() {
+        String difference = super.findDifference();
+        if (difference != null) {
+            return difference;
+        }
+        PiModel piModel = element.getPiModel();
+        if (piModel instanceof PiModelArray piModelArray) {
+            if (piModel.getTapPosition() != tapPosition || !same(piModelArray.getModifiedA1(), a1) || !same(piModelArray.getModifiedR1(), r1)) {
+                return "tap";
+            }
+        } else if (!same(piModel.getA1(), a1) || !same(piModel.getR1(), r1)) {
+            return "ratio or phase shift";
+        }
+        if (element.isPhaseControlEnabled() != phaseControlEnabled || element.isVoltageControlEnabled() != voltageControlEnabled) {
+            return "control";
+        }
+        return connectedSide1 != null && element.isConnectedSide1() != connectedSide1
+                || connectedSide2 != null && element.isConnectedSide2() != connectedSide2 ? "connection" : null;
+    }
+
     public static BranchState save(LfBranch branch) {
         return new BranchState(branch);
     }

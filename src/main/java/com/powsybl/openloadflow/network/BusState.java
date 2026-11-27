@@ -7,8 +7,7 @@
  */
 package com.powsybl.openloadflow.network;
 
-import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.List;
 
 /**
  * @author Florian Dupuy {@literal <florian.dupuy at rte-france.com>}
@@ -27,7 +26,8 @@ public class BusState extends BusDcState {
     private final double controllerShuntB;
     private final double controllerShuntG;
     private final double svcShuntB;
-    private final Map<String, LfGenerator.GeneratorControlType> generatorsControlType;
+    /** By position in the generators of the bus. */
+    private final LfGenerator.GeneratorControlType[] generatorsControlType;
     private final LfBus.QLimitType qLimitType;
 
     private static final class LoadState extends LoadDcState {
@@ -45,6 +45,12 @@ public class BusState extends BusDcState {
         protected void restore(LfLoad load) {
             super.restore(load);
             load.setTargetQ(loadTargetQ);
+        }
+
+        @Override
+        protected String findDifference(LfLoad load) {
+            String difference = super.findDifference(load);
+            return difference != null || same(load.getTargetQ(), loadTargetQ) ? difference : "target Q of load " + load.getId();
         }
     }
 
@@ -65,13 +71,24 @@ public class BusState extends BusDcState {
         shuntG = shunt != null ? shunt.getG() : Double.NaN;
         LfShunt svcShunt = bus.getSvcShunt().orElse(null);
         svcShuntB = svcShunt != null ? svcShunt.getB() : Double.NaN;
-        this.generatorsControlType = bus.getGenerators().stream().collect(Collectors.toMap(LfGenerator::getId, LfGenerator::getGeneratorControlType));
+        List<LfGenerator> generators = bus.getGenerators();
+        generatorsControlType = new LfGenerator.GeneratorControlType[generators.size()];
+        for (int i = 0; i < generators.size(); i++) {
+            generatorsControlType[i] = generators.get(i).getGeneratorControlType();
+        }
         qLimitType = bus.getQLimitType().orElse(null);
     }
 
     @Override
     protected LoadDcState createLoadState() {
         return new LoadState();
+    }
+
+    /** Only the voltage magnitude and angle: what a precomputed state injected into the network moves on a bus
+     *  the contingency did not otherwise touch (see {@link NetworkState#restore(java.util.Collection, java.util.Collection)}). */
+    void restoreVoltage() {
+        element.setAngle(angle);
+        element.setV(voltage);
     }
 
     @Override
@@ -102,8 +119,54 @@ public class BusState extends BusDcState {
         if (!Double.isNaN(svcShuntB)) {
             element.getSvcShunt().orElseThrow().setB(svcShuntB);
         }
-        element.getGenerators().forEach(g -> g.setGeneratorControlType(generatorsControlType.get(g.getId())));
+        List<LfGenerator> generators = element.getGenerators();
+        for (int i = 0; i < generators.size(); i++) {
+            generators.get(i).setGeneratorControlType(generatorsControlType[i]);
+        }
         element.setQLimitType(qLimitType);
+    }
+
+    @Override
+    String findDifference() {
+        String difference = super.findDifference();
+        if (difference != null) {
+            return difference;
+        }
+        if (!same(element.getAngle(), angle) || !same(element.getV(), voltage)) {
+            return "voltage";
+        }
+        if (element.isGeneratorVoltageControlEnabled() != voltageControlEnabled
+                || element.isGeneratorReactivePowerControlEnabled() != reactiveControlEnabled) {
+            return "generator control";
+        }
+        if (element.isGenerationTargetQFrozen() != isGenerationTargetQFrozen
+                || isGenerationTargetQFrozen && !same(element.getGenerationTargetQ(), generationTargetQ)) {
+            return "frozen generation target Q";
+        }
+        if (element.getQLimitType().orElse(null) != qLimitType) {
+            return "reactive limit type";
+        }
+        List<LfGenerator> generators = element.getGenerators();
+        for (int i = 0; i < generators.size(); i++) {
+            if (generators.get(i).getGeneratorControlType() != generatorsControlType[i]) {
+                return "control type of generator " + generators.get(i).getId();
+            }
+        }
+        return findShuntDifference();
+    }
+
+    private String findShuntDifference() {
+        LfShunt controllerShunt = element.getControllerShunt().orElse(null);
+        if (controllerShunt != null && (controllerShunt.isVoltageControlEnabled() != shuntVoltageControlEnabled
+                || !same(controllerShunt.getB(), controllerShuntB) || !same(controllerShunt.getG(), controllerShuntG))) {
+            return "controller shunt";
+        }
+        LfShunt shunt = element.getShunt().orElse(null);
+        if (shunt != null && (!same(shunt.getB(), shuntB) || !same(shunt.getG(), shuntG))) {
+            return "shunt";
+        }
+        LfShunt svcShunt = element.getSvcShunt().orElse(null);
+        return svcShunt == null || same(svcShunt.getB(), svcShuntB) ? null : "static var compensator shunt";
     }
 
     public static BusState save(LfBus bus) {
