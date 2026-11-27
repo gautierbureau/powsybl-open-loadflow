@@ -21,6 +21,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.Properties;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -73,6 +74,14 @@ class KluParametersTest {
 
     @Test
     void systemProperties() {
+        // the test runs on its own properties: those of the JVM are put back after
+        Properties saved = new Properties();
+        for (String name : System.getProperties().stringPropertyNames()) {
+            if (name.startsWith(KluParameters.PROPERTY_PREFIX)) {
+                saved.setProperty(name, System.getProperty(name));
+                System.clearProperty(name);
+            }
+        }
         System.setProperty("olf.klu.ordering", "minimum_fill");
         System.setProperty("olf.klu.check", "rcond");
         System.setProperty("olf.klu.scale", "0");
@@ -86,6 +95,7 @@ class KluParametersTest {
             System.clearProperty("olf.klu.ordering");
             System.clearProperty("olf.klu.check");
             System.clearProperty("olf.klu.scale");
+            saved.stringPropertyNames().forEach(name -> System.setProperty(name, saved.getProperty(name)));
         }
         assertThrows(IllegalArgumentException.class, () -> new KluParameters().setScale(3));
     }
