@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.equations.fixed;
 
 import com.powsybl.math.matrix.DenseMatrix;
+import com.powsybl.math.matrix.KluParameters;
 import com.powsybl.math.matrix.LUDecomposition;
 import com.powsybl.math.matrix.Matrix;
 import com.powsybl.math.matrix.MatrixException;
@@ -62,6 +63,8 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     public FixedJacobian(EquationSystem<V, E> equationSystem, Placement<V, E> placement, MatrixFactory matrixFactory) {
         this.fixed = new FixedEquationSystem<>(equationSystem, placement, FixedEquationSystem.Scope.ALL);
         this.matrixFactory = matrixFactory;
+        // for tests: the KLU parameters of the olf.klu.* system properties, when there are some
+        KluParameters.applySystemProperties();
     }
 
     /** The fixed view of the equation system the matrix is filled from. */
