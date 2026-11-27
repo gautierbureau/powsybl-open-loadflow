@@ -24,6 +24,7 @@ import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.network.util.UniformValueVoltageInitializer;
 import com.powsybl.openloadflow.test.networks.EurostagFactory;
 import com.powsybl.openloadflow.test.networks.HvdcNetworkFactory;
+import com.powsybl.openloadflow.test.networks.ZeroImpedanceNetworkFactory;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -179,6 +180,33 @@ class EquationSystemTest {
 
     @Test
     void writeVectorizedAcSystemWithSingleTermsTest() {
+        LfNetwork network = Networks.load(ZeroImpedanceNetworkFactory.createWithVoltageControl(), new FirstSlackBusSelector()).getFirst();
+
+        EquationSystem<AcVariableType, AcEquationType> equationSystem = new AcVectorizedEquationSystemCreator(network).create();
+        // the flows of the two zero impedance lines are additional single terms of the balances of their buses
+        String ref = String.join(System.lineSeparator(),
+                "bus_target_φ0 = φ0",
+                "bus_target_v1 = v1",
+                "zero_v1 = v1 + -1.0 * v2",
+                "zero_φ1 = φ1 + -1.0 * φ2",
+                "zero_v3 = v2 + -1.0 * v3",
+                "zero_φ3 = φ2 + -1.0 * φ3",
+                "bus_target_v4 = v4",
+                "bus_target_p[1] = ac_p_array_closed_1(v1, v5, φ1, φ5) + ac_p_array_closed_2(v0, v1, φ0, φ1) + dummy_p1",
+                "bus_target_p[2] = -1.0 * dummy_p1 + dummy_p3",
+                "bus_target_p[3] = ac_p_array_closed_1(v3, v4, φ3, φ4) + ac_p_array_closed_2(v5, v3, φ5, φ3) + -1.0 * dummy_p3",
+                "bus_target_p[4] = ac_p_array_closed_2(v3, v4, φ3, φ4)",
+                "bus_target_p[5] = ac_p_array_closed_1(v5, v3, φ5, φ3) + ac_p_array_closed_2(v1, v5, φ1, φ5)",
+                "bus_target_q[1] = ac_q_array_closed_1(v1, v5, φ1, φ5) + ac_q_array_closed_2(v0, v1, φ0, φ1) + dummy_q1",
+                "bus_target_q[2] = -1.0 * dummy_q1 + dummy_q3",
+                "bus_target_q[3] = ac_q_array_closed_1(v3, v4, φ3, φ4) + ac_q_array_closed_2(v5, v3, φ5, φ3) + -1.0 * dummy_q3",
+                "bus_target_q[5] = ac_q_array_closed_1(v5, v3, φ5, φ3) + ac_q_array_closed_2(v1, v5, φ1, φ5)")
+                + System.lineSeparator();
+        assertEquals(ref, equationSystem.writeToString());
+    }
+
+    @Test
+    void writeVectorizedAcSystemWithHvdcInAcEmulationTest() {
         Network hvdcNetwork = HvdcNetworkFactory.createWithHvdcInAcEmulation();
         hvdcNetwork.getHvdcLine("hvdc34").newExtension(HvdcAngleDroopActivePowerControlAdder.class)
                 .withDroop(180)
@@ -198,12 +226,109 @@ class EquationSystemTest {
                 "bus_target_v3 = v3",
                 "bus_target_v4 = v4",
                 "bus_target_p[1] = ac_p_array_closed_1(v1, v2, φ1, φ2) + ac_p_array_closed_1(v1, v4, φ1, φ4) + ac_p_array_closed_2(v0, v1, φ0, φ1)",
-                "bus_target_p[2] = ac_p_array_closed_2(v0, v2, φ0, φ2) + ac_p_array_closed_2(v1, v2, φ1, φ2) + ac_emulation_p_1(φ2, φ3)", // AC emulation term is an additional single term
-                "bus_target_p[3] = ac_p_array_closed_1(v3, v4, φ3, φ4) + ac_p_array_closed_1(v3, v5, φ3, φ5) + ac_emulation_p_2(φ2, φ3)",
+                // the active power of the HVDC line is an element of a term array too
+                "bus_target_p[2] = ac_p_array_closed_2(v0, v2, φ0, φ2) + ac_p_array_closed_2(v1, v2, φ1, φ2) + ac_emulation_p_array_1(φ2, φ3)",
+                "bus_target_p[3] = ac_p_array_closed_1(v3, v4, φ3, φ4) + ac_p_array_closed_1(v3, v5, φ3, φ5) + ac_emulation_p_array_2(φ2, φ3)",
                 "bus_target_p[4] = ac_p_array_closed_1(v4, v5, φ4, φ5) + ac_p_array_closed_2(v1, v4, φ1, φ4) + ac_p_array_closed_2(v3, v4, φ3, φ4)",
                 "bus_target_p[5] = ac_p_array_closed_2(v3, v5, φ3, φ5) + ac_p_array_closed_2(v4, v5, φ4, φ5)",
                 "bus_target_q[1] = ac_q_array_closed_1(v1, v2, φ1, φ2) + ac_q_array_closed_1(v1, v4, φ1, φ4) + ac_q_array_closed_2(v0, v1, φ0, φ1)",
                 "bus_target_q[5] = ac_q_array_closed_2(v3, v5, φ3, φ5) + ac_q_array_closed_2(v4, v5, φ4, φ5)")
+                + System.lineSeparator();
+        assertEquals(ref, equationSystem.writeToString());
+    }
+
+    @Test
+    void writeVectorizedAcSystemWithOpenBranchesTest() {
+        Network network = EurostagTutorialExample1Factory.create();
+        // one line is connected at one end only, the other one can be opened at each end
+        network.getLine("NHV1_NHV2_2").getTerminal2().disconnect();
+        LfNetwork lfNetwork = Networks.load(network, new FirstSlackBusSelector()).getFirst();
+        LfBranch line = lfNetwork.getBranchById("NHV1_NHV2_1");
+        line.setDisconnectionAllowedSide1(true);
+        line.setDisconnectionAllowedSide2(true);
+
+        EquationSystem<AcVariableType, AcEquationType> equationSystem = new AcVectorizedEquationSystemCreator(lfNetwork).create();
+        String ref = String.join(System.lineSeparator(),
+                "bus_target_v0 = v0",
+                "bus_target_φ0 = φ0",
+                "[ bus_target_v1 = v1 ]",
+                "[ bus_target_v2 = v2 ]",
+                "[ bus_target_v3 = v3 ]",
+                "[ bus_target_p[0] = ac_p_array_closed_1(v0, v1, φ0, φ1) ]",
+                // the flow at side 1 of the line that can be opened at side 2, off, and the one of the line that has no side 2
+                "bus_target_p[1] = ac_p_array_closed_1(v1, v2, φ1, φ2) + ac_p_array_closed_2(v0, v1, φ0, φ1) + [ ac_p_array_open_2(v1) ] + ac_p_array_open_2(v1)",
+                "bus_target_p[2] = ac_p_array_closed_1(v2, v3, φ2, φ3) + ac_p_array_closed_2(v1, v2, φ1, φ2) + [ ac_p_array_open_1(v2) ]",
+                "bus_target_p[3] = ac_p_array_closed_2(v2, v3, φ2, φ3)",
+                "[ bus_target_q[0] = ac_q_array_closed_1(v0, v1, φ0, φ1) ]",
+                "bus_target_q[1] = ac_q_array_closed_1(v1, v2, φ1, φ2) + ac_q_array_closed_2(v0, v1, φ0, φ1) + [ ac_q_array_open_2(v1) ] + ac_q_array_open_2(v1)",
+                "bus_target_q[2] = ac_q_array_closed_1(v2, v3, φ2, φ3) + ac_q_array_closed_2(v1, v2, φ1, φ2) + [ ac_q_array_open_1(v2) ]",
+                "bus_target_q[3] = ac_q_array_closed_2(v2, v3, φ2, φ3)")
+                + System.lineSeparator();
+        assertEquals(ref, equationSystem.writeToString(true));
+
+        // the line opens at side 1: the terms of its flow at side 2 are on, those of the closed line are off
+        line.setConnectedSide1(false);
+        String refOpen = String.join(System.lineSeparator(),
+                "bus_target_v0 = v0",
+                "bus_target_φ0 = φ0",
+                "[ bus_target_v1 = v1 ]",
+                "[ bus_target_v2 = v2 ]",
+                "[ bus_target_v3 = v3 ]",
+                "[ bus_target_p[0] = ac_p_array_closed_1(v0, v1, φ0, φ1) ]",
+                "bus_target_p[1] = [ ac_p_array_closed_1(v1, v2, φ1, φ2) ] + ac_p_array_closed_2(v0, v1, φ0, φ1) + [ ac_p_array_open_2(v1) ] + ac_p_array_open_2(v1)",
+                "bus_target_p[2] = ac_p_array_closed_1(v2, v3, φ2, φ3) + [ ac_p_array_closed_2(v1, v2, φ1, φ2) ] + ac_p_array_open_1(v2)",
+                "bus_target_p[3] = ac_p_array_closed_2(v2, v3, φ2, φ3)",
+                "[ bus_target_q[0] = ac_q_array_closed_1(v0, v1, φ0, φ1) ]",
+                "bus_target_q[1] = [ ac_q_array_closed_1(v1, v2, φ1, φ2) ] + ac_q_array_closed_2(v0, v1, φ0, φ1) + [ ac_q_array_open_2(v1) ] + ac_q_array_open_2(v1)",
+                "bus_target_q[2] = ac_q_array_closed_1(v2, v3, φ2, φ3) + [ ac_q_array_closed_2(v1, v2, φ1, φ2) ] + ac_q_array_open_1(v2)",
+                "bus_target_q[3] = ac_q_array_closed_2(v2, v3, φ2, φ3)")
+                + System.lineSeparator();
+        assertEquals(refOpen, equationSystem.writeToString(true));
+    }
+
+    @Test
+    void writeVectorizedAcSystemWithLoadModelsTest() {
+        Network network = EurostagTutorialExample1Factory.create();
+        // two loads that follow the voltage, each with its model, at the bus of the load that does not
+        network.getVoltageLevel("VLLOAD").newLoad()
+                .setId("ZIPLOAD")
+                .setBus("NLOAD")
+                .setP0(50)
+                .setQ0(30)
+                .newZipModel()
+                    .setC0p(0.5)
+                    .setC0q(0.55)
+                    .setC1p(0.3)
+                    .setC1q(0.35)
+                    .setC2p(0.2)
+                    .setC2q(0.1)
+                    .add()
+                .add();
+        network.getVoltageLevel("VLLOAD").newLoad()
+                .setId("EXPLOAD")
+                .setBus("NLOAD")
+                .setP0(40)
+                .setQ0(20)
+                .newExponentialModel()
+                    .setNp(0.8)
+                    .setNq(0.9)
+                    .add()
+                .add();
+        LfNetworkParameters networkParameters = new LfNetworkParameters().setSlackBusSelector(new FirstSlackBusSelector())
+                .setUseLoadModel(true);
+        LfNetwork lfNetwork = Networks.load(network, networkParameters, ReportNode.NO_OP).getFirst();
+
+        EquationSystem<AcVariableType, AcEquationType> equationSystem = new AcVectorizedEquationSystemCreator(lfNetwork).create();
+        String ref = String.join(System.lineSeparator(),
+                "bus_target_v0 = v0",
+                "bus_target_φ0 = φ0",
+                "bus_target_p[1] = ac_p_array_closed_1(v1, v2, φ1, φ2) + ac_p_array_closed_1(v1, v2, φ1, φ2) + ac_p_array_closed_2(v0, v1, φ0, φ1)",
+                "bus_target_p[2] = ac_p_array_closed_1(v2, v3, φ2, φ3) + ac_p_array_closed_2(v1, v2, φ1, φ2) + ac_p_array_closed_2(v1, v2, φ1, φ2)",
+                // one element of the term array for the two loads of the bus
+                "bus_target_p[3] = ac_p_array_closed_2(v2, v3, φ2, φ3) + ac_load_p_array(v3)",
+                "bus_target_q[1] = ac_q_array_closed_1(v1, v2, φ1, φ2) + ac_q_array_closed_1(v1, v2, φ1, φ2) + ac_q_array_closed_2(v0, v1, φ0, φ1)",
+                "bus_target_q[2] = ac_q_array_closed_1(v2, v3, φ2, φ3) + ac_q_array_closed_2(v1, v2, φ1, φ2) + ac_q_array_closed_2(v1, v2, φ1, φ2)",
+                "bus_target_q[3] = ac_q_array_closed_2(v2, v3, φ2, φ3) + ac_load_q_array(v3)")
                 + System.lineSeparator();
         assertEquals(ref, equationSystem.writeToString());
     }

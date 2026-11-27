@@ -13,6 +13,7 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.PiModel;
 import com.powsybl.openloadflow.util.Evaluable;
+import gnu.trove.list.array.TIntArrayList;
 import net.jafama.FastMath;
 
 import java.util.List;
@@ -62,8 +63,16 @@ public class AcBranchVector {
     final double[] p2;
     final double[] q1;
     final double[] q2;
-    final double[] i1;
-    final double[] i2;
+    /*
+     * The currents are computed when they are read, from the flows and the voltage of the last update of the
+     * branch: they are read for the results and the limit violations only, and most updates are Newton iterations.
+     * The voltage each side was last computed with is kept, and whether it was ever computed (a current never
+     * computed is 0, as the array of a current computed at each update starts).
+     */
+    final double[] v1OfI;
+    final double[] v2OfI;
+    final boolean[] i1Computed;
+    final boolean[] i2Computed;
 
     final double[] dp1dv1;
     final double[] dp1dv2;
@@ -92,6 +101,33 @@ public class AcBranchVector {
     final double[] dq2dph2;
     final double[] dq2da1;
     final double[] dq2dr1;
+
+    /**
+     * True for a branch that has terms for when it is closed at both sides: only these flows are read, a zero impedance
+     * branch has none.
+     */
+    final boolean[] closable;
+
+    /** True for a branch that has terms for when it is open at side 1, and the numbers of these branches. */
+    final boolean[] openableSide1;
+    final TIntArrayList openableSide1Nums = new TIntArrayList();
+
+    /** True for a branch that has terms for when it is open at side 2, and the numbers of these branches. */
+    final boolean[] openableSide2;
+    final TIntArrayList openableSide2Nums = new TIntArrayList();
+
+    /** The flow at side 2 of a branch open at side 1, and its derivative. */
+    final double[] openP2;
+    final double[] openDp2dv2;
+    final double[] openQ2;
+    final double[] openDq2dv2;
+
+    /** The flow at side 1 of a branch open at side 2, its derivative, and the ratio of the branch they were computed with. */
+    final double[] openP1;
+    final double[] openDp1dv1;
+    final double[] openQ1;
+    final double[] openDq1dv1;
+    final double[] openR1;
 
     public AcBranchVector(List<LfBranch> branches, AcEquationSystemCreationParameters creationParameters) {
         int size = branches.size();
@@ -128,8 +164,10 @@ public class AcBranchVector {
         p2 = new double[size];
         q1 = new double[size];
         q2 = new double[size];
-        i1 = new double[size];
-        i2 = new double[size];
+        v1OfI = new double[size];
+        v2OfI = new double[size];
+        i1Computed = new boolean[size];
+        i2Computed = new boolean[size];
 
         dp1dv1 = new double[size];
         dp1dv2 = new double[size];
@@ -158,6 +196,21 @@ public class AcBranchVector {
         dq2dph2 = new double[size];
         dq2da1 = new double[size];
         dq2dr1 = new double[size];
+
+        closable = new boolean[size];
+        openableSide1 = new boolean[size];
+        openableSide2 = new boolean[size];
+
+        openP2 = new double[size];
+        openDp2dv2 = new double[size];
+        openQ2 = new double[size];
+        openDq2dv2 = new double[size];
+
+        openP1 = new double[size];
+        openDp1dv1 = new double[size];
+        openQ1 = new double[size];
+        openDq1dv1 = new double[size];
+        openR1 = new double[size];
 
         for (int i = 0; i < branches.size(); i++) {
             LfBranch branch = branches.get(i);
@@ -190,6 +243,36 @@ public class AcBranchVector {
         return disabled.length;
     }
 
+    /**
+     * Says that a branch has terms for when it is closed at both sides, when one is added to a term array: its flows are then
+     * computed at each state update.
+     */
+    void setClosable(int branchNum) {
+        closable[branchNum] = true;
+    }
+
+    /**
+     * Says that a branch has terms for when it is open at side 1, when they are created: its flow at side 2 is then
+     * computed at each state update.
+     */
+    void setOpenableSide1(int branchNum) {
+        if (!openableSide1[branchNum]) {
+            openableSide1[branchNum] = true;
+            openableSide1Nums.add(branchNum);
+        }
+    }
+
+    /**
+     * Says that a branch has terms for when it is open at side 2, when they are created: its flow at side 1 is then
+     * computed at each state update.
+     */
+    void setOpenableSide2(int branchNum) {
+        if (!openableSide2[branchNum]) {
+            openableSide2[branchNum] = true;
+            openableSide2Nums.add(branchNum);
+        }
+    }
+
     public Evaluable getP1(int branchNum) {
         return () -> p1[branchNum];
     }
@@ -207,10 +290,10 @@ public class AcBranchVector {
     }
 
     public Evaluable getI1(int branchNum) {
-        return () -> i1[branchNum];
+        return () -> i1Computed[branchNum] ? FastMath.hypot(p1[branchNum], q1[branchNum]) / v1OfI[branchNum] : 0;
     }
 
     public Evaluable getI2(int branchNum) {
-        return () -> i2[branchNum];
+        return () -> i2Computed[branchNum] ? FastMath.hypot(p2[branchNum], q2[branchNum]) / v2OfI[branchNum] : 0;
     }
 }

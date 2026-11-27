@@ -47,6 +47,11 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
         double[][] evalDer();
 
         List<Derivative<V>> getDerivatives(int termElementNum);
+
+        /** Called when a term of the element is added to the array. */
+        default void onTermAdded(int termElementNum) {
+            // nothing to do by default
+        }
     }
 
     private final ElementType elementType;
@@ -84,6 +89,10 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
         return elementType;
     }
 
+    public Evaluator<V> getEvaluator() {
+        return evaluator;
+    }
+
     public EquationArray<V, E> getEquationArray() {
         return equationArray;
     }
@@ -116,6 +125,11 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
         return termActive.getQuick(termNum) == 1;
     }
 
+    /** The number of terms, active or not. */
+    public int getTermCount() {
+        return termElementNums.size();
+    }
+
     public int getEquationElementNum(int termNum) {
         return equationElementNums.getQuick(termNum);
     }
@@ -142,6 +156,7 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
         termElementNums.add(termElementNum);
         termActive.add((byte) (evaluator.isDisabled(termElementNum) ? 0 : 1));
         termDerivatives.add(evaluator.getDerivatives(termElementNum));
+        evaluator.onTermAdded(termElementNum);
         equationArray.invalidateEquationDerivativeVectors();
         equationArray.getEquationSystem().notifyEquationTermArrayChange(this, termNum, EquationTermEventType.EQUATION_TERM_ADDED);
         return this;
@@ -210,6 +225,14 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
 
         public Evaluator<V> getEvaluator() {
             return equationTermArray.evaluator;
+        }
+
+        /**
+         * A term for a single equation that has the value and the derivatives of this element, read in the array: for
+         * an equation that needs the same quantity as the one this element gives to its equation array.
+         */
+        public EquationTermArrayElementReference<V, E> createReference() {
+            return new EquationTermArrayElementReference<>(equationTermArray, termElementNum);
         }
 
         @Override

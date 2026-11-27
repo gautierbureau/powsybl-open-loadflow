@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.ac.solver;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.math.matrix.MatrixException;
 import com.powsybl.openloadflow.ac.equations.*;
+import com.powsybl.openloadflow.ac.equations.vector.AbstractClosedBranchEquationTermArrayEvaluator;
 import com.powsybl.openloadflow.equations.*;
 import com.powsybl.openloadflow.lf.util.LfReports;
 import com.powsybl.openloadflow.network.LfBus;
@@ -214,6 +215,13 @@ public class FastDecoupled extends AbstractAcSolver {
             }
             if (term.getClass().equals(ClosedBranchSide2ReactiveFlowEquationTerm.class)) {
                 return ((ClosedBranchSide2ReactiveFlowEquationTerm) term).getV2Var().getElementNum();
+            }
+            if (term instanceof EquationTermArrayElementReference<AcVariableType, AcEquationType> reference
+                    && reference.getTermArray().getEvaluator() instanceof AbstractClosedBranchEquationTermArrayEvaluator evaluator) {
+                // the flow of the closed branch is read in a term array: the bus is at the side of the target
+                boolean side1 = equation.getType() == AcEquationType.BRANCH_TARGET_P1 || equation.getType() == AcEquationType.BRANCH_TARGET_Q1;
+                int branchNum = reference.getTermElementNum();
+                return (side1 ? evaluator.getV1Var(branchNum) : evaluator.getV2Var(branchNum)).getElementNum();
             }
             throw new IllegalStateException("Equation: " + equation + " is expected to have a term of type ClosedBranch");
         } else {

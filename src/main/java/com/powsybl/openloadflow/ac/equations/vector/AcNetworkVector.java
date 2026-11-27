@@ -37,6 +37,9 @@ public class AcNetworkVector extends AbstractLfNetworkListener
     private final EquationSystem<AcVariableType, AcEquationType> equationSystem;
     private final AcBusVector busVector;
     private final AcBranchVector branchVector;
+    private final AcShuntVector shuntVector;
+    private final AcHvdcVector hvdcVector;
+    private final AcLoadVector loadVector;
     private boolean variablesInvalid = true;
 
     public AcNetworkVector(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem,
@@ -45,6 +48,9 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         this.equationSystem = Objects.requireNonNull(equationSystem);
         busVector = new AcBusVector(network.getBuses());
         branchVector = new AcBranchVector(network.getBranches(), creationParameters);
+        shuntVector = new AcShuntVector(network.getShunts());
+        hvdcVector = new AcHvdcVector(network.getHvdcs());
+        loadVector = new AcLoadVector(network.getBuses().size());
     }
 
     public AcBusVector getBusVector() {
@@ -53,6 +59,18 @@ public class AcNetworkVector extends AbstractLfNetworkListener
 
     public AcBranchVector getBranchVector() {
         return branchVector;
+    }
+
+    public AcShuntVector getShuntVector() {
+        return shuntVector;
+    }
+
+    public AcHvdcVector getHvdcVector() {
+        return hvdcVector;
+    }
+
+    public AcLoadVector getLoadVector() {
+        return loadVector;
     }
 
     public void startListening() {
@@ -85,6 +103,7 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         Arrays.fill(branchVector.ph1Row, -1);
         Arrays.fill(branchVector.v2Row, -1);
         Arrays.fill(branchVector.ph2Row, -1);
+        Arrays.fill(shuntVector.bRow, -1);
 
         for (Variable<AcVariableType> v : equationSystem.getIndex().getSortedVariablesToFind()) {
             int num = v.getElementNum();
@@ -104,6 +123,10 @@ public class AcNetworkVector extends AbstractLfNetworkListener
 
                 case BRANCH_RHO1:
                     branchVector.r1Row[num] = branchVector.deriveR1[num] ? row : -1;
+                    break;
+
+                case SHUNT_B:
+                    shuntVector.bRow[num] = shuntVector.deriveB[num] ? row : -1;
                     break;
 
                 default:
@@ -162,14 +185,15 @@ public class AcNetworkVector extends AbstractLfNetworkListener
     }
 
     /**
-     * Update all power flows and their derivatives.
+     * Update the power flows and their derivatives of the branches that have terms for when they are closed at both
+     * sides (not of a zero impedance branch).
      */
     public void updateClosedBranches(double[] state) {
         var w = new DoubleWrapper();
 
         for (int branchNum = 0; branchNum < branchVector.getSize(); branchNum++) {
 
-            if (!branchVector.disabled[branchNum]) {
+            if (!branchVector.disabled[branchNum] && branchVector.closable[branchNum]) {
 
                 branchVector.r1State[branchNum] = branchVector.r1Row[branchNum] != -1 ? state[branchVector.r1Row[branchNum]]
                         : branchVector.r1[branchNum];
@@ -206,8 +230,9 @@ public class AcNetworkVector extends AbstractLfNetworkListener
                     // q1
                     updateQ1AndDerivatives(branchNum, v1, r1, v2, sinTheta1, cosTheta1);
 
-                    // i1
-                    branchVector.i1[branchNum] = FastMath.hypot(branchVector.p1[branchNum], branchVector.q1[branchNum]) / v1;
+                    // i1, computed when read
+                    branchVector.v1OfI[branchNum] = v1;
+                    branchVector.i1Computed[branchNum] = true;
 
                     // p2
                     updateP2AndDerivatives(branchNum, v1, r1, v2, sinTheta2, cosTheta2);
@@ -215,9 +240,141 @@ public class AcNetworkVector extends AbstractLfNetworkListener
                     // q2
                     updateQ2AndDerivatives(branchNum, v1, r1, v2, sinTheta2, cosTheta2);
 
-                    // i2
-                    branchVector.i2[branchNum] = FastMath.hypot(branchVector.p2[branchNum], branchVector.q2[branchNum]) / v2;
+                    // i2, computed when read
+                    branchVector.v2OfI[branchNum] = v2;
+                    branchVector.i2Computed[branchNum] = true;
                 }
+            }
+        }
+    }
+
+    /**
+     * Update the active and reactive power of all shunts and their derivatives. The susceptance and the conductance
+     * are read from the shunts each time: a contingency or an outer loop changes them.
+     */
+    public void updateShunts(double[] state) {
+        for (int shuntNum = 0; shuntNum < shuntVector.getSize(); shuntNum++) {
+            updateShunt(shuntNum, state);
+        }
+    }
+
+    private void updateShunt(int shuntNum, double[] state) {
+        int busNum = shuntVector.busNum[shuntNum];
+        if (busNum != -1) {
+            LfShunt shunt = shuntVector.shunts[shuntNum];
+            double v = busVector.v[busNum];
+            int bRow = shuntVector.bRow[shuntNum];
+            double b = bRow != -1 ? state[bRow] : shunt.getB();
+            double g = shunt.getG();
+            shuntVector.b[shuntNum] = b;
+            shuntVector.q[shuntNum] = ShuntCompensatorReactiveFlowEquationTerm.q(v, b);
+            shuntVector.dqdv[shuntNum] = ShuntCompensatorReactiveFlowEquationTerm.dqdv(v, b);
+            shuntVector.dqdb[shuntNum] = ShuntCompensatorReactiveFlowEquationTerm.dqdb(v);
+            shuntVector.p[shuntNum] = ShuntCompensatorActiveFlowEquationTerm.p(v, g);
+            shuntVector.dpdv[shuntNum] = ShuntCompensatorActiveFlowEquationTerm.dpdv(v, g);
+        }
+    }
+
+    /**
+     * Update the active power at both ends of all HVDC lines in AC emulation, and their derivatives: also of a line
+     * whose terms are off, as the outer loop that takes it out of its limits reads them.
+     */
+    public void updateHvdcs() {
+        for (int hvdcNum = 0; hvdcNum < hvdcVector.getSize(); hvdcNum++) {
+            if (hvdcVector.bus1Num[hvdcNum] != -1) {
+                double p0 = hvdcVector.p0[hvdcNum];
+                double k = hvdcVector.k[hvdcNum];
+                double r = hvdcVector.r[hvdcNum];
+                double lossFactor1 = hvdcVector.lossFactor1[hvdcNum];
+                double lossFactor2 = hvdcVector.lossFactor2[hvdcNum];
+                double ph1 = busVector.ph[hvdcVector.bus1Num[hvdcNum]];
+                double ph2 = busVector.ph[hvdcVector.bus2Num[hvdcNum]];
+                hvdcVector.p1[hvdcNum] = HvdcAcEmulationSide1ActiveFlowEquationTerm.p1(p0, k, lossFactor1, lossFactor2, r, ph1, ph2);
+                hvdcVector.dp1dph1[hvdcNum] = HvdcAcEmulationSide1ActiveFlowEquationTerm.dp1dph1(p0, k, lossFactor1, lossFactor2, ph1, ph2);
+                hvdcVector.dp1dph2[hvdcNum] = HvdcAcEmulationSide1ActiveFlowEquationTerm.dp1dph2(p0, k, lossFactor1, lossFactor2, ph1, ph2);
+                hvdcVector.p2[hvdcNum] = HvdcAcEmulationSide2ActiveFlowEquationTerm.p2(p0, k, lossFactor1, lossFactor2, r, ph1, ph2);
+                hvdcVector.dp2dph1[hvdcNum] = HvdcAcEmulationSide2ActiveFlowEquationTerm.dp2dph1(p0, k, lossFactor1, lossFactor2, ph1, ph2);
+                hvdcVector.dp2dph2[hvdcNum] = HvdcAcEmulationSide2ActiveFlowEquationTerm.dp2dph2(p0, k, lossFactor1, lossFactor2, ph1, ph2);
+            }
+        }
+    }
+
+    /**
+     * Update the flow left at the connected side of the branches that have terms for when they are open at one side,
+     * and its derivative: also of a branch that is closed, whose terms are off, so that opening it only switches them
+     * on. As a term held as an object does, the ratio is read from the branch each time, and is not a variable.
+     */
+    /**
+     * Update the flow of the branches open at one side, at their other side. A branch has terms for when it is open
+     * at a side as soon as a contingency of the list may open it there, but their values are read only while it is
+     * open at that side: the flows of the others are not computed. A change of connection is an input change, so
+     * that the flows of a branch that has just been opened are computed before they are read.
+     */
+    public void updateOpenBranches() {
+        for (int i = 0; i < branchVector.openableSide1Nums.size(); i++) {
+            int branchNum = branchVector.openableSide1Nums.getQuick(i);
+            if (branchVector.connected1[branchNum] && branchVector.bus1Num[branchNum] >= 0) {
+                continue;
+            }
+            double y = branchVector.y[branchNum];
+            double cosKsi = branchVector.cosKsi[branchNum];
+            double sinKsi = branchVector.sinKsi[branchNum];
+            double g1 = branchVector.g1[branchNum];
+            double b1 = branchVector.b1[branchNum];
+            double g2 = branchVector.g2[branchNum];
+            double b2 = branchVector.b2[branchNum];
+            double v2 = busVector.v[branchVector.bus2Num[branchNum]];
+            branchVector.openP2[branchNum] = OpenBranchSide1ActiveFlowEquationTerm.p2(y, cosKsi, sinKsi, g1, b1, g2, v2);
+            branchVector.openDp2dv2[branchNum] = OpenBranchSide1ActiveFlowEquationTerm.dp2dv2(y, cosKsi, sinKsi, g1, b1, g2, v2);
+            branchVector.openQ2[branchNum] = OpenBranchSide1ReactiveFlowEquationTerm.q2(y, cosKsi, sinKsi, g1, b1, b2, v2);
+            branchVector.openDq2dv2[branchNum] = OpenBranchSide1ReactiveFlowEquationTerm.dq2dv2(y, cosKsi, sinKsi, g1, b1, b2, v2);
+        }
+        for (int i = 0; i < branchVector.openableSide2Nums.size(); i++) {
+            int branchNum = branchVector.openableSide2Nums.getQuick(i);
+            if (branchVector.connected2[branchNum] && branchVector.bus2Num[branchNum] >= 0) {
+                continue;
+            }
+            double y = branchVector.y[branchNum];
+            double cosKsi = branchVector.cosKsi[branchNum];
+            double sinKsi = branchVector.sinKsi[branchNum];
+            double g1 = branchVector.g1[branchNum];
+            double b1 = branchVector.b1[branchNum];
+            double g2 = branchVector.g2[branchNum];
+            double b2 = branchVector.b2[branchNum];
+            double v1 = busVector.v[branchVector.bus1Num[branchNum]];
+            double r1 = network.getBranch(branchNum).getPiModel().getR1();
+            branchVector.openR1[branchNum] = r1;
+            branchVector.openP1[branchNum] = OpenBranchSide2ActiveFlowEquationTerm.p1(y, cosKsi, sinKsi, g1, g2, b2, v1, r1);
+            branchVector.openDp1dv1[branchNum] = OpenBranchSide2ActiveFlowEquationTerm.dp1dv1(y, cosKsi, sinKsi, g1, g2, b2, v1, r1);
+            branchVector.openQ1[branchNum] = OpenBranchSide2ReactiveFlowEquationTerm.q1(y, cosKsi, sinKsi, b1, g2, b2, v1, r1);
+            branchVector.openDq1dv1[branchNum] = OpenBranchSide2ReactiveFlowEquationTerm.dq1dv1(y, cosKsi, sinKsi, b1, g2, b2, v1, r1);
+        }
+    }
+
+    /**
+     * Update the power of the loads that follow a model and its derivative, for each load and for each bus. As a term
+     * held as an object does, the target of a load is read from the load each time.
+     */
+    public void updateLoads() {
+        for (int i = 0; i < loadVector.busNums.size(); i++) {
+            int busNum = loadVector.busNums.getQuick(i);
+            double v = busVector.v[busNum];
+            int first = loadVector.firstLoad[busNum];
+            for (int loadNum = first; loadNum < first + loadVector.loadCount[busNum]; loadNum++) {
+                LfLoad load = loadVector.loads.get(loadNum);
+                LfLoadModel loadModel = load.getLoadModel().orElseThrow();
+                double p = AbstractLoadModelEquationTerm.f(v, load.getTargetP(), loadModel.getExpTermsP());
+                double dpdv = AbstractLoadModelEquationTerm.dfdv(v, load.getTargetP(), loadModel.getExpTermsP());
+                double q = AbstractLoadModelEquationTerm.f(v, load.getTargetQ(), loadModel.getExpTermsQ());
+                double dqdv = AbstractLoadModelEquationTerm.dfdv(v, load.getTargetQ(), loadModel.getExpTermsQ());
+                loadVector.p.setQuick(loadNum, p);
+                loadVector.q.setQuick(loadNum, q);
+                // the first load of the bus sets the sums, so that a bus with one load has the very values of its load
+                boolean isFirst = loadNum == first;
+                loadVector.busP[busNum] = isFirst ? p : loadVector.busP[busNum] + p;
+                loadVector.busDpdv[busNum] = isFirst ? dpdv : loadVector.busDpdv[busNum] + dpdv;
+                loadVector.busQ[busNum] = isFirst ? q : loadVector.busQ[busNum] + q;
+                loadVector.busDqdv[busNum] = isFirst ? dqdv : loadVector.busDqdv[busNum] + dqdv;
             }
         }
     }
@@ -228,6 +385,10 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         double[] state = equationSystem.getStateVector().get();
         updateBuses(state);
         updateClosedBranches(state);
+        updateOpenBranches();
+        updateShunts(state);
+        updateHvdcs();
+        updateLoads();
         stopwatch.stop();
         LOGGER.debug("AC network vector update in {} us", stopwatch.elapsed(TimeUnit.MICROSECONDS));
     }
@@ -238,6 +399,10 @@ public class AcNetworkVector extends AbstractLfNetworkListener
             busVector.disabled[element.getNum()] = disabled;
         } else if (element.getType() == ElementType.BRANCH) {
             branchVector.disabled[element.getNum()] = disabled;
+        } else if (element.getType() == ElementType.SHUNT_COMPENSATOR) {
+            shuntVector.disabled[element.getNum()] = disabled;
+        } else if (element.getType() == ElementType.HVDC) {
+            hvdcVector.disabled[element.getNum()] = disabled;
         }
     }
 
@@ -273,7 +438,10 @@ public class AcNetworkVector extends AbstractLfNetworkListener
 
     @Override
     public void onShuntSusceptanceChange(LfShunt shunt, double b) {
-        // do nothing
+        double[] state = equationSystem.getStateVector().get();
+        if (state != null) {
+            updateShunt(shunt.getNum(), state);
+        }
     }
 
     @Override

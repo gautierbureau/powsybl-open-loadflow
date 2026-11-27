@@ -15,6 +15,10 @@ import com.powsybl.openloadflow.ac.equations.vector.ClosedBranchSide1ActiveFlowE
 import com.powsybl.openloadflow.ac.equations.vector.ClosedBranchSide1ReactiveFlowEquationTermArrayEvaluator;
 import com.powsybl.openloadflow.ac.equations.vector.ClosedBranchSide2ActiveFlowEquationTermArrayEvaluator;
 import com.powsybl.openloadflow.ac.equations.vector.ClosedBranchSide2ReactiveFlowEquationTermArrayEvaluator;
+import com.powsybl.openloadflow.ac.equations.vector.LoadModelReactiveFlowEquationTermArrayEvaluator;
+import com.powsybl.openloadflow.ac.equations.vector.OpenBranchSide1ReactiveFlowEquationTermArrayEvaluator;
+import com.powsybl.openloadflow.ac.equations.vector.OpenBranchSide2ReactiveFlowEquationTermArrayEvaluator;
+import com.powsybl.openloadflow.ac.equations.vector.ShuntCompensatorReactiveFlowEquationTermArrayEvaluator;
 
 import java.util.*;
 import java.util.concurrent.TimeUnit;
@@ -80,34 +84,64 @@ public class JacobianMatrixFastDecoupled
             ClosedBranchSide1ActiveFlowEquationTermArrayEvaluator.class.getName(),
             ClosedBranchSide1ReactiveFlowEquationTermArrayEvaluator.class.getName(),
             ClosedBranchSide2ActiveFlowEquationTermArrayEvaluator.class.getName(),
-            ClosedBranchSide2ReactiveFlowEquationTermArrayEvaluator.class.getName()
+            ClosedBranchSide2ReactiveFlowEquationTermArrayEvaluator.class.getName(),
+            OpenBranchSide1ReactiveFlowEquationTermArrayEvaluator.class.getName(),
+            OpenBranchSide2ReactiveFlowEquationTermArrayEvaluator.class.getName(),
+            ShuntCompensatorReactiveFlowEquationTermArrayEvaluator.class.getName(),
+            LoadModelReactiveFlowEquationTermArrayEvaluator.class.getName()
     );
 
     // Checks if the term provided has a dedicated derivative
     private static boolean termHasDedicatedDerivative(EquationTerm<AcVariableType, AcEquationType> term) {
-        if (term instanceof EquationTermArray.EquationTermArrayElementImpl<AcVariableType, AcEquationType> equationTermArrayElement) {
-            return TERMS_ARRAY_WITH_DEDICATED_DERIVATIVE.contains(equationTermArrayElement.getEvaluator().getClass().getName());
+        EquationTerm<AcVariableType, AcEquationType> multipliedTerm = term instanceof SingleEquationTerm.MultiplyByScalarEquationTerm<AcVariableType, AcEquationType> multiplyByTerm
+                ? multiplyByTerm.getTerm() : term;
+        EquationTermArray.Evaluator<AcVariableType> evaluator = getEvaluator(multipliedTerm);
+        if (evaluator != null) {
+            return TERMS_ARRAY_WITH_DEDICATED_DERIVATIVE.contains(evaluator.getClass().getName());
         }
-        if (term instanceof SingleEquationTerm.MultiplyByScalarEquationTerm<AcVariableType, AcEquationType> multiplyByTerm) {
-            return TERMS_WITH_DEDICATED_DERIVATIVE.contains(multiplyByTerm.getTerm().getClass().getName());
-        } else {
-            return TERMS_WITH_DEDICATED_DERIVATIVE.contains(term.getClass().getName());
+        return TERMS_WITH_DEDICATED_DERIVATIVE.contains(multipliedTerm.getClass().getName());
+    }
+
+    // The evaluator of a term that is an element of a term array, or that refers to one: null for any other term
+    private static EquationTermArray.Evaluator<AcVariableType> getEvaluator(EquationTerm<AcVariableType, AcEquationType> term) {
+        if (term instanceof EquationTermArray.EquationTermArrayElementImpl<AcVariableType, AcEquationType> termArrayElement) {
+            return termArrayElement.getEvaluator();
         }
+        if (term instanceof EquationTermArrayElementReference<AcVariableType, AcEquationType> reference) {
+            return reference.getTermArray().getEvaluator();
+        }
+        return null;
+    }
+
+    private static int getTermElementNum(EquationTerm<AcVariableType, AcEquationType> term) {
+        return term instanceof EquationTermArray.EquationTermArrayElementImpl<AcVariableType, AcEquationType> termArrayElement
+                ? termArrayElement.termElementNum
+                : ((EquationTermArrayElementReference<AcVariableType, AcEquationType>) term).getTermElementNum();
     }
 
     private FastDecoupledEquationTerm buildFastDecoupledTerm(EquationTerm<AcVariableType, AcEquationType> term) {
-        if (term instanceof EquationTermArray.EquationTermArrayElementImpl<AcVariableType, AcEquationType> termArrayElement) {
-            // Converting EquationTermArrayElement to corresponding fast decoupled term
-            return switch (termArrayElement.getEvaluator()) {
+        EquationTermArray.Evaluator<AcVariableType> evaluator = getEvaluator(term);
+        if (evaluator != null) {
+            // Converting EquationTermArrayElement, or a reference to one, to corresponding fast decoupled term
+            int termElementNum = getTermElementNum(term);
+            return switch (evaluator) {
                 case ClosedBranchSide1ActiveFlowEquationTermArrayEvaluator closedP1Evaluator ->
-                    new ClosedBranchSide1ActiveFlowFastDecoupledEquationTerm(closedP1Evaluator, termArrayElement.termElementNum);
+                    new ClosedBranchSide1ActiveFlowFastDecoupledEquationTerm(closedP1Evaluator, termElementNum);
                 case ClosedBranchSide2ActiveFlowEquationTermArrayEvaluator closedP2Evaluator ->
-                    new ClosedBranchSide2ActiveFlowFastDecoupledEquationTerm(closedP2Evaluator, termArrayElement.termElementNum);
+                    new ClosedBranchSide2ActiveFlowFastDecoupledEquationTerm(closedP2Evaluator, termElementNum);
                 case ClosedBranchSide1ReactiveFlowEquationTermArrayEvaluator closedQ1Evaluator ->
-                    new ClosedBranchSide1ReactiveFlowFastDecoupledEquationTerm(closedQ1Evaluator, termArrayElement.termElementNum);
+                    new ClosedBranchSide1ReactiveFlowFastDecoupledEquationTerm(closedQ1Evaluator, termElementNum);
                 case ClosedBranchSide2ReactiveFlowEquationTermArrayEvaluator closedQ2Evaluator ->
-                    new ClosedBranchSide2ReactiveFlowFastDecoupledEquationTerm(closedQ2Evaluator, termArrayElement.termElementNum);
-                case null, default -> throw new IllegalStateException("Unexpected term array class: " + term.getClass());
+                    new ClosedBranchSide2ReactiveFlowFastDecoupledEquationTerm(closedQ2Evaluator, termElementNum);
+                case OpenBranchSide1ReactiveFlowEquationTermArrayEvaluator openQ2Evaluator ->
+                    new OpenBranchSide1ReactiveFlowFastDecoupledEquationTerm(openQ2Evaluator, termElementNum);
+                case OpenBranchSide2ReactiveFlowEquationTermArrayEvaluator openQ1Evaluator ->
+                    new OpenBranchSide2ReactiveFlowFastDecoupledEquationTerm(openQ1Evaluator, termElementNum);
+                case ShuntCompensatorReactiveFlowEquationTermArrayEvaluator shuntQEvaluator ->
+                    new ShuntCompensatorReactiveFlowFastDecoupledEquationTerm(shuntQEvaluator, termElementNum);
+                case LoadModelReactiveFlowEquationTermArrayEvaluator loadQEvaluator ->
+                    new LoadModelReactiveFlowFastDecoupledEquationTerm(loadQEvaluator, termElementNum);
+                default -> throw new IllegalStateException("Unexpected term array class: " + term.getClass());
             };
         }
         return switch (term) {
