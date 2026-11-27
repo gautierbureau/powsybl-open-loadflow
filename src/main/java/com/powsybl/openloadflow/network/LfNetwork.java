@@ -118,6 +118,9 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
     /** How many times a bus voltage or angle was written: a state kept from a solve is valid while it does not move. */
     private long stateWriteCount;
 
+    /** Incremented each time a branch flow evaluable is replaced: what caches them compares it. */
+    private int branchEvaluableVersion;
+
     /*
      * The voltage (kV) and the angle of each bus, and its nominal voltage, by bus number: the buses keep their state
      * here rather than in their objects, so that a solver writes it into arrays (see AbstractLfBus#getV).
@@ -1223,6 +1226,17 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
 
     public void removeListener(LfNetworkListener listener) {
         listeners.remove(listener);
+    }
+
+    /**
+     * To be called when a branch flow evaluable (P, Q or I) is replaced, so that users caching them can be updated.
+     */
+    public void onBranchEvaluableChange() {
+        branchEvaluableVersion++;
+    }
+
+    public int getBranchEvaluableVersion() {
+        return branchEvaluableVersion;
     }
 
     public long getStateWriteCount() {

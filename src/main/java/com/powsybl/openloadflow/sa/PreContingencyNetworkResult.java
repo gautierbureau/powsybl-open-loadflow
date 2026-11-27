@@ -54,6 +54,26 @@ public class PreContingencyNetworkResult extends AbstractNetworkResult {
         update(LfBranch::isDisabled);
     }
 
+    /** The branches that can control a phase, whatever their status: the structure of the network does not change. */
+    private List<LfBranch> phaseControllerBranches;
+
+    /**
+     * The branches that can control a phase, enabled or not, computed once: each post-contingency result reads their
+     * taps, a few branches, instead of going through all of them.
+     */
+    List<LfBranch> getPhaseControllerBranches() {
+        if (phaseControllerBranches == null) {
+            List<LfBranch> branches = new ArrayList<>();
+            for (LfBranch b : network.getBranches()) {
+                if (b.hasPhaseControllerCapability()) {
+                    branches.add(b);
+                }
+            }
+            phaseControllerBranches = branches;
+        }
+        return phaseControllerBranches;
+    }
+
     @Override
     protected void storeInitialPhaseTapChangerInfo() {
         phaseTapChangerInfos = network.getBranches().stream()

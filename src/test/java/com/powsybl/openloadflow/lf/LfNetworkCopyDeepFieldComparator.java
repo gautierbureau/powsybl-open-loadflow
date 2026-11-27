@@ -42,7 +42,7 @@ final class LfNetworkCopyDeepFieldComparator {
             "LfSynchronousNetworkImpl#slackBuses", "LfSynchronousNetworkImpl#referenceBus",
             "LfSynchronousNetworkImpl#referenceGenerator", "LfSynchronousNetworkImpl#excludedSlackBuses",
             // lazily recomputed structures
-            "LfNetwork#connectivity", "LfNetwork#zeroImpedanceNetworksByModel", "LfNetwork#stateWriteCount",
+            "LfNetwork#connectivity", "LfNetwork#zeroImpedanceNetworksByModel", "LfNetwork#stateWriteCount", "LfNetwork#branchEvaluableVersion",
             "AbstractLfBus#zeroImpedanceNetwork", "ZeroImpedanceContext#spanningTreeEdge",
             "LfBusImpl#violationLocation",
             "AbstractLfBranch#currentLimits1", "AbstractLfBranch#activePowerLimits1", "AbstractLfBranch#apparentPowerLimits1",

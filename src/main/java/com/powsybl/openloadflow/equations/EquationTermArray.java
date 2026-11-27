@@ -11,6 +11,7 @@ import com.powsybl.commons.PowsyblException;
 import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.openloadflow.network.ElementType;
 import com.powsybl.openloadflow.network.LfElement;
+import com.powsybl.openloadflow.util.ArrayEvaluable;
 import gnu.trove.impl.Constants;
 import gnu.trove.list.array.TByteArrayList;
 import gnu.trove.list.array.TIntArrayList;
@@ -43,6 +44,14 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
         double[] eval();
 
         double eval(int termElementNum);
+
+        /**
+         * Whether {@code eval(termElementNum) == eval()[termElementNum]} with an array that stays the same: the
+         * elements are then {@link ArrayEvaluable}, read from the array by callers reading many of them.
+         */
+        default boolean evaluatesElementsFromArray() {
+            return false;
+        }
 
         double[][] evalDer();
 
@@ -290,7 +299,28 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
     }
 
     public EquationTerm<V, E> getElement(int termElementNum) {
-        return new EquationTermArrayElementImpl<>(this, termElementNum);
+        return evaluator.evaluatesElementsFromArray()
+                ? new ArrayEquationTermArrayElement<>(this, termElementNum)
+                : new EquationTermArrayElementImpl<>(this, termElementNum);
+    }
+
+    /** An element whose value is read in the array of its evaluator, at its term element number. */
+    public static class ArrayEquationTermArrayElement<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity>
+            extends EquationTermArrayElementImpl<V, E> implements ArrayEvaluable {
+
+        public ArrayEquationTermArrayElement(EquationTermArray<V, E> equationTermArray, int termElementNum) {
+            super(equationTermArray, termElementNum);
+        }
+
+        @Override
+        public double[] getValues() {
+            return equationTermArray.evaluator.eval();
+        }
+
+        @Override
+        public int getValueIndex() {
+            return termElementNum;
+        }
     }
 
     public boolean write(Writer writer, boolean writeInactiveTerms, int elementNum, boolean first) throws IOException {
