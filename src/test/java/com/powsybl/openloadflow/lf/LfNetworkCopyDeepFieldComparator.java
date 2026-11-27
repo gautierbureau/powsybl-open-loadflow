@@ -42,7 +42,7 @@ final class LfNetworkCopyDeepFieldComparator {
             "LfSynchronousNetworkImpl#slackBuses", "LfSynchronousNetworkImpl#referenceBus",
             "LfSynchronousNetworkImpl#referenceGenerator", "LfSynchronousNetworkImpl#excludedSlackBuses",
             // lazily recomputed structures
-            "LfNetwork#connectivity", "LfNetwork#zeroImpedanceNetworksByModel",
+            "LfNetwork#connectivity", "LfNetwork#zeroImpedanceNetworksByModel", "LfNetwork#stateWriteCount",
             "AbstractLfBus#zeroImpedanceNetwork", "ZeroImpedanceContext#spanningTreeEdge",
             "LfBusImpl#violationLocation",
             "AbstractLfBranch#currentLimits1", "AbstractLfBranch#activePowerLimits1", "AbstractLfBranch#apparentPowerLimits1",
@@ -144,6 +144,12 @@ final class LfNetworkCopyDeepFieldComparator {
             }
             if (original instanceof Map<?, ?> originalMap) {
                 compareMaps(originalMap, (Map<?, ?>) copy, path);
+                return;
+            }
+            if (original.getClass().isArray() && original.getClass().getComponentType().isPrimitive()) {
+                // the state the network keeps by element (the voltages and angles of the buses): its own, with the same values
+                assertNotSame(original, copy, path + ": array of the copy graph must not be shared with the original");
+                assertTrue(Objects.deepEquals(original, copy), path + ": array mismatch");
                 return;
             }
             if (!original.getClass().getName().startsWith(OUR_PACKAGE)) {
