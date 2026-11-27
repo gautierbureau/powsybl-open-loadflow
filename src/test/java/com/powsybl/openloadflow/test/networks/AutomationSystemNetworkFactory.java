@@ -132,6 +132,38 @@ public final class AutomationSystemNetworkFactory extends AbstractLoadFlowNetwor
         return network;
     }
 
+    /**
+     * From createWithBranchTripping, meshed so that no branch outage leaves an island, even with l33p open: a second line
+     * beside l12 and beside l34, and a line from b3 to b4. Its system opens l33p above 150 A at l34's side 1: 106 A in the
+     * base, 296 A without tr2, 174 A without l34b, 154 A without l3b4.
+     */
+    public static Network createMeshedWithBranchTripping() {
+        Network network = AutomationSystemNetworkFactory.createCommonNetwork();
+        Bus b1 = network.getBusBreakerView().getBus("b1");
+        Bus b2 = network.getBusBreakerView().getBus("b2");
+        Bus b3 = network.getBusBreakerView().getBus("b3");
+        Bus b3p = network.getBusBreakerView().getBus("b3p");
+        Bus b4 = network.getBusBreakerView().getBus("b4");
+        createLine(network, b3, b3p, "l33p", 0.1, 3);
+        createLine(network, b1, b2, "l12b", 0.1, 3);
+        createLine(network, b3p, b4, "l34b", 0.05, 3.2);
+        createLine(network, b3, b4, "l3b4", 0.05, 6);
+        Substation s1 = network.getSubstation("s1");
+        s1.newOverloadManagementSystem()
+                .setId("l34_opens_l33p")
+                .setEnabled(true)
+                .setMonitoredElementId("l34")
+                .setMonitoredElementSide(ThreeSides.ONE)
+                .newBranchTripping()
+                .setKey("l33p key")
+                .setBranchToOperateId("l33p")
+                .setSideToOperate(TwoSides.TWO)
+                .setCurrentLimit(150.)
+                .add()
+                .add();
+        return network;
+    }
+
     public static Network createWithBadAutomationSystems() {
         Network network = AutomationSystemNetworkFactory.createCommonNetwork();
         Bus b3 = network.getBusBreakerView().getBus("b3");
