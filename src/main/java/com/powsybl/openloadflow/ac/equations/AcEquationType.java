@@ -18,6 +18,12 @@ public enum AcEquationType implements Quantity {
     BUS_TARGET_P("bus_target_p", ElementType.BUS), // bus active power target
     BUS_TARGET_Q("bus_target_q", ElementType.BUS), // bus reactive power target
     BUS_TARGET_V("bus_target_v", ElementType.BUS), // bus voltage magnitude control
+    BUS_Q_LIMIT_UP("bus_q_limit_up", ElementType.BUS), // (qMax - Q) complementary to the voltage shortfall (smoothed reactive limits)
+    BUS_Q_LIMIT_LO("bus_q_limit_lo", ElementType.BUS), // (Q - qMin) complementary to the voltage excess (smoothed reactive limits)
+    BRANCH_RHO1_LIMIT_UP("branch_rho1_limit_up", ElementType.BRANCH), // room to raise the controlled voltage complementary to its shortfall (smoothed ratio limits)
+    BRANCH_RHO1_LIMIT_LO("branch_rho1_limit_lo", ElementType.BRANCH), // room to lower the controlled voltage complementary to its excess (smoothed ratio limits)
+    BUS_TAP_DEADBAND_RAISE("bus_tap_deadband_raise", ElementType.BUS), // voltage's room above the low edge of its band complementary to the taps raising it (smoothed tap deadband)
+    BUS_TAP_DEADBAND_LOWER("bus_tap_deadband_lower", ElementType.BUS), // voltage's room below the high edge of its band complementary to the taps lowering it (smoothed tap deadband)
     BUS_TARGET_PHI("bus_target_\u03C6", ElementType.BUS), // slack bus voltage angle target
     SHUNT_TARGET_B("shunt_target_b", ElementType.SHUNT_COMPENSATOR), // shunt susceptance
     BRANCH_TARGET_P1("branch_target_p1", ElementType.BRANCH), // active power at side 1 of a branch, phase shifter active flow control

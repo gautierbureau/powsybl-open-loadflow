@@ -11,17 +11,32 @@ import com.powsybl.commons.PowsyblException;
 import com.powsybl.contingency.ContingencyContext;
 import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Generator;
+import com.powsybl.iidm.network.Line;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.iidm.network.ShuntCompensatorLinearModel;
+import com.powsybl.iidm.network.TwoWindingsTransformer;
+import com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder;
+import com.powsybl.iidm.network.extensions.SecondaryVoltageControl;
 import com.powsybl.iidm.network.extensions.SecondaryVoltageControlAdder;
+import com.powsybl.iidm.network.regulation.RegulationMode;
 import com.powsybl.loadflow.LoadFlow;
 import com.powsybl.loadflow.LoadFlowParameters;
+import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.math.matrix.SparseMatrixFactory;
+import com.powsybl.openloadflow.NetworkCache;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
+import com.powsybl.openloadflow.ac.AcLoadFlowContext;
+import com.powsybl.openloadflow.ac.equations.LimitsSmoothing;
 import com.powsybl.openloadflow.graph.dtree.DTreeGraphConnectivityFactory;
+import com.powsybl.openloadflow.test.networks.HvdcNetworkFactory;
+import com.powsybl.openloadflow.test.networks.VoltageControlNetworkFactory;
 import com.powsybl.sensitivity.*;
 import org.junit.jupiter.api.Test;
 
 import java.util.*;
+import java.util.function.BiConsumer;
+import java.util.function.Supplier;
+import java.util.function.ToDoubleFunction;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -275,6 +290,32 @@ class AcSensitivityAnalysisAdjointTest {
         }
         // the closed loop makes the pilot bus voltage track its own target: a non-trivial, ≈1 gradient
         assertEquals(1.0, pilotTheta, 1e-9, "pilot bus voltage tracks its target");
+    }
+
+    @Test
+    void runAdjointGivesTheSameGradientOnEveryRun() {
+        // The cotangents of functions sharing state variables (P1 and P2 of every line touch the same bus angles
+        // and voltages) are summed into one right-hand side: the order of that sum must not change between runs,
+        // or the gradient moves in its last bits from one run to the next.
+        Network network = IeeeCdfNetworkFactory.create14();
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        Map<AcSensitivityAnalysis.FunctionRef, Double> cot = new LinkedHashMap<>();
+        double w = 0.1;
+        for (String line : network.getLineStream().map(l -> l.getId()).sorted().toList()) {
+            cot.put(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, line), w);
+            cot.put(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BRANCH_ACTIVE_POWER_2, line), -0.7 * w);
+            w += 0.13;
+        }
+        List<AcSensitivityAnalysis.AdjointVariable> vars = levers(SensitivityVariableType.INJECTION_ACTIVE_POWER, GENS);
+        AcSensitivityAnalysis analysis = newAnalysis(lfp);
+        String variantId = network.getVariantManager().getWorkingVariantId();
+
+        Map<AcSensitivityAnalysis.VariableRef, Double> first = analysis.runAdjoint(network, variantId, List.of(), cot, vars);
+        for (int run = 1; run < 20; run++) {
+            assertEquals(first, analysis.runAdjoint(network, variantId, List.of(), cot, vars), "run " + run);
+        }
     }
 
     @Test
@@ -567,6 +608,39 @@ class AcSensitivityAnalysisAdjointTest {
             assertEquals(e.getValue(), actual.get(e.getKey()), 1e-12 * Math.abs(e.getValue()) + 1e-13,
                     "a dead anchor moved the gradient of " + e.getKey());
         }
+    }
+
+    /**
+     * A lever outside the component, anchored on a function outside it too, reads 0 when another monitored
+     * function resolves: only the first lever is paired with every function, so the second one's factors are
+     * all SKIP, and it used to throw although the request has a function to differentiate.
+     */
+    @Test
+    void runAdjointAnswersZeroForALeverOutsideTheComponentAnchoredOnAnUnresolvableFunction() {
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getLine("L1-5-1").getTerminal1().disconnect();
+        network.getLine("L1-5-1").getTerminal2().disconnect();
+        network.getGenerator("B6-G").getTerminal().disconnect();
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+
+        AcSensitivityAnalysis analysis = newAnalysis(lfp);
+        String variantId = network.getVariantManager().getWorkingVariantId();
+        Map<AcSensitivityAnalysis.FunctionRef, Double> liveOnly = Map.of(powerKey("L2-3-1"), 0.75);
+        Map<AcSensitivityAnalysis.FunctionRef, Double> withDeadAnchor = new LinkedHashMap<>(liveOnly);
+        withDeadAnchor.put(powerKey("L1-5-1"), 0.0); // sorts first, so it anchors the second lever
+        List<AcSensitivityAnalysis.AdjointVariable> vars =
+                levers(SensitivityVariableType.INJECTION_ACTIVE_POWER, List.of("B3-G", "B6-G"));
+
+        Map<AcSensitivityAnalysis.VariableRef, Double> expected =
+                analysis.runAdjoint(network, variantId, List.of(), liveOnly, vars);
+        Map<AcSensitivityAnalysis.VariableRef, Double> actual =
+                analysis.runAdjoint(network, variantId, List.of(), withDeadAnchor, vars);
+
+        assertEquals(0.0, actual.get(varKey(SensitivityVariableType.INJECTION_ACTIVE_POWER, "B6-G")), 0);
+        var live = varKey(SensitivityVariableType.INJECTION_ACTIVE_POWER, "B3-G");
+        assertTrue(Math.abs(expected.get(live)) > 0.1, "the live lever is trivially zero: " + expected.get(live));
+        assertEquals(expected.get(live), actual.get(live), 1e-12 * Math.abs(expected.get(live)));
     }
 
     /** The emitted factors as a comparable set, since SensitivityFactor has no value equality. */
@@ -1214,5 +1288,941 @@ class AcSensitivityAnalysisAdjointTest {
         PowsyblException noVariables = assertThrows(PowsyblException.class,
             () -> AcSensitivityAnalysis.buildAdjointFactors(network, functions, List.of()));
         assertTrue(noVariables.getMessage().contains("at least one variable"), noVariables.getMessage());
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // adjointSlackDistribution: the gradient of a load flow re-run with a distributed slack
+    // ---------------------------------------------------------------------------------------------------------
+
+    // the IEEE-14 generators the slack is distributed over: B3-G, B6-G and B8-G are condensers at zero, which the
+    // distribution never makes negative, held at zero here as the imbalance is negative
+    private static final List<String> IEEE14_PARTICIPATING_GENERATORS = List.of("B1-G", "B2-G");
+
+    private static final Map<AcSensitivityAnalysis.FunctionRef, Double> FLOW_COTANGENTS =
+            Map.of(powerKey("L1-2-1"), 1.0, powerKey("L2-3-1"), 0.5);
+
+    /** The objective the FLOW_COTANGENTS are the gradient of, read on a solved network. */
+    private static double flowObjective(Network network) {
+        return network.getBranch("L1-2-1").getTerminal1().getP() + 0.5 * network.getBranch("L2-3-1").getTerminal1().getP();
+    }
+
+    /** Single slack load flow, no cache: the finite differences distribute the slack themselves. */
+    private static LoadFlowParameters singleSlackReRunParameters() {
+        LoadFlowParameters lfp = new LoadFlowParameters().setDistributedSlack(false);
+        OpenLoadFlowParameters.create(lfp);
+        return lfp;
+    }
+
+    /** {@link #svcCacheEnabledParameters} as a single slack load flow, no cache. */
+    private static LoadFlowParameters svcSingleSlackReRunParameters() {
+        LoadFlowParameters lfp = svcCacheEnabledParameters().setDistributedSlack(false);
+        OpenLoadFlowParameters.get(lfp).setNetworkCacheEnabled(false);
+        return lfp;
+    }
+
+    private static Map<AcSensitivityAnalysis.VariableRef, Double> runAdjointWithSlackDistribution(
+            Network network, LoadFlowParameters lfp, boolean adjointSlackDistribution,
+            List<AcSensitivityAnalysis.AdjointVariable> variables) {
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        sensiParams.addExtension(OpenSensitivityAnalysisParameters.class,
+                new OpenSensitivityAnalysisParameters().setAdjointSlackDistribution(adjointSlackDistribution));
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new DTreeGraphConnectivityFactory<>(), sensiParams);
+        return analysis.runAdjoint(network, network.getVariantManager().getWorkingVariantId(), List.of(),
+                FLOW_COTANGENTS, variables);
+    }
+
+    /**
+     * The distributed slack load flow, run to an exact balance. The load flow's own outer loop stops
+     * redistributing below ActivePowerDistribution.P_RESIDUE_EPS, leaving the last loss change on the slack bus:
+     * a fixed fraction of any perturbation, which would bias a finite difference by about the loss sensitivity.
+     * Here a single slack load flow is re-run and what the slack bus absorbed is spread over the participating
+     * generators, in proportion to their maximum power as PROPORTIONAL_TO_GENERATION_P_MAX does, until it is
+     * negligible.
+     */
+    private static void runToExactSlackBalance(Network network, LoadFlowParameters singleSlackParameters,
+                                               List<String> participatingGenerators) {
+        double maxPSum = participatingGenerators.stream().mapToDouble(g -> network.getGenerator(g).getMaxP()).sum();
+        for (int i = 0; i < 20; i++) {
+            LoadFlowResult result = LoadFlow.find("OpenLoadFlow").run(network, singleSlackParameters);
+            assertTrue(result.isFullyConverged());
+            double residual = result.getComponentResults().getFirst().getSlackBusResults().getFirst().getActivePowerMismatch();
+            if (Math.abs(residual) < 1e-9) {
+                return;
+            }
+            for (String id : participatingGenerators) {
+                Generator g = network.getGenerator(id);
+                g.setTargetP(g.getTargetP() + residual * g.getMaxP() / maxPSum);
+            }
+        }
+        throw new AssertionError("slack balance not reached");
+    }
+
+    /** d(objective)/d(perturbation) by a central difference of two exactly balanced load flow re-runs. */
+    private static double reRunCentralDifference(Supplier<Network> base, BiConsumer<Network, Double> perturb,
+                                                 double step, ToDoubleFunction<Network> objective) {
+        double[] values = new double[2];
+        for (int k = 0; k < 2; k++) {
+            Network network = base.get();
+            perturb.accept(network, k == 0 ? step : -step);
+            runToExactSlackBalance(network, singleSlackReRunParameters(), IEEE14_PARTICIPATING_GENERATORS);
+            values[k] = objective.applyAsDouble(network);
+        }
+        return (values[0] - values[1]) / (2 * step);
+    }
+
+    private static void scaleImpedance(Network network, String lineId, double dY) {
+        // series admittance modulus y + dY at constant ksi: R and X scaled by y / (y + dY)
+        Line line = network.getLine(lineId);
+        double y = 1.0 / Math.hypot(line.getR(), line.getX());
+        double scale = y / (y + dY);
+        line.setR(line.getR() * scale).setX(line.getX() * scale);
+    }
+
+    /** Opens line {@code lineId} at both sides. */
+    private static Network ieee14WithOpenLine(String lineId) {
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getLine(lineId).getTerminal1().disconnect();
+        network.getLine(lineId).getTerminal2().disconnect();
+        return network;
+    }
+
+    /**
+     * {@link #flowObjective} with line {@code lineId} reconnected at series admittance modulus {@code y} (siemens), at
+     * the line's ksi and without its shunt admittances: the line the open-line lever differentiates, at {@code y}.
+     */
+    private static double flowObjectiveWithReconnectedLine(String lineId, double y) {
+        Network network = IeeeCdfNetworkFactory.create14();
+        Line line = network.getLine(lineId);
+        double scale = 1.0 / (y * Math.hypot(line.getR(), line.getX()));
+        line.setR(line.getR() * scale).setX(line.getX() * scale).setG1(0).setB1(0).setG2(0).setB2(0);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, singleSlackReRunParameters()).isFullyConverged());
+        return flowObjective(network);
+    }
+
+    @Test
+    void runAdjointGivesAnOpenLineItsReconnectionGradient() {
+        // A line open at both sides is not in the solved network. Its BRANCH_ADMITTANCE lever differentiates the line
+        // it would be once reconnected, at y = 0: the first-order gain of reconnecting it, which a one-sided
+        // re-solve finite difference on y from 0 checks (second order: (-3 f(0) + 4 f(h) - f(2h)) / 2h).
+        String openLine = "L2-4-1";
+        Network network = ieee14WithOpenLine(openLine);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, cacheEnabledParameters()).isFullyConverged());
+        AcSensitivityAnalysis.VariableRef key = varKey(SensitivityVariableType.BRANCH_ADMITTANCE, openLine);
+        double theta = newAnalysis(cacheEnabledParameters()).runAdjoint(network,
+                network.getVariantManager().getWorkingVariantId(), List.of(), FLOW_COTANGENTS,
+                levers(SensitivityVariableType.BRANCH_ADMITTANCE, List.of(openLine))).get(key);
+
+        Line line = IeeeCdfNetworkFactory.create14().getLine(openLine);
+        double h = 1e-4 / Math.hypot(line.getR(), line.getX());
+        Network open = ieee14WithOpenLine(openLine);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(open, singleSlackReRunParameters()).isFullyConverged());
+        double f0 = flowObjective(open);
+        double fd = (-3 * f0 + 4 * flowObjectiveWithReconnectedLine(openLine, h)
+                - flowObjectiveWithReconnectedLine(openLine, 2 * h)) / (2 * h);
+
+        assertTrue(Math.abs(theta) > 1e-2, "an open line's reconnection gradient must not be 0, got " + theta);
+        assertEquals(fd, theta, 1e-5 * Math.abs(fd), "open line: runAdjoint vs re-solve finite difference from y = 0");
+    }
+
+    @Test
+    void runAdjointKeepsAnOpenLineOutOfTheForwardAnalysisAndOfAOneSideOpenLine() {
+        // Only runAdjoint resolves an open line: the forward analysis still writes 0 for it. And a line open at one
+        // side only is in the network (with a missing bus): it keeps its 0 in the adjoint.
+        String openLine = "L2-4-1";
+        Network network = ieee14WithOpenLine(openLine);
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        SensitivityAnalysisResult fwd = SensitivityAnalysis.find().run(network, List.of(
+                new SensitivityFactor(SensitivityFunctionType.BRANCH_ACTIVE_POWER_1, "L1-2-1",
+                        SensitivityVariableType.BRANCH_ADMITTANCE, openLine, false, ContingencyContext.all())),
+                new SensitivityAnalysisRunParameters().setParameters(sensiParams));
+        assertEquals(0.0, fwd.getBranchFlow1SensitivityValue(openLine, "L1-2-1", SensitivityVariableType.BRANCH_ADMITTANCE));
+
+        Network oneSide = IeeeCdfNetworkFactory.create14();
+        oneSide.getLine(openLine).getTerminal2().disconnect();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(oneSide, cacheEnabledParameters()).isFullyConverged());
+        double theta = newAnalysis(cacheEnabledParameters()).runAdjoint(oneSide,
+                oneSide.getVariantManager().getWorkingVariantId(), List.of(), FLOW_COTANGENTS,
+                levers(SensitivityVariableType.BRANCH_ADMITTANCE, List.of(openLine)))
+                .get(varKey(SensitivityVariableType.BRANCH_ADMITTANCE, openLine));
+        assertEquals(0.0, theta);
+    }
+
+    @Test
+    void runAdjointWithSlackDistributionGivesTheSameGradientOnEveryNetwork() {
+        // the participating buses' terms are summed in their order: it must not depend on the identity of the
+        // network's buses, or the same network built twice gives gradients differing in their last bits (one
+        // cotangent, so nothing else is summed)
+        Map<AcSensitivityAnalysis.FunctionRef, Double> cot = Map.of(powerKey("L5-6-1"), 1.0);
+        List<AcSensitivityAnalysis.AdjointVariable> vars = IeeeCdfNetworkFactory.create118().getGeneratorStream()
+                .map(g -> AcSensitivityAnalysis.AdjointVariable.of(SensitivityVariableType.INJECTION_ACTIVE_POWER, g.getId()))
+                .toList();
+        Map<AcSensitivityAnalysis.VariableRef, Double> first = null;
+        for (int run = 0; run < 10; run++) {
+            Network network = IeeeCdfNetworkFactory.create118();
+            LoadFlowParameters lfp = distributedSlackCacheEnabledParameters();
+            assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+            SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+            sensiParams.setLoadFlowParameters(lfp);
+            sensiParams.addExtension(OpenSensitivityAnalysisParameters.class,
+                    new OpenSensitivityAnalysisParameters().setAdjointSlackDistribution(true));
+            AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                    new DTreeGraphConnectivityFactory<>(), sensiParams);
+            Map<AcSensitivityAnalysis.VariableRef, Double> theta = analysis.runAdjoint(network,
+                    network.getVariantManager().getWorkingVariantId(), List.of(), cot, vars);
+            if (first == null) {
+                first = theta;
+            } else {
+                assertEquals(first, theta, "network " + run);
+            }
+        }
+    }
+
+    @Test
+    void runAdjointWithSlackDistributionMatchesALoadFlowReRun() {
+        // With a distributed slack the load flow spreads the imbalance a lever creates, losses included, over the
+        // participating generators. adjointSlackDistribution differentiates through that spread, so the gradient
+        // is the one of a load flow re-run, for every lever type. Without it the imbalance stays on the slack
+        // bus (the forward convention), which a re-run does not do.
+        LoadFlowParameters lfp = distributedSlackCacheEnabledParameters();
+        OpenLoadFlowParameters.get(lfp).setSlackBusPMaxMismatch(1e-6);
+        Supplier<Network> ieee14 = IeeeCdfNetworkFactory::create14;
+        Network network = ieee14.get();
+        double shuntB = network.getShuntCompensator("B9-SH").getModel(ShuntCompensatorLinearModel.class).getBPerSection();
+        double y23 = 1.0 / Math.hypot(network.getLine("L2-3-1").getR(), network.getLine("L2-3-1").getX());
+        double y15 = 1.0 / Math.hypot(network.getLine("L1-5-1").getR(), network.getLine("L1-5-1").getX());
+
+        record Lever(SensitivityVariableType type, String id, BiConsumer<Network, Double> perturb, double step) { }
+
+        List<Lever> levers = List.of(
+                new Lever(SensitivityVariableType.INJECTION_ACTIVE_POWER, "B1-G",
+                        (n, d) -> n.getGenerator("B1-G").setTargetP(n.getGenerator("B1-G").getTargetP() + d), 0.5),
+                new Lever(SensitivityVariableType.INJECTION_ACTIVE_POWER, "B2-G",
+                        (n, d) -> n.getGenerator("B2-G").setTargetP(n.getGenerator("B2-G").getTargetP() + d), 0.5),
+                new Lever(SensitivityVariableType.SHUNT_COMPENSATOR_SUSCEPTANCE, "B9-SH",
+                        (n, d) -> {
+                            ShuntCompensatorLinearModel model = n.getShuntCompensator("B9-SH").getModel(ShuntCompensatorLinearModel.class);
+                            model.setBPerSection(model.getBPerSection() + d);
+                        }, 1e-3 * Math.abs(shuntB)),
+                // a line away from the slack bus and one connected to it (the slack bus rhs entry)
+                new Lever(SensitivityVariableType.BRANCH_ADMITTANCE, "L2-3-1", (n, d) -> scaleImpedance(n, "L2-3-1", d), 1e-4 * y23),
+                new Lever(SensitivityVariableType.BRANCH_ADMITTANCE, "L1-5-1", (n, d) -> scaleImpedance(n, "L1-5-1", d), 1e-4 * y15));
+
+        List<AcSensitivityAnalysis.AdjointVariable> variables = levers.stream()
+                .map(l -> AcSensitivityAnalysis.AdjointVariable.of(l.type(), l.id())).toList();
+        Map<AcSensitivityAnalysis.VariableRef, Double> closedLoop = runAdjointWithSlackDistribution(network, lfp, true, variables);
+        Map<AcSensitivityAnalysis.VariableRef, Double> forwardConvention = runAdjointWithSlackDistribution(network, lfp, false, variables);
+
+        double maxGap = 0;
+        for (Lever lever : levers) {
+            AcSensitivityAnalysis.VariableRef key = varKey(lever.type(), lever.id());
+            double fd = reRunCentralDifference(ieee14, lever.perturb(), lever.step(), AcSensitivityAnalysisAdjointTest::flowObjective);
+            assertEquals(fd, closedLoop.get(key), 1e-5 * (Math.abs(fd) + 1e-2), "adjointSlackDistribution vs re-run for " + key);
+            maxGap = Math.max(maxGap, Math.abs(forwardConvention.get(key) - fd) / (Math.abs(fd) + 1e-2));
+        }
+        assertTrue(maxGap > 1e-2, "the forward convention must differ from a re-run here, got a relative gap of " + maxGap);
+    }
+
+    @Test
+    void runAdjointWithSlackDistributionMatchesALoadFlowReRunForAnSvcPilotLever() {
+        // TVC's RST lever with a distributed slack: moving the pilot target moves reactive power and losses.
+        // The slack distribution brings the gradient from 5.5% to 0.17% of a re-run (a step-converged central
+        // difference). What remains is in the SVC coordination weights (SvcPilotPointClosedLoopSensitivity),
+        // which their own solves still compute with the slack on the slack bus.
+        String zone = "z1";
+        double targetV = 13.0;
+        double dV = 0.01;
+        LoadFlowParameters lfp = svcCacheEnabledParameters().setDistributedSlack(true);
+        OpenLoadFlowParameters.get(lfp).setSlackBusPMaxMismatch(1e-6);
+
+        Network network = ieee14WithZone(targetV);
+        List<AcSensitivityAnalysis.AdjointVariable> zoneLever =
+                levers(SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE, List.of(zone));
+        double theta = runAdjointWithSlackDistribution(network, lfp, true, zoneLever)
+                .get(varKey(SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE, zone));
+
+        // divided by the achieved pilot voltage change, as in runAdjointHandlesSvcPilotLeverOnIeee14
+        double[] objective = new double[2];
+        double[] pilotV = new double[2];
+        for (int k = 0; k < 2; k++) {
+            Network n = ieee14WithZone(targetV);
+            n.getExtension(SecondaryVoltageControl.class).getControlZone(zone).orElseThrow().getPilotPoint()
+                    .setTargetV(targetV + (k == 0 ? dV : -dV));
+            runToExactSlackBalance(n, svcSingleSlackReRunParameters(), IEEE14_PARTICIPATING_GENERATORS);
+            objective[k] = flowObjective(n);
+            pilotV[k] = busVoltage(n, "B10");
+        }
+        double fd = (objective[0] - objective[1]) / (pilotV[0] - pilotV[1]);
+        assertEquals(fd, theta, 3e-3 * Math.abs(fd), "adjointSlackDistribution vs re-run for the pilot target");
+        double forwardConvention = runAdjointWithSlackDistribution(ieee14WithZone(targetV), lfp, false, zoneLever)
+                .get(varKey(SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE, zone));
+        assertTrue(Math.abs(forwardConvention - fd) > 10 * Math.abs(theta - fd),
+                "the slack distribution must bring the pilot gradient closer to a re-run");
+    }
+
+    @Test
+    void runAdjointWithSlackDistributionIsTheForwardConventionWithoutADistributedSlack() {
+        // without a distributed slack there is nothing to distribute: the option changes nothing
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        List<AcSensitivityAnalysis.AdjointVariable> variables = levers(SensitivityVariableType.INJECTION_ACTIVE_POWER, GENS);
+        Network network = IeeeCdfNetworkFactory.create14();
+        Map<AcSensitivityAnalysis.VariableRef, Double> on = runAdjointWithSlackDistribution(network, lfp, true, variables);
+        Map<AcSensitivityAnalysis.VariableRef, Double> off = runAdjointWithSlackDistribution(network, lfp, false, variables);
+        for (String g : GENS) {
+            AcSensitivityAnalysis.VariableRef key = varKey(SensitivityVariableType.INJECTION_ACTIVE_POWER, g);
+            assertEquals(off.get(key), on.get(key), 0.0, "option without a distributed slack for " + g);
+        }
+    }
+
+    // ---- the adjoint on its own equation system (a copy of the solved network) ----
+
+    /**
+     * Runs the adjoint on the cached load flow's system, on a system of its own built on a copy of the solved
+     * network, then on the cached system again: with the same equations the copy must give the same gradient,
+     * and must leave the cached context as it was.
+     */
+    private static void assertCopyRouteMatchesCachedRoute(Network network, LoadFlowParameters lfp,
+                                                          OpenSensitivityAnalysisParameters sensiExt,
+                                                          Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents,
+                                                          List<AcSensitivityAnalysis.AdjointVariable> variables) {
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        sensiParams.addExtension(OpenSensitivityAnalysisParameters.class, sensiExt);
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(),
+                new DTreeGraphConnectivityFactory<>(), sensiParams);
+        String variantId = network.getVariantManager().getWorkingVariantId();
+
+        Map<AcSensitivityAnalysis.VariableRef, Double> cached = analysis.runAdjoint(network, variantId, List.of(), cotangents, variables);
+        Map<AcSensitivityAnalysis.VariableRef, Double> copied = analysis.setAdjointOnNetworkCopy(true)
+                .runAdjoint(network, variantId, List.of(), cotangents, variables);
+        Map<AcSensitivityAnalysis.VariableRef, Double> cachedAgain = analysis.setAdjointOnNetworkCopy(false)
+                .runAdjoint(network, variantId, List.of(), cotangents, variables);
+
+        assertEquals(List.copyOf(cached.keySet()), List.copyOf(copied.keySet()));
+        double scale = cached.values().stream().mapToDouble(Math::abs).max().orElse(0);
+        assertTrue(scale > 1e-3, "the gradient must be non-trivial, got max |θ̄| = " + scale);
+        for (var e : cached.entrySet()) {
+            assertEquals(e.getValue(), copied.get(e.getKey()), 1e-9 * scale, "copy route for " + e.getKey());
+        }
+        assertEquals(cached, cachedAgain, "the copy route must leave the cached context untouched");
+    }
+
+    private static List<AcSensitivityAnalysis.AdjointVariable> ieee14Levers() {
+        // levers a bus voltage can be differentiated against (not an active injection)
+        return concat(levers(SensitivityVariableType.BUS_TARGET_VOLTAGE, List.of("B1-G", "B2-G", "B6-G")),
+                levers(SensitivityVariableType.BRANCH_ADMITTANCE, List.of("L4-5-1", "L6-13-1")));
+    }
+
+    private static Map<AcSensitivityAnalysis.FunctionRef, Double> ieee14Cotangents() {
+        Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents = new LinkedHashMap<>(FLOW_COTANGENTS);
+        cotangents.put(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "B10"), 2.0);
+        cotangents.put(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "B14"), -1.0);
+        return cotangents;
+    }
+
+    @Test
+    void runAdjointOnANetworkCopyGivesAnOpenLineTheSameReconnectionGradient() {
+        // the smoothed settings run the adjoint on a copy of the solved network: an open line's branch is built on the
+        // copy's buses, and must read the same gradient as on the cached system
+        assertCopyRouteMatchesCachedRoute(ieee14WithOpenLine("L2-4-1"), cacheEnabledParameters(),
+                new OpenSensitivityAnalysisParameters(), FLOW_COTANGENTS,
+                levers(SensitivityVariableType.BRANCH_ADMITTANCE, List.of("L2-4-1", "L2-3-1")));
+    }
+
+    @Test
+    void runAdjointOnANetworkCopyMatchesTheCachedSystem() {
+        assertCopyRouteMatchesCachedRoute(IeeeCdfNetworkFactory.create14(), cacheEnabledParameters(),
+                new OpenSensitivityAnalysisParameters(), ieee14Cotangents(), ieee14Levers());
+    }
+
+    @Test
+    void runAdjointOnANetworkCopyKeepsAGeneratorSwitchedToItsReactiveLimit() {
+        Network network = IeeeCdfNetworkFactory.create14();
+        Generator b2 = network.getGenerator("B2-G");
+        b2.newMinMaxReactiveLimits().setMinQ(-40).setMaxQ(20).add();
+        assertCopyRouteMatchesCachedRoute(network, cacheEnabledParameters(),
+                new OpenSensitivityAnalysisParameters(), ieee14Cotangents(), ieee14Levers());
+        // the load flow switched B2 to PQ at its upper limit, and the copy kept it so
+        assertEquals(-20, b2.getTerminal().getQ(), 1e-6);
+        assertTrue(Math.abs(busVoltage(network, "B2") - b2.getTargetV()) > 0.1, "B2 must have left its target voltage");
+    }
+
+    @Test
+    void runAdjointOnANetworkCopyMatchesWithTheSlackDistribution() {
+        assertCopyRouteMatchesCachedRoute(IeeeCdfNetworkFactory.create14(), distributedSlackCacheEnabledParameters(),
+                new OpenSensitivityAnalysisParameters().setAdjointSlackDistribution(true), FLOW_COTANGENTS,
+                concat(levers(SensitivityVariableType.INJECTION_ACTIVE_POWER, GENS), ieee14Levers()));
+    }
+
+    @Test
+    void runAdjointOnANetworkCopyMatchesForAnSvcPilotLever() {
+        Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents = new LinkedHashMap<>();
+        cotangents.put(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "B10"), 1.0);
+        cotangents.put(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "B4"), 0.5);
+        assertCopyRouteMatchesCachedRoute(ieee14WithZone(13.0), svcCacheEnabledParameters(),
+                new OpenSensitivityAnalysisParameters(), cotangents,
+                concat(levers(SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE, List.of("z1")),
+                        levers(SensitivityVariableType.BUS_TARGET_VOLTAGE, List.of("B2-G"))));
+    }
+
+    @Test
+    void runAdjointOnANetworkCopyKeepsATapHeldByTheTransformerVoltageControl() {
+        Network network = VoltageControlNetworkFactory.createNetworkWithT2wt();
+        TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("T2wT");
+        t2wt.getRatioTapChanger()
+                .setTapPosition(0)
+                .getVoltageRegulation()
+                    .setTerminal(t2wt.getTerminal2(), 34.0)
+                    .setTargetDeadband(0)
+                    .setRegulating(true);
+        LoadFlowParameters lfp = cacheEnabledParameters().setTransformerVoltageControlOn(true);
+        OpenLoadFlowParameters.get(lfp)
+                .setTransformerVoltageControlMode(OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
+        Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents = new LinkedHashMap<>();
+        cotangents.put(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "BUS_3"), 1.0);
+        cotangents.put(powerKey("LINE_12"), 0.5);
+        assertCopyRouteMatchesCachedRoute(network, lfp, new OpenSensitivityAnalysisParameters(), cotangents,
+                concat(levers(SensitivityVariableType.INJECTION_REACTIVE_POWER, List.of("LOAD_2", "LOAD_3")),
+                        levers(SensitivityVariableType.BUS_TARGET_VOLTAGE, List.of("GEN_1"))));
+        assertEquals(3, t2wt.getRatioTapChanger().getSolvedTapPosition(), "the tap must have moved to hold BUS_3");
+    }
+
+    // ---- the adjoint with smoothed reactive limits ----
+
+    private static Map<AcSensitivityAnalysis.VariableRef, Double> runAdjoint(Network network, LoadFlowParameters lfp,
+                                                                             LimitsSmoothing smoothing,
+                                                                             Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents,
+                                                                             List<AcSensitivityAnalysis.AdjointVariable> variables) {
+        return runAdjoint(network, lfp, smoothing, 0, cotangents, variables);
+    }
+
+    private static Map<AcSensitivityAnalysis.VariableRef, Double> runAdjoint(Network network, LoadFlowParameters lfp,
+                                                                             LimitsSmoothing smoothing, int polishIterations,
+                                                                             Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents,
+                                                                             List<AcSensitivityAnalysis.AdjointVariable> variables) {
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        OpenSensitivityAnalysisParameters sensiExt = new OpenSensitivityAnalysisParameters();
+        if (smoothing != null) {
+            sensiExt.setAdjointReactiveLimitsSmoothing(true)
+                    .setAdjointReactiveLimitsSmoothingMu(smoothing.mu())
+                    .setAdjointReactiveLimitsSmoothingVoltageScale(smoothing.voltageScale())
+                    .setAdjointSmoothingPolishIterations(polishIterations);
+        }
+        sensiParams.addExtension(OpenSensitivityAnalysisParameters.class, sensiExt);
+        return new AcSensitivityAnalysis(new SparseMatrixFactory(), new DTreeGraphConnectivityFactory<>(), sensiParams)
+                .runAdjoint(network, network.getVariantManager().getWorkingVariantId(), List.of(), cotangents, variables);
+    }
+
+    private static double maxAbsDifference(Map<AcSensitivityAnalysis.VariableRef, Double> a,
+                                           Map<AcSensitivityAnalysis.VariableRef, Double> b) {
+        assertEquals(a.keySet(), b.keySet());
+        return a.keySet().stream().mapToDouble(k -> Math.abs(a.get(k) - b.get(k))).max().orElseThrow();
+    }
+
+    private static double maxAbs(Map<AcSensitivityAnalysis.VariableRef, Double> a) {
+        return a.values().stream().mapToDouble(Math::abs).max().orElseThrow();
+    }
+
+    /** IEEE-14 with B2-G's upper reactive limit at {@code maxQ}: binding when below its free output. */
+    private static Network ieee14WithB2MaxQ(double maxQ) {
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getGenerator("B2-G").newMinMaxReactiveLimits().setMinQ(-40).setMaxQ(maxQ).add();
+        return network;
+    }
+
+    @Test
+    void smoothedAdjointTendsToTheExactOneAsTheSmoothingVanishes() {
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        for (Network network : List.of(IeeeCdfNetworkFactory.create14(), ieee14WithB2MaxQ(20))) {
+            assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+            var exact = runAdjoint(network, lfp, null, ieee14Cotangents(), ieee14Levers());
+            var smoothed = runAdjoint(network, lfp, new LimitsSmoothing(1e-7, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), ieee14Cotangents(), ieee14Levers());
+            assertEquals(0, maxAbsDifference(exact, smoothed), 1e-6 * maxAbs(exact));
+        }
+        // and with an SVC pilot lever, whose coordination is the load flow's
+        Network zoned = ieee14WithZone(13.0);
+        LoadFlowParameters svcLfp = svcCacheEnabledParameters();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(zoned, svcLfp).isFullyConverged());
+        Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents = Map.of(
+                new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "B4"), 1.0);
+        var zoneLever = levers(SensitivityVariableType.SVC_PILOT_POINT_TARGET_VOLTAGE, List.of("z1"));
+        var exact = runAdjoint(zoned, svcLfp, null, cotangents, zoneLever);
+        var smoothed = runAdjoint(zoned, svcLfp, new LimitsSmoothing(1e-7, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), cotangents, zoneLever);
+        assertEquals(0, maxAbsDifference(exact, smoothed), 1e-6 * maxAbs(exact));
+    }
+
+    /**
+     * A VSC station of an HVDC line in AC emulation holds its bus voltage, and its reactive limits depend on its active
+     * power, which OLF evaluates from the line's flow equation: the smoothed limits read them once the system has a
+     * state, not while it is being built (a NullPointerException on real networks before).
+     */
+    @Test
+    void smoothedAdjointOnAVscStationInAcEmulation() {
+        Network network = HvdcNetworkFactory.createWithHvdcInAcEmulation();
+        network.getHvdcLine("hvdc34").newExtension(HvdcAngleDroopActivePowerControlAdder.class)
+                .withDroop(180)
+                .withP0(0.f)
+                .withEnabled(true)
+                .add();
+        LoadFlowParameters lfp = cacheEnabledParameters().setHvdcAcEmulation(true);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents = new LinkedHashMap<>();
+        cotangents.put(powerKey("l12"), 1.0);
+        cotangents.put(powerKey("l45"), 0.5);
+        var levers = concat(levers(SensitivityVariableType.INJECTION_REACTIVE_POWER, List.of("d2")),
+                levers(SensitivityVariableType.BUS_TARGET_VOLTAGE, List.of("g1", "g5")));
+        var exact = runAdjoint(network, lfp, null, cotangents, levers);
+        var smoothed = runAdjoint(network, lfp, new LimitsSmoothing(1e-7, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), cotangents, levers);
+        assertTrue(maxAbs(exact) > 0);
+        assertEquals(0, maxAbsDifference(exact, smoothed), 1e-6 * maxAbs(exact));
+    }
+
+    /**
+     * What the smoothing is for: B2-G's upper limit just above its free output (PV) and just below it (switched
+     * PQ) are nearly the same operating point, but the exact gradient jumps between them, the PQ switch removing
+     * B2 from the voltage control. The smoothed gradient changes little across the switch.
+     */
+    @Test
+    void smoothedAdjointDoesNotJumpWhenAGeneratorCrossesItsLimit() {
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        Network free = IeeeCdfNetworkFactory.create14();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(free, lfp).isFullyConverged());
+        double freeQ = -free.getGenerator("B2-G").getTerminal().getQ();
+        double delta = 0.5; // Mvar
+
+        Network pv = ieee14WithB2MaxQ(freeQ + delta);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(pv, lfp).isFullyConverged());
+        assertEquals(free.getGenerator("B2-G").getTargetV(), busVoltage(pv, "B2"), 1e-6, "B2 must still hold its voltage");
+        Network pq = ieee14WithB2MaxQ(freeQ - delta);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(pq, lfp).isFullyConverged());
+        assertEquals(-(freeQ - delta), pq.getGenerator("B2-G").getTerminal().getQ(), 1e-6, "B2 must be held at its limit");
+
+        LimitsSmoothing smoothing = new LimitsSmoothing(LimitsSmoothing.REACTIVE_DEFAULT_MU, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE);
+        var exactPv = runAdjoint(pv, lfp, null, ieee14Cotangents(), ieee14Levers());
+        var exactPq = runAdjoint(pq, lfp, null, ieee14Cotangents(), ieee14Levers());
+        var smoothedPv = runAdjoint(pv, lfp, smoothing, ieee14Cotangents(), ieee14Levers());
+        var smoothedPq = runAdjoint(pq, lfp, smoothing, ieee14Cotangents(), ieee14Levers());
+
+        // B2's own target is a lever on the PV side and none on the PQ side
+        var b2Target = varKey(SensitivityVariableType.BUS_TARGET_VOLTAGE, "B2-G");
+        assertTrue(exactPv.get(b2Target) > 0.1);
+        assertEquals(0, exactPq.get(b2Target), 0.0);
+        double exactJump = maxAbsDifference(exactPv, exactPq);
+        double smoothedJump = maxAbsDifference(smoothedPv, smoothedPq);
+        assertTrue(smoothedJump < 0.1 * exactJump, "the smoothed gradient must not jump, got " + smoothedJump + " against " + exactJump);
+        // at the switch every target lever blends the two sides: between its PV and PQ exact values, B2's own
+        // counting partly instead of all or nothing
+        for (String g : List.of("B1-G", "B2-G", "B6-G")) {
+            var k = varKey(SensitivityVariableType.BUS_TARGET_VOLTAGE, g);
+            double lo = Math.min(exactPv.get(k), exactPq.get(k));
+            double hi = Math.max(exactPv.get(k), exactPq.get(k));
+            for (var smoothed : List.of(smoothedPv, smoothedPq)) {
+                assertTrue(smoothed.get(k) > lo && smoothed.get(k) < hi,
+                        g + ": smoothed " + smoothed.get(k) + " outside [" + lo + ", " + hi + "]");
+            }
+        }
+    }
+
+    /**
+     * The polish moves the state from the exact solution to the smoothed load flow's, quadratically: the
+     * complementarity rows start off by about mu^2 / headroom at a bus far from its limit.
+     */
+    @Test
+    void polishConvergesToTheSmoothedLoadFlowSolution() {
+        Network network = ieee14WithB2MaxQ(20);
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        AcLoadFlowContext cachedContext = NetworkCache.AC_LF_INSTANCE.findEntry(network).orElseThrow()
+                .getValues().get(0).getContext();
+        try (AcLoadFlowContext context = AcSensitivityAnalysis.createAdjointContext(cachedContext,
+                new LimitsSmoothing(LimitsSmoothing.REACTIVE_DEFAULT_MU, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), false, null, null, 0)) {
+            double[] mismatches = AcSensitivityAnalysis.polish(context, 6);
+            assertTrue(mismatches[0] > 1e-4, "the exact solution is not the smoothed one, got " + mismatches[0]);
+            assertTrue(mismatches[6] < 1e-10, "the polish must converge, got " + Arrays.toString(mismatches));
+            for (int i = 1; i < mismatches.length; i++) {
+                assertTrue(mismatches[i] < mismatches[i - 1] || mismatches[i] < 1e-12, Arrays.toString(mismatches));
+            }
+        }
+    }
+
+    @Test
+    void polishedAdjointTendsToTheExactOneAsTheSmoothingVanishes() {
+        LoadFlowParameters lfp = cacheEnabledParameters();
+        Network network = ieee14WithB2MaxQ(20);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        var exact = runAdjoint(network, lfp, null, ieee14Cotangents(), ieee14Levers());
+        var polished = runAdjoint(network, lfp, new LimitsSmoothing(1e-6, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), 3, ieee14Cotangents(), ieee14Levers());
+        assertEquals(0, maxAbsDifference(exact, polished), 1e-5 * maxAbs(exact));
+        // with the default smoothing the polish changes the gradient, but not its scale
+        var linearized = runAdjoint(network, lfp, new LimitsSmoothing(LimitsSmoothing.REACTIVE_DEFAULT_MU, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), 0, ieee14Cotangents(), ieee14Levers());
+        var polishedDefault = runAdjoint(network, lfp, new LimitsSmoothing(LimitsSmoothing.REACTIVE_DEFAULT_MU, LimitsSmoothing.REACTIVE_DEFAULT_VOLTAGE_SCALE), 5, ieee14Cotangents(), ieee14Levers());
+        assertTrue(maxAbsDifference(linearized, polishedDefault) < 0.1 * maxAbs(linearized));
+    }
+
+    // ---- the tap changers' voltage control in the adjoint ----
+
+    /**
+     * {@link VoltageControlNetworkFactory#createNetworkWithT2wt} with a tap changer of 401 fine steps (ratio 0.9 to 1.1)
+     * regulating BUS_3 to {@code targetV} with no deadband: the rounding leaves BUS_3 within a few volts of its target,
+     * so a load flow finite difference sees the continuous response of the tap.
+     */
+    private static Network t2wtWithFineTaps(double targetV) {
+        Network network = VoltageControlNetworkFactory.createNetworkWithT2wt();
+        TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("T2wT");
+        t2wt.getRatioTapChanger().remove();
+        var adder = t2wt.newRatioTapChanger();
+        for (int k = 0; k <= 400; k++) {
+            adder.beginStep().setRho(0.9 + 0.0005 * k).setR(0).setX(0).setG(0).setB(0).endStep();
+        }
+        adder.setTapPosition(200)
+                .setLoadTapChangingCapabilities(true)
+                .newVoltageRegulation()
+                    .withTargetValue(targetV)
+                    .withRegulating(false)
+                    .withTerminal(t2wt.getTerminal2())
+                    .withMode(RegulationMode.VOLTAGE)
+                    .add()
+                .add();
+        t2wt.getRatioTapChanger().getVoltageRegulation().setTargetDeadband(0).setRegulating(true);
+        return network;
+    }
+
+    private static LoadFlowParameters tapCacheEnabledParameters() {
+        LoadFlowParameters lfp = cacheEnabledParameters().setTransformerVoltageControlOn(true);
+        OpenLoadFlowParameters.get(lfp)
+                .setTransformerVoltageControlMode(OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
+        return lfp;
+    }
+
+    private static Map<AcSensitivityAnalysis.VariableRef, Double> runAdjointWithTaps(Network network, LoadFlowParameters lfp,
+                                                                                     boolean transformerVoltageControl,
+                                                                                     Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents,
+                                                                                     List<AcSensitivityAnalysis.AdjointVariable> variables) {
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        sensiParams.addExtension(OpenSensitivityAnalysisParameters.class,
+                new OpenSensitivityAnalysisParameters().setAdjointTransformerVoltageControl(transformerVoltageControl));
+        return new AcSensitivityAnalysis(new SparseMatrixFactory(), new DTreeGraphConnectivityFactory<>(), sensiParams)
+                .runAdjoint(network, network.getVariantManager().getWorkingVariantId(), List.of(), cotangents, variables);
+    }
+
+    /** dV(bus)/dQ(LOAD_3) by a load flow central difference, per Mvar of load (the opposite of an injection). */
+    private static double busVoltagePerLoad3Q(double targetV, LoadFlowParameters lfp, String bus) {
+        double dq = 2.0;
+        Network plus = t2wtWithFineTaps(targetV);
+        plus.getLoad("LOAD_3").setQ0(plus.getLoad("LOAD_3").getQ0() + dq);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(plus, lfp).isFullyConverged());
+        Network minus = t2wtWithFineTaps(targetV);
+        minus.getLoad("LOAD_3").setQ0(minus.getLoad("LOAD_3").getQ0() - dq);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(minus, lfp).isFullyConverged());
+        return (busVoltage(plus, bus) - busVoltage(minus, bus)) / (2 * dq);
+    }
+
+    private static double load3Gradient(Network network, LoadFlowParameters lfp, boolean transformerVoltageControl, String bus) {
+        return runAdjointWithTaps(network, lfp, transformerVoltageControl,
+                Map.of(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, bus), 1.0),
+                levers(SensitivityVariableType.INJECTION_REACTIVE_POWER, List.of("LOAD_3")))
+                .get(varKey(SensitivityVariableType.INJECTION_REACTIVE_POWER, "LOAD_3"));
+    }
+
+    /**
+     * A tap regulating inside its range holds its bus: the load flow moves it when the load changes, the frozen
+     * adjoint does not know. With adjointTransformerVoltageControl the gradient is the load flow's.
+     */
+    @Test
+    void runAdjointDifferentiatesARegulatingTap() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtWithFineTaps(32);
+        double frozenBus3 = load3Gradient(network, lfp, false, "BUS_3");
+        int tap = network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getSolvedTapPosition();
+        assertTrue(tap > 0 && tap < 400, "the tap must regulate inside its range, at " + tap);
+        double regulatingBus3 = load3Gradient(network, lfp, true, "BUS_3");
+        double fdBus3 = busVoltagePerLoad3Q(32, lfp, "BUS_3");
+        // the regulated bus: held by the load flow (up to the rounding), and by the gradient
+        assertTrue(frozenBus3 > 0.3, "the frozen tap leaves BUS_3 free, got " + frozenBus3);
+        assertEquals(0, regulatingBus3, 1e-9);
+        assertEquals(0, fdBus3, 5e-3);
+        // a bus on the other side: the regulating gradient is the load flow's, the frozen one is not
+        double frozenBus2 = load3Gradient(network, lfp, false, "BUS_2");
+        double regulatingBus2 = load3Gradient(network, lfp, true, "BUS_2");
+        double fdBus2 = busVoltagePerLoad3Q(32, lfp, "BUS_2");
+        assertEquals(-fdBus2, regulatingBus2, 1e-3 * Math.abs(fdBus2));
+        assertTrue(Math.abs(frozenBus2 + fdBus2) > 1e-2 * Math.abs(fdBus2), "frozen " + frozenBus2 + " against " + -fdBus2);
+    }
+
+    /** A tap at the end of its range cannot move further: it stays held, as in the load flow. */
+    @Test
+    void runAdjointKeepsATapAtItsLimitHeld() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtWithFineTaps(36);
+        double frozen = load3Gradient(network, lfp, false, "BUS_3");
+        assertEquals(400, network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getSolvedTapPosition());
+        assertEquals(frozen, load3Gradient(network, lfp, true, "BUS_3"), 0.0);
+        // against a +-2 Mvar central difference, which carries the curvature of the load flow
+        assertEquals(-busVoltagePerLoad3Q(36, lfp, "BUS_3"), frozen, 5e-3 * Math.abs(frozen));
+    }
+
+    private static double load3GradientSmoothed(Network network, LoadFlowParameters lfp, double mu, double scale, int polish, String bus) {
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        sensiParams.addExtension(OpenSensitivityAnalysisParameters.class, new OpenSensitivityAnalysisParameters()
+                .setAdjointTransformerVoltageControl(true).setAdjointTransformerVoltageControlSmoothing(true)
+                .setAdjointTransformerVoltageControlSmoothingMu(mu).setAdjointTransformerVoltageControlSmoothingVoltageScale(scale)
+                .setAdjointSmoothingPolishIterations(polish));
+        return new AcSensitivityAnalysis(new SparseMatrixFactory(), new DTreeGraphConnectivityFactory<>(), sensiParams)
+                .runAdjoint(network, network.getVariantManager().getWorkingVariantId(), List.of(),
+                        Map.of(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, bus), 1.0),
+                        levers(SensitivityVariableType.INJECTION_REACTIVE_POWER, List.of("LOAD_3")))
+                .get(varKey(SensitivityVariableType.INJECTION_REACTIVE_POWER, "LOAD_3"));
+    }
+
+    @Test
+    void smoothedRatioLimitsTendToTheExactTapsAsTheSmoothingVanishes() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        // inside the range, two steps from its end (the rounding leaves BUS_3 just under its target), at its end
+        for (double targetV : new double[] {32, 34.40, 36}) {
+            Network network = t2wtWithFineTaps(targetV);
+            double exact = load3Gradient(network, lfp, true, "BUS_3");
+            assertEquals(exact, load3GradientSmoothed(network, lfp, 1e-7, 1.0, 0, "BUS_3"), 1e-6, "target " + targetV);
+        }
+    }
+
+    /**
+     * At the end of its range a tap cannot follow a push past it but follows one back: the load flow's response is
+     * one-sided, and the exact gradient jumps from regulating to held between the last step and the end. The smoothed
+     * gradient does not jump, and at the end lies between the two one-sided responses.
+     */
+    @Test
+    void smoothedRatioLimitsDoNotJumpAtTheEndOfTheRange() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        double mu = LimitsSmoothing.RATIO_DEFAULT_MU;
+        Network inside = t2wtWithFineTaps(34.40);
+        double exactInside = load3Gradient(inside, lfp, true, "BUS_3");
+        double smoothedInside = load3GradientSmoothed(inside, lfp, mu, 1.0, 0, "BUS_3");
+        assertEquals(398, inside.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getSolvedTapPosition());
+        Network atEnd = t2wtWithFineTaps(34.45);
+        double exactAtEnd = load3Gradient(atEnd, lfp, true, "BUS_3");
+        double smoothedAtEnd = load3GradientSmoothed(atEnd, lfp, mu, 1.0, 0, "BUS_3");
+        assertEquals(400, atEnd.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getSolvedTapPosition());
+
+        assertTrue(Math.abs(exactAtEnd - exactInside) > 0.3, "the exact gradient jumps: " + exactInside + " -> " + exactAtEnd);
+        assertTrue(Math.abs(smoothedAtEnd - smoothedInside) < 0.03 * Math.abs(exactAtEnd - exactInside),
+                "the smoothed one must not: " + smoothedInside + " -> " + smoothedAtEnd);
+
+        // one-sided load flow responses at the end, per Mvar of injection: more load (the tap cannot follow), less
+        double dq = 1.0;
+        double v0 = busVoltage(atEnd, "BUS_3");
+        Network moreLoad = t2wtWithFineTaps(34.45);
+        moreLoad.getLoad("LOAD_3").setQ0(moreLoad.getLoad("LOAD_3").getQ0() + dq);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(moreLoad, lfp).isFullyConverged());
+        Network lessLoad = t2wtWithFineTaps(34.45);
+        lessLoad.getLoad("LOAD_3").setQ0(lessLoad.getLoad("LOAD_3").getQ0() - dq);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(lessLoad, lfp).isFullyConverged());
+        double heldSlope = (v0 - busVoltage(moreLoad, "BUS_3")) / dq;
+        double followedSlope = (busVoltage(lessLoad, "BUS_3") - v0) / dq;
+        assertTrue(heldSlope > 0.3 && Math.abs(followedSlope) < 0.05, heldSlope + " / " + followedSlope);
+        assertTrue(smoothedAtEnd > followedSlope && smoothedAtEnd < heldSlope,
+                "smoothed " + smoothedAtEnd + " outside [" + followedSlope + ", " + heldSlope + "]");
+    }
+
+    // ---- the tap changers' smoothed deadband in the adjoint ----
+
+    /** {@link #t2wtWithFineTaps} with a deadband of {@code deadbandKv} on BUS_3. */
+    private static Network t2wtWithFineTapsAndDeadband(double targetV, double deadbandKv) {
+        Network network = t2wtWithFineTaps(targetV);
+        network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getVoltageRegulation().setTargetDeadband(deadbandKv);
+        return network;
+    }
+
+    private static double load3GradientDeadband(Network network, LoadFlowParameters lfp, double mu, String bus) {
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        sensiParams.addExtension(OpenSensitivityAnalysisParameters.class, new OpenSensitivityAnalysisParameters()
+                .setAdjointTransformerDeadband(true).setAdjointTransformerDeadbandMu(mu));
+        return new AcSensitivityAnalysis(new SparseMatrixFactory(), new DTreeGraphConnectivityFactory<>(), sensiParams)
+                .runAdjoint(network, network.getVariantManager().getWorkingVariantId(), List.of(),
+                        Map.of(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, bus), 1.0),
+                        levers(SensitivityVariableType.INJECTION_REACTIVE_POWER, List.of("LOAD_3")))
+                .get(varKey(SensitivityVariableType.INJECTION_REACTIVE_POWER, "LOAD_3"));
+    }
+
+    /** Well inside a wide deadband, a vanishing smoothing leaves the tap held: the frozen gradient. */
+    @Test
+    void tapDeadbandWithAVanishingSmoothingHoldsTheTap() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtWithFineTapsAndDeadband(32, 2.0);
+        double frozenBus3 = load3Gradient(network, lfp, false, "BUS_3");
+        double frozenBus2 = load3Gradient(network, lfp, false, "BUS_2");
+        double v3 = busVoltage(network, "BUS_3");
+        assertTrue(Math.abs(v3 - 32) < 0.9, "BUS_3 must sit inside its +-1 kV band, at " + v3);
+        assertEquals(frozenBus3, load3GradientDeadband(network, lfp, 1e-7, "BUS_3"), 1e-6 * Math.abs(frozenBus3));
+        assertEquals(frozenBus2, load3GradientDeadband(network, lfp, 1e-7, "BUS_2"), 1e-6 * Math.abs(frozenBus2));
+    }
+
+    /**
+     * Without a deadband the band is the load flow's 0.1 kV, and the rounding to one of the fine steps leaves BUS_3
+     * near its middle, a few hundredths of a kV from its edges: a smoothing well above that makes the tap regulate.
+     */
+    @Test
+    void tapDeadbandNearItsEdgeRegulates() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtWithFineTaps(32);
+        double regulatingBus2 = load3Gradient(network, lfp, true, "BUS_2");
+        double frozenBus3 = load3Gradient(network, lfp, false, "BUS_3");
+        double mu = 0.05;
+        assertEquals(regulatingBus2, load3GradientDeadband(network, lfp, mu, "BUS_2"), 1e-2 * Math.abs(regulatingBus2));
+        assertEquals(0, load3GradientDeadband(network, lfp, mu, "BUS_3"), 1e-2 * Math.abs(frozenBus3));
+    }
+
+    /** As the smoothing grows past the distance to the edge, the gradient moves from the held tap's to the regulating one's. */
+    @Test
+    void tapDeadbandMovesFromHeldToRegulatingAsTheSmoothingGrows() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtWithFineTaps(32);
+        double frozen = load3Gradient(network, lfp, false, "BUS_3");
+        double previous = frozen;
+        for (double mu : new double[] {1e-6, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 1e-1}) {
+            double g = load3GradientDeadband(network, lfp, mu, "BUS_3");
+            assertTrue(g <= previous + 1e-12 && g >= -1e-9, "mu " + mu + ": " + g + " after " + previous);
+            previous = g;
+        }
+        assertEquals(frozen, load3GradientDeadband(network, lfp, 1e-6, "BUS_3"), 1e-3 * frozen);
+        assertTrue(previous < 1e-2 * frozen, "a wide smoothing must regulate: " + previous);
+    }
+
+    /**
+     * At the end of its range, with its bus below the band it cannot reach, the tap can only move back, at the band's
+     * upper edge, far above: it stays held, up to the smoothing's (mu / a)^2 reach to that edge.
+     */
+    @Test
+    void tapDeadbandKeepsATapAtTheEndOfItsRangeHeld() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtWithFineTaps(36);
+        double frozen = load3Gradient(network, lfp, false, "BUS_3");
+        assertEquals(400, network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getSolvedTapPosition());
+        assertEquals(frozen, load3GradientDeadband(network, lfp, 1e-3, "BUS_3"), 1e-3 * Math.abs(frozen));
+        assertEquals(frozen, load3GradientDeadband(network, lfp, 1e-6, "BUS_3"), 1e-9 * Math.abs(frozen));
+    }
+
+    @Test
+    void tapDeadbandExcludesTheRegulatingTaps() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtWithFineTaps(32);
+        assertTrue(LoadFlow.find("OpenLoadFlow").run(network, lfp).isFullyConverged());
+        SensitivityAnalysisParameters sensiParams = new SensitivityAnalysisParameters();
+        sensiParams.setLoadFlowParameters(lfp);
+        sensiParams.addExtension(OpenSensitivityAnalysisParameters.class, new OpenSensitivityAnalysisParameters()
+                .setAdjointTransformerDeadband(true).setAdjointTransformerVoltageControl(true));
+        AcSensitivityAnalysis analysis = new AcSensitivityAnalysis(new SparseMatrixFactory(), new DTreeGraphConnectivityFactory<>(), sensiParams);
+        Map<AcSensitivityAnalysis.FunctionRef, Double> cotangents =
+                Map.of(new AcSensitivityAnalysis.FunctionRef(SensitivityFunctionType.BUS_VOLTAGE, "BUS_3"), 1.0);
+        List<AcSensitivityAnalysis.AdjointVariable> variables = levers(SensitivityVariableType.INJECTION_REACTIVE_POWER, List.of("LOAD_3"));
+        String variantId = network.getVariantManager().getWorkingVariantId();
+        assertThrows(PowsyblException.class, () -> analysis.runAdjoint(network, variantId, List.of(), cotangents, variables));
+    }
+
+    /**
+     * {@link #t2wtWithFineTaps} with the transformer the other way round: BUS_3 on its side 1, the tap changer on that
+     * side regulating it, so that a higher ratio lowers the voltage it controls.
+     */
+    private static Network t2wtWithFineTapsOnSide1(double targetV) {
+        Network network = VoltageControlNetworkFactory.createNetworkWithT2wt();
+        network.getTwoWindingsTransformer("T2wT").remove();
+        TwoWindingsTransformer t2wt = network.getSubstation("SUBSTATION").newTwoWindingsTransformer()
+                .setId("T2wT").setRatedU1(33.0).setRatedU2(132.0).setR(17.0).setX(10.0)
+                .setG(0.00573921028466483).setB(0.000573921028466483).setBus1("BUS_3").setBus2("BUS_2").add();
+        var adder = t2wt.newRatioTapChanger();
+        for (int k = 0; k <= 400; k++) {
+            adder.beginStep().setRho(0.9 + 0.0005 * k).setR(0).setX(0).setG(0).setB(0).endStep();
+        }
+        adder.setTapPosition(200)
+                .setLoadTapChangingCapabilities(true)
+                .newVoltageRegulation()
+                    .withTargetValue(targetV)
+                    .withRegulating(false)
+                    .withTerminal(t2wt.getTerminal1())
+                    .withMode(RegulationMode.VOLTAGE)
+                    .add()
+                .add();
+        t2wt.getRatioTapChanger().getVoltageRegulation().setTargetDeadband(0).setRegulating(true);
+        return network;
+    }
+
+    /** The same as {@link #tapDeadbandNearItsEdgeRegulates}, the tap controlling the bus of its side 1. */
+    @Test
+    void tapDeadbandNearItsEdgeRegulatesOnSide1() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtWithFineTapsOnSide1(32);
+        double frozenBus3 = load3Gradient(network, lfp, false, "BUS_3");
+        int tap = network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getSolvedTapPosition();
+        assertTrue(tap > 0 && tap < 400, "the tap must regulate inside its range, at " + tap);
+        double regulatingBus2 = load3Gradient(network, lfp, true, "BUS_2");
+        assertTrue(frozenBus3 > 0.01, "the frozen tap leaves BUS_3 free, got " + frozenBus3);
+        double previous = frozenBus3;
+        for (double mu : new double[] {1e-4, 1e-3, 1e-2, 5e-2}) {
+            double g = load3GradientDeadband(network, lfp, mu, "BUS_3");
+            assertTrue(g <= previous + 1e-12 && g >= -1e-9, "mu " + mu + ": " + g + " after " + previous);
+            previous = g;
+        }
+        assertEquals(0, previous, 1e-2 * frozenBus3);
+        assertEquals(regulatingBus2, load3GradientDeadband(network, lfp, 0.05, "BUS_2"), 1e-2 * Math.abs(regulatingBus2));
+    }
+
+    /** {@link #t2wtWithFineTaps} with a second, identical transformer in parallel, both regulating BUS_3. */
+    private static Network t2wtParallelWithFineTaps(double targetV) {
+        Network network = t2wtWithFineTaps(targetV);
+        TwoWindingsTransformer t2wt2 = network.getSubstation("SUBSTATION").newTwoWindingsTransformer()
+                .setId("T2wT2").setRatedU1(132.0).setRatedU2(33.0).setR(17.0).setX(10.0)
+                .setG(0.00573921028466483).setB(0.000573921028466483).setBus1("BUS_2").setBus2("BUS_3").add();
+        var adder = t2wt2.newRatioTapChanger();
+        for (int k = 0; k <= 400; k++) {
+            adder.beginStep().setRho(0.9 + 0.0005 * k).setR(0).setX(0).setG(0).setB(0).endStep();
+        }
+        adder.setTapPosition(200)
+                .setLoadTapChangingCapabilities(true)
+                .newVoltageRegulation()
+                    .withTargetValue(targetV)
+                    .withRegulating(false)
+                    .withTerminal(t2wt2.getTerminal2())
+                    .withMode(RegulationMode.VOLTAGE)
+                    .add()
+                .add();
+        t2wt2.getRatioTapChanger().getVoltageRegulation().setTargetDeadband(0).setRegulating(true);
+        return network;
+    }
+
+    /** Transformers in parallel share the band of their bus: held with a vanishing smoothing, regulating with a wide one. */
+    @Test
+    void tapDeadbandCoversTransformersInParallel() {
+        LoadFlowParameters lfp = tapCacheEnabledParameters();
+        Network network = t2wtParallelWithFineTaps(32);
+        for (String id : List.of("T2wT", "T2wT2")) {
+            int tap = network.getTwoWindingsTransformer(id).getRatioTapChanger().getTapPosition();
+            assertTrue(tap >= 0 && tap <= 400, id + " at " + tap);
+        }
+        double frozenBus3 = load3Gradient(network, lfp, false, "BUS_3");
+        double frozenBus2 = load3Gradient(network, lfp, false, "BUS_2");
+        double regulatingBus2 = load3Gradient(network, lfp, true, "BUS_2");
+        assertTrue(frozenBus3 > 0.1, "the frozen taps leave BUS_3 free, got " + frozenBus3);
+        assertTrue(Math.abs(regulatingBus2 - frozenBus2) > 1e-2 * Math.abs(frozenBus2), frozenBus2 + " / " + regulatingBus2);
+        assertEquals(frozenBus3, load3GradientDeadband(network, lfp, 1e-7, "BUS_3"), 1e-6 * frozenBus3);
+        double previous = frozenBus3;
+        for (double mu : new double[] {1e-4, 1e-3, 1e-2, 5e-2}) {
+            double g = load3GradientDeadband(network, lfp, mu, "BUS_3");
+            assertTrue(g <= previous + 1e-12 && g >= -1e-9, "mu " + mu + ": " + g + " after " + previous);
+            previous = g;
+        }
+        assertEquals(0, previous, 1e-2 * frozenBus3);
+        assertEquals(regulatingBus2, load3GradientDeadband(network, lfp, 0.05, "BUS_2"), 1e-2 * Math.abs(regulatingBus2));
     }
 }

@@ -68,6 +68,11 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
 
     public static void init(SingleEquation<AcVariableType, AcEquationType> equation, LfNetwork network, double[] targets) {
         init(equation.getType(), equation.getColumn(), equation.getElementNum(), network, targets);
+        if (equation.getType() == AcEquationType.BUS_TARGET_Q
+                && equation.getEquationSystem().getEquation(equation.getElementNum(), AcEquationType.BUS_Q_LIMIT_UP).isPresent()) {
+            // smoothed reactive limits: the bus reactive generation, fixed generators included, is an unknown
+            targets[equation.getColumn()] = -network.getBus(equation.getElementNum()).getLoadTargetQ();
+        }
         targets[equation.getColumn()] -= equation.rhs();
     }
 
@@ -141,7 +146,13 @@ public class AcTargetVector extends TargetVector<AcVariableType, AcEquationType>
                 targets[column] = network.getVoltageSourceConverter(elementNum).getTargetVdc();
                 break;
 
-            case DISTR_RHO,
+            case BUS_Q_LIMIT_UP,
+                 BUS_Q_LIMIT_LO,
+                 BRANCH_RHO1_LIMIT_UP,
+                 BRANCH_RHO1_LIMIT_LO,
+                 BUS_TAP_DEADBAND_RAISE,
+                 BUS_TAP_DEADBAND_LOWER,
+                 DISTR_RHO,
                  DISTR_SHUNT_B,
                  DUMMY_TARGET_P,
                  DUMMY_TARGET_Q,
