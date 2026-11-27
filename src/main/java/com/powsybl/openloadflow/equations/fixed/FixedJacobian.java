@@ -137,6 +137,7 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     private boolean factorStatic(FixedStructure<V, E> structure) {
         if (staticLu == null) {
             staticLu = new StaticLUDecomposition(structure.getColumnStart(), structure.getRowIndices());
+            analysisCount++;
         }
         staticFactorisationCount++;
         if (staticLu.factor(((SparseMatrix) matrix).getValues()) == 0) {
@@ -291,7 +292,10 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         solve(b, true);
     }
 
-    /** How many times the matrix was analysed: once, plus once each time the pattern grew or a factorisation failed. */
+    /**
+     * How many times the matrix was analysed: once, plus once each time the pattern grew or a factorisation failed.
+     * With the static LU, its analysis counts, and that of KLU too when it had to factorise.
+     */
     public int getAnalysisCount() {
         return analysisCount;
     }
