@@ -21,6 +21,7 @@ import com.powsybl.math.matrix.LUDecomposition;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.math.matrix.SparseMatrix;
 import com.powsybl.math.matrix.SparseMatrixFactory;
+import com.powsybl.math.matrix.StaticLUDecomposition;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
@@ -48,6 +49,7 @@ import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * The AC Jacobian solves on a sparse matrix whose pattern does not change: same solutions as the matrix of the index,
@@ -147,6 +149,27 @@ class AcJacobianMatrixTest {
             assertSameSolutions(context, false);
             assertSameSolutions(context, true);
         });
+    }
+
+    @Test
+    void sameSolutionsWithTheStaticLu() {
+        assumeTrue(StaticLUDecomposition.isAvailable(), "The native math library has no static LU");
+        String previous = System.setProperty(FixedJacobian.STATIC_LU_PROPERTY, "true");
+        try {
+            runLoadFlow(IeeeCdfNetworkFactory.create300(), new SparseMatrixFactory(), context -> {
+                FixedJacobian<AcVariableType, AcEquationType> fixedJacobian = ((AcJacobianMatrix) context.getJacobianMatrix()).getFixedJacobian();
+                assertSameSolutions(context, false);
+                assertSameSolutions(context, true);
+                assertTrue(fixedJacobian.getStaticFactorisationCount() > 0);
+                assertEquals(0, fixedJacobian.getStaticFallbackCount());
+            });
+        } finally {
+            if (previous == null) {
+                System.clearProperty(FixedJacobian.STATIC_LU_PROPERTY);
+            } else {
+                System.setProperty(FixedJacobian.STATIC_LU_PROPERTY, previous);
+            }
+        }
     }
 
     /** Runs a security analysis on the loss of each given line, and returns how many matrices it created. */

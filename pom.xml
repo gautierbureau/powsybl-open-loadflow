@@ -106,6 +106,22 @@
         </pluginManagement>
     </build>
 
+    <profiles>
+        <profile>
+            <!-- A powsybl-math-native built with the static LU (see StaticLUDecomposition), installed locally -->
+            <id>static-lu</id>
+            <dependencyManagement>
+                <dependencies>
+                    <dependency>
+                        <groupId>com.powsybl</groupId>
+                        <artifactId>powsybl-math-native</artifactId>
+                        <version>1.5.0-staticlu-SNAPSHOT</version>
+                    </dependency>
+                </dependencies>
+            </dependencyManagement>
+        </profile>
+    </profiles>
+
     <dependencyManagement>
         <dependencies>
             <dependency>

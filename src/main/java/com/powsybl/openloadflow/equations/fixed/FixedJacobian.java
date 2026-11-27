@@ -13,6 +13,7 @@ import com.powsybl.math.matrix.Matrix;
 import com.powsybl.math.matrix.MatrixException;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.math.matrix.SparseMatrix;
+import com.powsybl.math.matrix.StaticLUDecomposition;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Quantity;
 
@@ -37,6 +38,12 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     /** Right-hand sides are moved to the slots, solved together and moved back by groups of at most this many values. */
     private static final int GROUP_VALUE_COUNT = 1 << 20;
 
+    /**
+     * Factorises with the static-pivot LU of the native math library first, when it has one, and with KLU only when
+     * the static pivots are not good, when this system property is true. An experiment: off by default.
+     */
+    public static final String STATIC_LU_PROPERTY = "olf.fixedJacobian.staticLu";
+
     private final FixedEquationSystem<V, E> fixed;
     private final MatrixFactory matrixFactory;
 
@@ -59,9 +66,17 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     /** True when the next numerical factorisation chooses its pivots instead of trying those of the previous one. */
     private boolean freshPivots;
 
+    private final boolean staticLuEnabled;
+    private StaticLUDecomposition staticLu;
+    /** True when the current factors are those of {@link #staticLu}, false when they are those of {@link #lu}. */
+    private boolean staticFactors;
+    private int staticFactorisationCount;
+    private int staticFallbackCount;
+
     public FixedJacobian(EquationSystem<V, E> equationSystem, Placement<V, E> placement, MatrixFactory matrixFactory) {
         this.fixed = new FixedEquationSystem<>(equationSystem, placement, FixedEquationSystem.Scope.ALL);
         this.matrixFactory = matrixFactory;
+        this.staticLuEnabled = Boolean.getBoolean(STATIC_LU_PROPERTY) && StaticLUDecomposition.isAvailable();
     }
 
     /** The fixed view of the equation system the matrix is filled from. */
@@ -103,6 +118,35 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
                 matrix.addAtIndex(elementIndices[i], fixed.getValues()[i]);
             }
         }
+        if (staticLuEnabled && elementIndices == null && factorStatic(structure)) {
+            staticFactors = true;
+        } else {
+            staticFactors = false;
+            factorKlu();
+        }
+        // the rows and the columns of the slots change only with a placement
+        if (fixed.getPlacementCount() != placementOfSlots) {
+            fixed.getRowsAndColumnsOfSlots(rowOfSlot, columnOfSlot);
+            placementOfSlots = fixed.getPlacementCount();
+        }
+        assert slotsAreCurrent(structure) : "The rows and columns of the slots kept from the last placement are not those of OLF's index";
+        valid = true;
+    }
+
+    /** Factorises with the static pivots; false when they were not good, and KLU has to factorise. */
+    private boolean factorStatic(FixedStructure<V, E> structure) {
+        if (staticLu == null) {
+            staticLu = new StaticLUDecomposition(structure.getColumnStart(), structure.getRowIndices());
+        }
+        staticFactorisationCount++;
+        if (staticLu.factor(((SparseMatrix) matrix).getValues()) == 0) {
+            return true;
+        }
+        staticFallbackCount++;
+        return false;
+    }
+
+    private void factorKlu() {
         try {
             if (lu == null) {
                 lu = matrix.decomposeLU();
@@ -114,13 +158,6 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
             closeLu();
             throw e;
         }
-        // the rows and the columns of the slots change only with a placement
-        if (fixed.getPlacementCount() != placementOfSlots) {
-            fixed.getRowsAndColumnsOfSlots(rowOfSlot, columnOfSlot);
-            placementOfSlots = fixed.getPlacementCount();
-        }
-        assert slotsAreCurrent(structure) : "The rows and columns of the slots kept from the last placement are not those of OLF's index";
-        valid = true;
     }
 
     /**
@@ -171,7 +208,13 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         for (int slot = 0; slot < bySlot.length; slot++) {
             bySlot[slot] = from[slot] >= 0 ? b[from[slot]] : 0;
         }
-        if (transposed) {
+        if (staticFactors) {
+            if (transposed) {
+                staticLu.solveTransposed(bySlot);
+            } else {
+                staticLu.solve(bySlot);
+            }
+        } else if (transposed) {
             lu.solveTransposed(bySlot);
         } else {
             lu.solve(bySlot);
@@ -206,7 +249,13 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
                 }
             }
             groupValues.put(0, values);
-            if (transposed) {
+            if (staticFactors) {
+                if (transposed) {
+                    staticLu.solveTransposed(group);
+                } else {
+                    staticLu.solve(group);
+                }
+            } else if (transposed) {
                 lu.solveTransposed(group);
             } else {
                 lu.solve(group);
@@ -266,11 +315,26 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         return fixed.getZeroDiagonalCount();
     }
 
+    /** How many times the static LU factorised, when it is on. */
+    public int getStaticFactorisationCount() {
+        return staticFactorisationCount;
+    }
+
+    /** How many of the static factorisations had bad pivots, so that KLU factorised instead. */
+    public int getStaticFallbackCount() {
+        return staticFallbackCount;
+    }
+
     private void closeLu() {
         if (lu != null) {
             lu.close();
             lu = null;
         }
+        if (staticLu != null) {
+            staticLu.close();
+            staticLu = null;
+        }
+        staticFactors = false;
     }
 
     @Override
