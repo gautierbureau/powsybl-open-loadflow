@@ -89,13 +89,19 @@ public class IncrementalTransformerVoltageControlOuterLoop extends AbstractTrans
         }
     }
 
-    static class SensitivityContext {
+    /**
+     * dV_controlled / drho for each controller branch, from ONE multi-right-hand-side solve against the
+     * converged factorisation. Public because the reverse-mode sensitivity analysis needs exactly this
+     * matrix to express a transformer target voltage as a combination of ratio columns, and computing it
+     * a second time there would be the same math stated twice.
+     */
+    public static class SensitivityContext {
 
         private final DenseMatrix sensitivities;
 
         private final int[] controllerBranchIndex;
 
-        SensitivityContext(LfNetwork network, List<LfBranch> controllerBranches,
+        public SensitivityContext(LfNetwork network, List<LfBranch> controllerBranches,
                                   EquationSystem<AcVariableType, AcEquationType> equationSystem,
                                   JacobianMatrix<AcVariableType, AcEquationType> j) {
             controllerBranchIndex = LfBranch.createIndex(network, controllerBranches);
@@ -122,7 +128,7 @@ public class IncrementalTransformerVoltageControlOuterLoop extends AbstractTrans
             return (EquationTerm<AcVariableType, AcEquationType>) controlledBus.getCalculatedV();
         }
 
-        double calculateSensitivityFromRToV(LfBranch controllerBranch, LfBus controlledBus) {
+        public double calculateSensitivityFromRToV(LfBranch controllerBranch, LfBus controlledBus) {
             return getCalculatedV(controlledBus)
                     .calculateSensi(sensitivities, controllerBranchIndex[controllerBranch.getNum()]);
         }
