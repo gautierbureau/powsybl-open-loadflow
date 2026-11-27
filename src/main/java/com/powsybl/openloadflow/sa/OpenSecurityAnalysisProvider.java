@@ -74,7 +74,10 @@ public class OpenSecurityAnalysisProvider implements SecurityAnalysisProvider {
         OpenLoadFlowParameters.log(loadFlowParameters, loadFlowParametersExt);
 
         GraphConnectivityFactory<LfBus, LfBranch> selectedConnectivityFactory;
-        if ((!runParameters.getOperatorStrategies().isEmpty() || loadFlowParametersExt.isSimulateAutomationSystems())
+        // with actions, the network keeps the elements they operate and starts without those that are off with temporary
+        // changes, which the changes of a contingency nest in: only an incremental connectivity supports it
+        if ((!runParameters.getOperatorStrategies().isEmpty() || !runParameters.getActions().isEmpty()
+                || loadFlowParametersExt.isSimulateAutomationSystems())
                 && !connectivityFactory.supportsIncremental()) {
             selectedConnectivityFactory = new DTreeGraphConnectivityFactory<>();
         } else {
