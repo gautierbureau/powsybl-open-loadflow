@@ -39,6 +39,55 @@ public class AcNetworkVector extends AbstractLfNetworkListener
     private final AcBranchVector branchVector;
     private boolean variablesInvalid = true;
 
+    /*
+     * The state the flows and their derivatives were last computed for, and whether an input other than the state
+     * changed since. A solve that starts from the state the last one ended on (outer loop iterations, see
+     * AcKeptState) finds them computed already: as long as no event of the network came in between, they are not
+     * computed again. The GPU fuses this evaluation with its fill and has nothing to keep.
+     */
+    private double[] computedState;
+    private boolean inputsChanged = true;
+    private int skipCount;
+
+    /**
+     * Notes the events of the network that change what the flows are computed from: an element disabled or enabled, a
+     * side of a branch connected or not, a tap, a susceptance, the target of a load that follows a model. The others
+     * (targets of generators, controls switched, the slack, the status of an HVDC in AC emulation, which switches its
+     * terms and not what they are computed from) do not.
+     */
+    private final LfNetworkListener inputListener = new AbstractLfNetworkListener() {
+
+        @Override
+        public void onLoadActivePowerTargetChange(LfLoad load, double oldTargetP, double newTargetP) {
+            inputsChanged = true;
+        }
+
+        @Override
+        public void onLoadReactivePowerTargetChange(LfLoad load, double oldTargetQ, double newTargetQ) {
+            inputsChanged = true;
+        }
+
+        @Override
+        public void onDisableChange(LfElement element, boolean disabled) {
+            inputsChanged = true;
+        }
+
+        @Override
+        public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition, boolean modifiedTapImpedance) {
+            inputsChanged = true;
+        }
+
+        @Override
+        public void onShuntSusceptanceChange(LfShunt shunt, double b) {
+            inputsChanged = true;
+        }
+
+        @Override
+        public void onBranchConnectionStatusChange(LfBranch branch, TwoSides side, boolean connected) {
+            inputsChanged = true;
+        }
+    };
+
     public AcNetworkVector(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem,
                            AcEquationSystemCreationParameters creationParameters) {
         this.network = Objects.requireNonNull(network);
@@ -58,6 +107,7 @@ public class AcNetworkVector extends AbstractLfNetworkListener
     public void startListening() {
         // listen for branch disabling status update
         network.addListener(this);
+        network.addListener(inputListener);
 
         // update vectorized variables and then listen for variables change in equation system
         updateVariables();
@@ -71,6 +121,8 @@ public class AcNetworkVector extends AbstractLfNetworkListener
      * Update vectorized view of the variables from the equation system.
      */
     public void updateVariables() {
+        // the changes the index has pending may move the rows of the variables: resolved first
+        equationSystem.getIndex().validate();
         if (!variablesInvalid) {
             return;
         }
@@ -226,6 +278,12 @@ public class AcNetworkVector extends AbstractLfNetworkListener
         Stopwatch stopwatch = Stopwatch.createStarted();
 
         double[] state = equationSystem.getStateVector().get();
+        if (computedState == null || computedState.length != state.length) {
+            computedState = state.clone();
+        } else {
+            System.arraycopy(state, 0, computedState, 0, state.length);
+        }
+        inputsChanged = false;
         updateBuses(state);
         updateClosedBranches(state);
         stopwatch.stop();
@@ -323,8 +381,54 @@ public class AcNetworkVector extends AbstractLfNetworkListener
 
     @Override
     public void onStateUpdate() {
+        if (!variablesInvalid && !inputsChanged && Arrays.equals(equationSystem.getStateVector().get(), computedState)) {
+            // computed for this state already, and nothing else changed since
+            skipCount++;
+            assert sameAsComputedAgain();
+            return;
+        }
         updateVariables();
         updateNetworkState();
+    }
+
+    /** How many state updates found the flows computed for that state already. */
+    public int getSkipCount() {
+        return skipCount;
+    }
+
+    /** Computes everything again and checks that it gives the values kept, to the last bit. */
+    private boolean sameAsComputedAgain() {
+        Object[] vectors = {busVector, branchVector};
+        java.util.List<double[]> kept = new java.util.ArrayList<>();
+        for (Object vector : vectors) {
+            for (double[] array : doubleArrays(vector)) {
+                kept.add(array.clone());
+            }
+        }
+        updateNetworkState();
+        int i = 0;
+        for (Object vector : vectors) {
+            for (double[] array : doubleArrays(vector)) {
+                if (!Arrays.equals(kept.get(i++), array)) {
+                    throw new AssertionError("A value of " + vector.getClass().getSimpleName() + " kept for an unchanged state differs from the one computed again");
+                }
+            }
+        }
+        return true;
+    }
+
+    private static java.util.List<double[]> doubleArrays(Object vector) {
+        java.util.List<double[]> arrays = new java.util.ArrayList<>();
+        for (java.lang.reflect.Field field : vector.getClass().getFields()) {
+            if (field.getType() == double[].class) {
+                try {
+                    arrays.add((double[]) field.get(vector));
+                } catch (IllegalAccessException e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        }
+        return arrays;
     }
 
     private void updateP1AndDerivatives(int branchNum, double v1, double r1, double v2, double sinTheta1, double cosTheta1) {

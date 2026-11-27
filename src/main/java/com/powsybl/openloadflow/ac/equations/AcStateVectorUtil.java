@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.equations;
 
 import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.equations.EquationSystemIndex;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.util.PreviousValueVoltageInitializer;
@@ -21,65 +22,101 @@ public final class AcStateVectorUtil {
     private AcStateVectorUtil() {
     }
 
+    /**
+     * An array for a new state of the given size: the one of the state vector, which the new state replaces, when it
+     * has that size, so that each solve does not allocate one. Nothing keeps the state array across a solve.
+     */
+    public static double[] stateArray(EquationSystem<AcVariableType, AcEquationType> equationSystem, int size) {
+        double[] current = equationSystem.getStateVector().get();
+        return current != null && current.length == size ? current : new double[size];
+    }
+
     public static void initStateVector(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> equationSystem, VoltageInitializer initializer) {
-        double[] x = new double[equationSystem.getIndex().getSortedVariablesToFind().size()];
-        for (Variable<AcVariableType> v : equationSystem.getIndex().getSortedVariablesToFind()) {
-            switch (v.getType()) {
-                case BUS_V:
-                    x[v.getRow()] = initializer.getMagnitude(network.getBus(v.getElementNum()));
-                    break;
-
-                case BUS_PHI:
-                    x[v.getRow()] = initializer.getAngle(network.getBus(v.getElementNum()));
-                    break;
-
-                case SHUNT_B:
-                    x[v.getRow()] = network.getShunt(v.getElementNum()).getB();
-                    break;
-
-                case BRANCH_ALPHA1:
-                    x[v.getRow()] = network.getBranch(v.getElementNum()).getPiModel().getA1();
-                    break;
-
-                case BRANCH_RHO1:
-                    x[v.getRow()] = network.getBranch(v.getElementNum()).getPiModel().getR1();
-                    break;
-
-                case DUMMY_P,
-                     DUMMY_Q,
-                     BUS_PHI_ZERO,
-                     BUS_PHI_NEGATIVE:
-                    x[v.getRow()] = 0;
-                    break;
-
-                case BUS_V_ZERO,
-                     BUS_V_NEGATIVE:
-                    // when balanced, zero and negative sequence should be zero
-                    // v_zero and v_negative initially set to zero will bring a singularity to the Jacobian
-                    // We chose to set the initial value to a small one, but different from zero
-                    // By construction if the system does not carry any asymmetry in its structure,
-                    // the resolution of the system on the three sequences will bring a singularity
-                    // Therefore, if the system is balanced by construction, we should run a balanced load flow only
-                    x[v.getRow()] = 0.1;
-                    break;
-
-                case DC_BUS_V:
-                    x[v.getRow()] = initializer.getDcVoltage(network.getDcBus(v.getElementNum()));
-                    break;
-
-                case CONV_P_AC:
-                    double p = network.getVoltageSourceConverter(v.getElementNum()).getPac();
-                    x[v.getRow()] = Double.isNaN(p) || !(initializer instanceof PreviousValueVoltageInitializer) ? 0.0 : p;
-                    break;
-
-                case CONV_Q_AC:
-                    double q = network.getVoltageSourceConverter(v.getElementNum()).getQac();
-                    x[v.getRow()] = Double.isNaN(q) || !(initializer instanceof PreviousValueVoltageInitializer) ? 0.0 : q;
-                    break;
-                default:
-                    throw new IllegalStateException("Unknown variable type " + v.getType());
+        EquationSystemIndex<AcVariableType, AcEquationType> index = equationSystem.getIndex();
+        double[] x = stateArray(equationSystem, index.getSortedVariablesToFind().size());
+        // the previous values of the voltages and the angles of the buses, straight from the arrays the network keeps
+        // them in, as LfBus.getV and getAngle read them, without going through each bus
+        boolean previousValues = initializer.getClass() == PreviousValueVoltageInitializer.class;
+        // by type, from the rows and element numbers of the index: each variable is given its value at its row
+        for (AcVariableType type : AcVariableType.values()) {
+            int[] rows = index.getRowsOfType(type);
+            int[] elementNums = index.getElementNumsOfType(type);
+            if (previousValues && type == AcVariableType.BUS_V) {
+                double[] busVoltages = network.getBusVoltages();
+                double[] busNominalVoltages = network.getBusNominalVoltages();
+                for (int i = 0; i < rows.length; i++) {
+                    int num = elementNums[i];
+                    double v = busVoltages[num] / busNominalVoltages[num];
+                    // an undefined voltage: the initializer decides, a default or an exception
+                    x[rows[i]] = Double.isNaN(v) ? initValue(network, type, num, initializer) : v;
+                }
+            } else if (previousValues && type == AcVariableType.BUS_PHI) {
+                double[] busAngles = network.getBusAngles();
+                for (int i = 0; i < rows.length; i++) {
+                    int num = elementNums[i];
+                    double angle = busAngles[num];
+                    x[rows[i]] = Double.isNaN(angle) ? initValue(network, type, num, initializer) : angle;
+                }
+            } else {
+                for (int i = 0; i < rows.length; i++) {
+                    x[rows[i]] = initValue(network, type, elementNums[i], initializer);
+                }
             }
         }
         equationSystem.getStateVector().set(x);
+    }
+
+    /** The initial value of a variable. */
+    public static double initValue(LfNetwork network, Variable<AcVariableType> v, VoltageInitializer initializer) {
+        return initValue(network, v.getType(), v.getElementNum(), initializer);
+    }
+
+    /** The initial value of the variable of a type and an element. */
+    public static double initValue(LfNetwork network, AcVariableType type, int elementNum, VoltageInitializer initializer) {
+        switch (type) {
+            case BUS_V:
+                return initializer.getMagnitude(network.getBus(elementNum));
+
+            case BUS_PHI:
+                return initializer.getAngle(network.getBus(elementNum));
+
+            case SHUNT_B:
+                return network.getShunt(elementNum).getB();
+
+            case BRANCH_ALPHA1:
+                return network.getBranch(elementNum).getPiModel().getA1();
+
+            case BRANCH_RHO1:
+                return network.getBranch(elementNum).getPiModel().getR1();
+
+            case DUMMY_P,
+                 DUMMY_Q,
+                 BUS_PHI_ZERO,
+                 BUS_PHI_NEGATIVE:
+                return 0;
+
+            case BUS_V_ZERO,
+                 BUS_V_NEGATIVE:
+                // when balanced, zero and negative sequence should be zero
+                // v_zero and v_negative initially set to zero will bring a singularity to the Jacobian
+                // We chose to set the initial value to a small one, but different from zero
+                // By construction if the system does not carry any asymmetry in its structure,
+                // the resolution of the system on the three sequences will bring a singularity
+                // Therefore, if the system is balanced by construction, we should run a balanced load flow only
+                return 0.1;
+
+            case DC_BUS_V:
+                return initializer.getDcVoltage(network.getDcBus(elementNum));
+
+            case CONV_P_AC:
+                double p = network.getVoltageSourceConverter(elementNum).getPac();
+                return Double.isNaN(p) || !(initializer instanceof PreviousValueVoltageInitializer) ? 0.0 : p;
+
+            case CONV_Q_AC:
+                double q = network.getVoltageSourceConverter(elementNum).getQac();
+                return Double.isNaN(q) || !(initializer instanceof PreviousValueVoltageInitializer) ? 0.0 : q;
+            default:
+                throw new IllegalStateException("Unknown variable type " + type);
+        }
     }
 }

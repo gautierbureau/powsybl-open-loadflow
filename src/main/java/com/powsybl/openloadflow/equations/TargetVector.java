@@ -104,7 +104,9 @@ public class TargetVector<V extends Enum<V> & Quantity, E extends Enum<E> & Quan
         List<SingleEquation<V, E>> sortedEquationsToSolve = equationSystem.getIndex().getSortedSingleEquationsToSolve();
         double[] array = new double[equationSystem.getIndex().getColumnCount()];
         for (SingleEquation<V, E> equation : sortedEquationsToSolve) {
-            initializer.initialize(equation, network, array);
+            if (equation.isActive()) { // an inactive equation to solve keeps its column: zero
+                initializer.initialize(equation, network, array);
+            }
         }
         for (EquationArray<V, E> equationArray : equationSystem.getEquationArrays()) {
             initializer.initialize(equationArray, network, array);
@@ -121,10 +123,15 @@ public class TargetVector<V extends Enum<V> & Quantity, E extends Enum<E> & Quan
     protected void updateArray(double[] array) {
         List<SingleEquation<V, E>> sortedEquationsToSolve = equationSystem.getIndex().getSortedSingleEquationsToSolve();
         for (SingleEquation<V, E> equation : sortedEquationsToSolve) {
-            initializer.initialize(equation, network, array);
+            if (equation.isActive()) { // an inactive equation to solve keeps its column: zero
+                initializer.initialize(equation, network, array);
+            }
         }
         for (EquationArray<V, E> equationArray : equationSystem.getEquationArrays()) {
             initializer.initialize(equationArray, network, array);
+        }
+        for (int column : equationSystem.getIndex().getInactiveColumns()) {
+            array[column] = 0;
         }
     }
 

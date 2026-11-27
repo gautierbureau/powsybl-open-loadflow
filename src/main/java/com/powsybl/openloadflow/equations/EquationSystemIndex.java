@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.equations;
 
 import com.powsybl.commons.PowsyblException;
+import gnu.trove.list.array.TIntArrayList;
 import org.apache.commons.lang3.mutable.MutableInt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,6 +39,13 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
 
     private List<Variable<V>> sortedVariablesToFind = Collections.emptyList();
 
+    /*
+     * The rows and the element numbers of the variables to find of each type (by ordinal), in the order of
+     * sortedVariablesToFind: computed when first asked for after the variables are sorted again.
+     */
+    private int[][] rowsByType;
+    private int[][] elementNumsByType;
+
     private int columnCount = 0;
 
     private int columnCountFromArrayEquations = 0;
@@ -49,6 +57,31 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
     private boolean variablesIndexValid = false;
 
     private final List<EquationSystemIndexListener<V, E>> listeners = new ArrayList<>();
+
+    /*
+     * Keeping the inactive columns: an equation deactivated while it has a column keeps it, as an inactive column, and a variable no active term
+     * refers to anymore keeps its row, as an orphan. The columns and the rows then do not change when a contingency
+     * isolates buses and when they come back: the vectors keep their layout, zero at the inactive columns, and the index
+     * is not built again. An inactive equation that keeps its column and an orphan variable are not in the system they solve: a solver that keeps
+     * the identity for the variables that no equation holds (the fixed structure) solves it unchanged. A real change
+     * of structure (an equation or a variable that has no column or row, an equation removed) builds the index again,
+     * as without keeping the inactive columns, the inactive columns and the orphans being removed first.
+     */
+    private boolean keepInactiveColumns;
+    private final Set<SingleEquation<V, E>> inactiveSingleEquations = new LinkedHashSet<>();
+    private final Set<Variable<V>> orphanVariables = new LinkedHashSet<>();
+    /** The active single equations without a column, and the variables referred to without a row, since the last build. */
+    private final Set<SingleEquation<V, E>> newEquations = new HashSet<>();
+    private final Set<Variable<V>> newVariables = new HashSet<>();
+    /** Inactive columns, orphans or new equations and variables changed since the last update. */
+    private boolean inactiveColumnsChanged;
+    /**
+     * An equation removed from the system: the index is built again at the next update. Equations and variables
+     * without column or row are judged at the update, on the net effect of the changes: the activations made while a
+     * bus is enabled again, and undone before the update, change nothing.
+     */
+    private boolean rebuildNeeded;
+    private int[] inactiveColumns = new int[0];
 
     public EquationSystemIndex(EquationSystem<V, E> equationSystem) {
         this.equationSystem = Objects.requireNonNull(equationSystem);
@@ -89,6 +122,154 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
 
     private void notifyEquationTermConstantsChanged() {
         listeners.forEach(EquationSystemIndexListener::onEquationTermConstantsChanged);
+    }
+
+    private void notifyVariableOrphanChange(Variable<V> variable, boolean orphan) {
+        listeners.forEach(listener -> listener.onVariableOrphanChange(variable, orphan));
+    }
+
+    public boolean isKeepInactiveColumns() {
+        return keepInactiveColumns;
+    }
+
+    /**
+     * Enables or disables the keeping of the inactive columns (see its fields). Disabling it removes the inactive columns and the orphans: the index
+     * is then built again if there were any.
+     */
+    public void setKeepInactiveColumns(boolean keepInactiveColumns) {
+        if (keepInactiveColumns == this.keepInactiveColumns) {
+            return;
+        }
+        update();
+        if (!keepInactiveColumns) {
+            removeInactiveColumns();
+        }
+        this.keepInactiveColumns = keepInactiveColumns;
+        for (EquationArray<V, E> equationArray : equationSystem.getEquationArrays()) {
+            equationArray.setKeepInactiveColumns(keepInactiveColumns);
+        }
+        inactiveColumnsChanged = false;
+        rebuildNeeded = false;
+    }
+
+    /**
+     * Resolves the pending changes: while the inactive columns are kept the index is built again only when it is read. A listener that reads
+     * the index after deciding what to update calls this first, so that it is notified of what changed before.
+     */
+    public void validate() {
+        update();
+    }
+
+    /** True when the variable keeps its row as an orphan: no active term refers to it. */
+    public boolean isOrphan(Variable<V> variable) {
+        return !orphanVariables.isEmpty() && orphanVariables.contains(variable);
+    }
+
+    /** The columns of the inactive equations, sorted: zero in the vectors, and not equations of the system solved. */
+    public int[] getInactiveColumns() {
+        update();
+        return inactiveColumns;
+    }
+
+    /**
+     * Resolves the changes since the last update: the inactive columns absorb them, or the index is built again, the inactive columns and
+     * the orphans being removed first and the listeners notified of what they would have been without keeping the inactive columns.
+     */
+    private boolean hasNewEquationsOrVariables() {
+        if (!newEquations.isEmpty() || !newVariables.isEmpty()) {
+            return true;
+        }
+        for (EquationArray<V, E> equationArray : equationSystem.getEquationArrays()) {
+            if (equationArray.getNewActiveCount() > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void updateInactiveColumns() {
+        if (!rebuildNeeded && !inactiveColumnsChanged && equationsIndexValid && variablesIndexValid) {
+            return;
+        }
+        if (rebuildNeeded || !equationsIndexValid || !variablesIndexValid || hasNewEquationsOrVariables()) {
+            rebuildNeeded = false;
+            inactiveColumnsChanged = false;
+            List<Variable<V>> addedVariables = new ArrayList<>(newVariables);
+            List<SingleEquation<V, E>> addedEquations = new ArrayList<>(newEquations);
+            newEquations.clear();
+            newVariables.clear();
+            removeInactiveColumns();
+            // the equations are numbered again; the variables only when some were added or orphans removed, as
+            // without keeping the inactive columns: a voltage control switching from PV to PQ changes the equations only
+            equationsIndexValid = false;
+            if (!addedVariables.isEmpty()) {
+                variablesIndexValid = false;
+            }
+            for (Variable<V> variable : addedVariables) {
+                notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.ADDED);
+            }
+            for (SingleEquation<V, E> equation : addedEquations) {
+                notifyEquationChange(equation, EquationSystemIndexListener.ChangeType.ADDED);
+            }
+        } else if (inactiveColumnsChanged) {
+            inactiveColumnsChanged = false;
+            inactiveColumns = computeInactiveColumns();
+            listeners.forEach(EquationSystemIndexListener::onInactiveColumnsChange);
+        }
+    }
+
+    private int[] computeInactiveColumns() {
+        TIntArrayList columns = new TIntArrayList();
+        for (SingleEquation<V, E> equation : inactiveSingleEquations) {
+            columns.add(equation.getColumn());
+        }
+        for (EquationArray<V, E> equationArray : equationSystem.getEquationArrays()) {
+            if (equationArray.getInactiveColumnCount() > 0) {
+                int[] elementNumToColumn = equationArray.getElementNumToColumn();
+                for (int elementNum = 0; elementNum < equationArray.getElementCount(); elementNum++) {
+                    if (equationArray.isElementInactiveColumn(elementNum)) {
+                        columns.add(elementNumToColumn[elementNum]);
+                    }
+                }
+            }
+        }
+        columns.sort();
+        return columns.toArray();
+    }
+
+    /** The inactive equations lose their column and the orphans their row; the listeners are notified as without keeping the inactive columns. */
+    private void removeInactiveColumns() {
+        List<SingleEquation<V, E>> inactiveEquations = new ArrayList<>(inactiveSingleEquations);
+        inactiveSingleEquations.clear();
+        for (SingleEquation<V, E> equation : inactiveEquations) {
+            equation.setColumn(-1);
+            sortedSetEquationsToSolve.remove(equation);
+        }
+        boolean arrayInactiveColumns = false;
+        for (EquationArray<V, E> equationArray : equationSystem.getEquationArrays()) {
+            arrayInactiveColumns |= equationArray.getInactiveColumnCount() > 0;
+            equationArray.removeInactiveColumns();
+        }
+        List<Variable<V>> orphans = new ArrayList<>(orphanVariables);
+        orphanVariables.clear();
+        for (Variable<V> variable : orphans) {
+            variable.setRow(-1);
+            sortedMapVariablesToFindRefCount.remove(variable);
+        }
+        inactiveColumns = new int[0];
+        if (!inactiveEquations.isEmpty() || arrayInactiveColumns) {
+            equationsIndexValid = false;
+        }
+        if (!orphans.isEmpty()) {
+            variablesIndexValid = false;
+        }
+        for (Variable<V> variable : orphans) {
+            notifyVariableOrphanChange(variable, false);
+            notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.REMOVED);
+        }
+        for (SingleEquation<V, E> equation : inactiveEquations) {
+            notifyEquationChange(equation, EquationSystemIndexListener.ChangeType.REMOVED);
+        }
     }
 
     private void updateEquationColumns(Collection<SingleEquation<V, E>> singleEquations, Collection<EquationArray<V, E>> equationArrays) {
@@ -143,6 +324,8 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
     }
 
     private void updateVariablesToFind(Predicate<V> isSeparatedInFirstPart) {
+        rowsByType = null;
+        elementNumsByType = null;
         sortedVariablesToFind = sortedMapVariablesToFindRefCount.keySet().stream().sorted().toList();
         rowCount = 0;
         if (isSeparatedInFirstPart == null) {
@@ -165,8 +348,16 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
     }
 
     private void update() {
+        if (keepInactiveColumns) {
+            updateInactiveColumns();
+        }
         if (!equationsIndexValid) {
             updateEquationsToSolve();
+            if (keepInactiveColumns) {
+                for (EquationArray<V, E> equationArray : equationSystem.getEquationArrays()) {
+                    equationArray.snapshotStructure();
+                }
+            }
         }
 
         if (!variablesIndexValid) {
@@ -192,23 +383,58 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
             if (variableRefCount == null) {
                 variableRefCount = new MutableInt(1);
                 sortedMapVariablesToFindRefCount.put(variable, variableRefCount);
-                variablesIndexValid = false;
-                notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.ADDED);
+                if (keepInactiveColumns) {
+                    // no row yet: the index is built again at the next update if it still has none then
+                    newVariables.add(variable);
+                    inactiveColumnsChanged = true;
+                } else {
+                    variablesIndexValid = false;
+                    notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.ADDED);
+                }
             } else {
+                if (variableRefCount.intValue() == 0 && orphanVariables.remove(variable)) {
+                    inactiveColumnsChanged = true;
+                    notifyVariableOrphanChange(variable, false);
+                }
                 variableRefCount.increment();
             }
         }
     }
 
     private void addEquation(SingleEquation<V, E> equation) {
+        if (keepInactiveColumns) {
+            if (inactiveSingleEquations.remove(equation)) {
+                // an inactive equation active again, on its column
+                inactiveColumnsChanged = true;
+            } else {
+                // no column yet: the index is built again at the next update if it is still active then
+                sortedSetEquationsToSolve.add(equation);
+                newEquations.add(equation);
+                inactiveColumnsChanged = true;
+            }
+            addEquationTerms(equation);
+            return;
+        }
         sortedSetEquationsToSolve.add(equation);
         equationsIndexValid = false;
+        addEquationTerms(equation);
+        notifyEquationChange(equation, EquationSystemIndexListener.ChangeType.ADDED);
+    }
+
+    private void addEquationTerms(SingleEquation<V, E> equation) {
         for (SingleEquationTerm<V, E> term : equation.getTerms()) {
             if (term.isActive()) {
                 addTerm(term);
             }
         }
-        notifyEquationChange(equation, EquationSystemIndexListener.ChangeType.ADDED);
+    }
+
+    private void removeEquationTerms(SingleEquation<V, E> equation) {
+        for (SingleEquationTerm<V, E> term : equation.getTerms()) {
+            if (term.isActive()) {
+                removeTerm(term);
+            }
+        }
     }
 
     private void removeTerm(SingleEquationTerm<V, E> term) {
@@ -222,24 +448,50 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
             if (variableRefCount != null) {
                 variableRefCount.decrement();
                 if (variableRefCount.intValue() == 0) {
-                    variable.setRow(-1);
-                    sortedMapVariablesToFindRefCount.remove(variable);
-                    variablesIndexValid = false;
-                    notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.REMOVED);
+                    if (keepInactiveColumns && newVariables.remove(variable)) {
+                        // referred to and no more since the last build: it never had a row
+                        sortedMapVariablesToFindRefCount.remove(variable);
+                    } else if (keepInactiveColumns && variable.getRow() >= 0) {
+                        // keeps its row, as an orphan
+                        orphanVariables.add(variable);
+                        inactiveColumnsChanged = true;
+                        notifyVariableOrphanChange(variable, true);
+                    } else {
+                        variable.setRow(-1);
+                        sortedMapVariablesToFindRefCount.remove(variable);
+                        variablesIndexValid = false;
+                        notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.REMOVED);
+                    }
                 }
             }
         }
     }
 
-    private void removeEquation(SingleEquation<V, E> equation) {
+    /** An equation deactivated, or removed from the system when {@code removed}. */
+    private void removeEquation(SingleEquation<V, E> equation, boolean removed) {
+        if (keepInactiveColumns && !removed) {
+            if (newEquations.remove(equation)) {
+                // activated and deactivated since the last build: it never had a column
+                sortedSetEquationsToSolve.remove(equation);
+            } else if (equation.getColumn() >= 0) {
+                // keeps its column while inactive
+                inactiveSingleEquations.add(equation);
+                inactiveColumnsChanged = true;
+            } else {
+                sortedSetEquationsToSolve.remove(equation);
+                rebuildNeeded = true;
+            }
+            removeEquationTerms(equation);
+            return;
+        }
+        if (keepInactiveColumns) {
+            newEquations.remove(equation);
+            rebuildNeeded = true;
+        }
         equation.setColumn(-1);
         sortedSetEquationsToSolve.remove(equation);
         equationsIndexValid = false;
-        for (SingleEquationTerm<V, E> term : equation.getTerms()) {
-            if (term.isActive()) {
-                removeTerm(term);
-            }
-        }
+        removeEquationTerms(equation);
         notifyEquationChange(equation, EquationSystemIndexListener.ChangeType.REMOVED);
     }
 
@@ -248,12 +500,19 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
         switch (eventType) {
             case EQUATION_REMOVED:
                 if (equation.isActive()) {
-                    removeEquation(equation);
+                    removeEquation(equation, true);
+                } else if (inactiveSingleEquations.remove(equation)) {
+                    // an inactive equation removed from the system: its terms have left the index already
+                    equation.setColumn(-1);
+                    sortedSetEquationsToSolve.remove(equation);
+                    equationsIndexValid = false;
+                    rebuildNeeded = true;
+                    notifyEquationChange(equation, EquationSystemIndexListener.ChangeType.REMOVED);
                 }
                 break;
 
             case EQUATION_DEACTIVATED:
-                removeEquation(equation);
+                removeEquation(equation, false);
                 break;
 
             case EQUATION_CREATED:
@@ -313,8 +572,12 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
                         removeVariables(variables);
                     }
                 }
-                equationsIndexValid = false;
-                notifyEquationArrayChange(equationArray, EquationSystemIndexListener.ChangeType.REMOVED);
+                if (keepInactiveColumns) {
+                    inactiveColumnsChanged = true;
+                } else {
+                    equationsIndexValid = false;
+                    notifyEquationArrayChange(equationArray, EquationSystemIndexListener.ChangeType.REMOVED);
+                }
                 break;
 
             case EQUATION_ACTIVATED:
@@ -337,8 +600,12 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
                         addVariables(variables);
                     }
                 }
-                equationsIndexValid = false;
-                notifyEquationArrayChange(equationArray, EquationSystemIndexListener.ChangeType.ADDED);
+                if (keepInactiveColumns) {
+                    inactiveColumnsChanged = true;
+                } else {
+                    equationsIndexValid = false;
+                    notifyEquationArrayChange(equationArray, EquationSystemIndexListener.ChangeType.ADDED);
+                }
                 break;
 
             default:
@@ -413,6 +680,53 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
     public List<Variable<V>> getSortedVariablesToFind() {
         update();
         return sortedVariablesToFind;
+    }
+
+    /**
+     * The rows of the variables to find of a type, in the order of {@link #getSortedVariablesToFind()}: the state of
+     * the variables of a type is read without going through each variable.
+     */
+    public int[] getRowsOfType(V type) {
+        updateVariablesByType();
+        return type.ordinal() < rowsByType.length ? rowsByType[type.ordinal()] : NO_ROW;
+    }
+
+    /** The element numbers of the variables of {@link #getRowsOfType(Enum)}, in the same order. */
+    public int[] getElementNumsOfType(V type) {
+        updateVariablesByType();
+        return type.ordinal() < elementNumsByType.length ? elementNumsByType[type.ordinal()] : NO_ROW;
+    }
+
+    private static final int[] NO_ROW = new int[0];
+
+    private void updateVariablesByType() {
+        update();
+        if (rowsByType != null) {
+            return;
+        }
+        int typeCount = 0;
+        for (Variable<V> variable : sortedVariablesToFind) {
+            typeCount = Math.max(typeCount, variable.getType().ordinal() + 1);
+        }
+        int[] counts = new int[typeCount];
+        for (Variable<V> variable : sortedVariablesToFind) {
+            counts[variable.getType().ordinal()]++;
+        }
+        int[][] rows = new int[typeCount][];
+        int[][] elementNums = new int[typeCount][];
+        for (int t = 0; t < typeCount; t++) {
+            rows[t] = new int[counts[t]];
+            elementNums[t] = new int[counts[t]];
+        }
+        int[] next = new int[typeCount];
+        for (Variable<V> variable : sortedVariablesToFind) {
+            int t = variable.getType().ordinal();
+            rows[t][next[t]] = variable.getRow();
+            elementNums[t][next[t]] = variable.getElementNum();
+            next[t]++;
+        }
+        rowsByType = rows;
+        elementNumsByType = elementNums;
     }
 
     public int getColumnCount() {

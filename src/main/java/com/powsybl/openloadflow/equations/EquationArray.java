@@ -36,9 +36,24 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
 
     private int[] elementNumToColumn;
 
+    private boolean elementNumToColumnValid;
+
     private TIntIntMap columnToElementNum;
 
     private int length;
+
+    /*
+     * Keeping the inactive columns (see EquationSystemIndex#setKeepInactiveColumns): an element deactivated while it has a column keeps it, as an
+     * inactive column, so that the columns of the array do not change. An element activated while it has none (it was inactive
+     * at the last build of the index) is new: the index is built again.
+     */
+    private boolean keepInactiveColumns;
+    /** For each element, whether it had a column at the last build of the index, valid while the inactive columns are kept. */
+    private boolean[] elementInStructure;
+    private boolean[] elementInactiveColumn;
+    private int inactiveColumnCount;
+    /** The active elements without a column, while the inactive columns are kept. */
+    private int newActiveCount;
 
     // All terms that are in a vectorized view (in EquationTermArrays)
     private final List<EquationTermArray<V, E>> termArrays = new ArrayList<>();
@@ -121,11 +136,15 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     }
 
     public int[] getElementNumToColumn() {
-        if (elementNumToColumn == null) {
-            elementNumToColumn = new int[elementCount];
+        if (!elementNumToColumnValid) {
+            // computed again in the same array when the elements are as many: nothing keeps it across a change
+            if (elementNumToColumn == null || elementNumToColumn.length != elementCount) {
+                elementNumToColumn = new int[elementCount];
+            }
+            elementNumToColumnValid = true;
             int column = firstColumn;
             for (int elementNum = 0; elementNum < elementCount; elementNum++) {
-                if (elementActive[elementNum]) {
+                if (hasColumn(elementNum)) {
                     elementNumToColumn[elementNum] = column++;
                 } else {
                     elementNumToColumn[elementNum] = -1;
@@ -153,7 +172,7 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     }
 
     private void invalidateElementNumToColumn() {
-        elementNumToColumn = null;
+        elementNumToColumnValid = false;
         columnToElementNum = null;
         matrixElementIndexes.reset();
     }
@@ -171,12 +190,30 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         invalidateElementNumToColumn();
     }
 
+    /** The number of columns of the array: its active elements, and the inactive ones that keep their column. */
     public int getLength() {
-        return length;
+        return length + inactiveColumnCount;
     }
 
     public boolean isElementActive(int elementNum) {
         return elementActive[elementNum];
+    }
+
+    /** True when the element has a column in the equation system: active, or an inactive column. */
+    public boolean hasColumn(int elementNum) {
+        return elementActive[elementNum] || inactiveColumnCount > 0 && elementInactiveColumn[elementNum];
+    }
+
+    public boolean isElementInactiveColumn(int elementNum) {
+        return inactiveColumnCount > 0 && elementInactiveColumn[elementNum];
+    }
+
+    int getInactiveColumnCount() {
+        return inactiveColumnCount;
+    }
+
+    int getNewActiveCount() {
+        return newActiveCount;
     }
 
     public void setElementActive(int elementNum, boolean active) {
@@ -187,9 +224,52 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
             } else {
                 length--;
             }
-            invalidateElementNumToColumn();
+            if (keepInactiveColumns && elementInStructure[elementNum]) {
+                // the element keeps its column when inactive
+                elementInactiveColumn[elementNum] = !active;
+                inactiveColumnCount += active ? -1 : 1;
+            } else {
+                if (keepInactiveColumns) {
+                    newActiveCount += active ? 1 : -1;
+                }
+                invalidateElementNumToColumn();
+            }
             equationSystem.notifyEquationArrayChange(this, elementNum,
                     active ? EquationEventType.EQUATION_ACTIVATED : EquationEventType.EQUATION_DEACTIVATED);
+        }
+    }
+
+    void setKeepInactiveColumns(boolean keepInactiveColumns) {
+        if (keepInactiveColumns == this.keepInactiveColumns) {
+            return;
+        }
+        if (!keepInactiveColumns) {
+            removeInactiveColumns();
+        }
+        this.keepInactiveColumns = keepInactiveColumns;
+        if (keepInactiveColumns) {
+            if (elementInactiveColumn == null) {
+                elementInactiveColumn = new boolean[elementCount];
+                elementInStructure = new boolean[elementCount];
+            }
+            snapshotStructure();
+        }
+    }
+
+    /** Called when the index is built again while the inactive columns are kept: the elements that have a column are the active ones. */
+    void snapshotStructure() {
+        if (keepInactiveColumns) {
+            System.arraycopy(elementActive, 0, elementInStructure, 0, elementCount);
+            newActiveCount = 0;
+        }
+    }
+
+    /** The inactive equations lose their column: they are inactive elements, as without keeping the inactive columns. */
+    void removeInactiveColumns() {
+        if (inactiveColumnCount > 0) {
+            Arrays.fill(elementInactiveColumn, false);
+            inactiveColumnCount = 0;
+            invalidateElementNumToColumn();
         }
     }
 

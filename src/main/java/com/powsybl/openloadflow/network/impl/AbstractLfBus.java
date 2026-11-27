@@ -243,7 +243,13 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     @Override
     public Optional<VoltageControl<?>> getVoltageControl(VoltageControl.Type type) {
-        return getVoltageControls().stream().filter(vc -> vc.getType() == type).findAny();
+        // a bus has at most one voltage control of each type
+        return Optional.ofNullable(switch (type) {
+            case GENERATOR -> generatorVoltageControl;
+            case TRANSFORMER -> transformerVoltageControl;
+            case SHUNT -> shuntVoltageControl;
+            case VOLTAGE_SOURCE_CONVERTER -> voltageSourceConverterVoltageControl;
+        });
     }
 
     @Override

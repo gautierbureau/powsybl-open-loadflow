@@ -45,4 +45,21 @@ public interface EquationSystemIndexListener<V extends Enum<V> & Quantity, E ext
      * Called when a constant has been modified in the equation terms (e.g. R or X of branches after tap position change)
      */
     void onEquationTermConstantsChanged();
+
+    /**
+     * Called while the inactive columns are kept ({@link EquationSystemIndex#setKeepInactiveColumns(boolean)}), when equations became inactive while keeping their
+     * column, or became active again: the columns and the rows are unchanged, but the inactive column
+     * columns are not the same: zero in the vectors.
+     */
+    default void onInactiveColumnsChange() {
+        // nothing to do by default
+    }
+
+    /**
+     * Called while the inactive columns are kept, when a variable no active term refers to anymore keeps its row as an orphan, or when an
+     * orphan is referred to again. Its row does not change.
+     */
+    default void onVariableOrphanChange(Variable<V> variable, boolean orphan) {
+        // nothing to do by default
+    }
 }
