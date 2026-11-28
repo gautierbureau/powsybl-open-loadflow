@@ -132,6 +132,28 @@ public final class ActivePowerDistribution {
         return step.distribute(referenceGenerator, filterParticipatingBuses(buses), activePowerMismatch);
     }
 
+    /** The compensated sum of {@code DoubleStream.sum}, term for term, of the values at the given indices. */
+    static double compensatedSum(double[] values, int[] indices, int count) {
+        double sum = 0;
+        double compensation = 0;
+        double simpleSum = 0;
+        for (int k = 0; k < count; k++) {
+            double value = values[indices[k]];
+            double tmp = value - compensation;
+            double velvel = sum + tmp;
+            compensation = (velvel - sum) - tmp;
+            sum = velvel;
+            simpleSum += value;
+        }
+        return finalSum(sum, compensation, simpleSum);
+    }
+
+    /** The end of {@code DoubleStream.sum}: the compensated sum, or the simple one when it overflowed. */
+    static double finalSum(double sum, double compensation, double simpleSum) {
+        double tmp = sum - compensation;
+        return Double.isNaN(tmp) && Double.isInfinite(simpleSum) ? simpleSum : tmp;
+    }
+
     public static ActivePowerDistribution create(LoadFlowParameters.BalanceType balanceType, boolean loadPowerFactorConstant, boolean useActiveLimits) {
         return new ActivePowerDistribution(getStep(balanceType, loadPowerFactorConstant, useActiveLimits));
     }
