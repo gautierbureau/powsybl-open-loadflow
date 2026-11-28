@@ -8,7 +8,6 @@
 package com.powsybl.openloadflow.equations.fixed;
 
 import com.powsybl.math.matrix.DenseMatrix;
-import com.powsybl.math.matrix.KluParameters;
 import com.powsybl.math.matrix.LUDecomposition;
 import com.powsybl.math.matrix.Matrix;
 import com.powsybl.math.matrix.MatrixException;
@@ -63,8 +62,6 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     public FixedJacobian(EquationSystem<V, E> equationSystem, Placement<V, E> placement, MatrixFactory matrixFactory) {
         this.fixed = new FixedEquationSystem<>(equationSystem, placement, FixedEquationSystem.Scope.ALL);
         this.matrixFactory = matrixFactory;
-        // for tests: the KLU parameters of the olf.klu.* system properties, when there are some
-        KluParameters.applySystemProperties();
     }
 
     /** The fixed view of the equation system the matrix is filled from. */
@@ -151,6 +148,10 @@ public class FixedJacobian<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         int[] columnStart = structure.getColumnStart();
         int[] rowIndices = structure.getRowIndices();
         matrix = matrixFactory.create(slotCount, slotCount, rowIndices.length);
+        if (matrix instanceof SparseMatrix sparseMatrix) {
+            // analysed once, factorized many times
+            sparseMatrix.setKluParameters(FixedJacobianKluParameters.create());
+        }
         int[] indices = new int[rowIndices.length];
         boolean inPatternOrder = matrix instanceof SparseMatrix;
         for (int slot = 0; slot < slotCount; slot++) {
