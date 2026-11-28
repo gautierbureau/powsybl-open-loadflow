@@ -19,6 +19,7 @@ import com.powsybl.openloadflow.equations.EquationTerm;
 import com.powsybl.openloadflow.equations.JacobianMatrix;
 import com.powsybl.openloadflow.lf.outerloop.DiscreteControllerChange;
 import com.powsybl.openloadflow.lf.outerloop.IncrementalContextData;
+import com.powsybl.openloadflow.lf.outerloop.IncrementalControlDecisions;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopResult;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
 import com.powsybl.openloadflow.lf.util.LfReports;
@@ -198,7 +199,7 @@ public class IncrementalShuntVoltageControlOuterLoop extends AbstractShuntVoltag
     private static boolean isOutOfDeadband(ShuntVoltageControl voltageControl) {
         double diffV = getDiffV(voltageControl);
         double halfTargetDeadband = getHalfTargetDeadband(voltageControl);
-        boolean outOfDeadband = Math.abs(diffV) > halfTargetDeadband;
+        boolean outOfDeadband = IncrementalControlDecisions.isOutOfDeadband(diffV, halfTargetDeadband);
         if (outOfDeadband) {
             List<LfShunt> controllers = voltageControl.getMergedControllerElements().stream()
                     .filter(shunt -> !shunt.isDisabled())
@@ -253,6 +254,7 @@ public class IncrementalShuntVoltageControlOuterLoop extends AbstractShuntVoltag
     }
 
     protected static double getHalfTargetDeadband(ShuntVoltageControl voltageControl) {
-        return voltageControl.getTargetDeadband().orElse(MIN_TARGET_DEADBAND_KV / voltageControl.getControlledBus().getNominalV()) / 2;
+        return IncrementalControlDecisions.halfVoltageTargetDeadband(voltageControl.getTargetDeadband().orElse(Double.NaN),
+                voltageControl.getControlledBus().getNominalV(), MIN_TARGET_DEADBAND_KV);
     }
 }
