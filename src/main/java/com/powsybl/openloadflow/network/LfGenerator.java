@@ -10,6 +10,7 @@ package com.powsybl.openloadflow.network;
 import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.openloadflow.network.impl.LfNetworkLoadingReport;
 
+import java.util.Optional;
 import java.util.OptionalDouble;
 
 /**
@@ -96,6 +97,20 @@ public interface LfGenerator extends PropertyBag, LfReferencePriorityInjection, 
     double getMinQ();
 
     double getMaxQ();
+
+    /**
+     * The points of the generator's reactive capability curve, as arrays (MW, MVar), when its reactive limits are a
+     * curve fixed once the network is built; empty otherwise. {@link #getMinQ()} and {@link #getMaxQ()} read them at
+     * the generator's active power, extrapolated when {@link #isExtrapolateReactiveLimits()}.
+     */
+    default Optional<ReactiveCapabilityCurvePoints> getReactiveCapabilityCurvePoints() {
+        return Optional.empty();
+    }
+
+    /** Whether the reactive limits of a curve are extrapolated beyond its first and last points. */
+    default boolean isExtrapolateReactiveLimits() {
+        return false;
+    }
 
     double getRangeQ(ReactiveRangeMode reactiveRangeMode);
 

@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.network.impl;
+package com.powsybl.openloadflow.network;
 
 import com.powsybl.iidm.network.ReactiveCapabilityCurve;
 import org.slf4j.Logger;
@@ -24,7 +24,7 @@ import java.util.Objects;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-final class ReactiveCapabilityCurvePoints {
+public final class ReactiveCapabilityCurvePoints {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ReactiveCapabilityCurvePoints.class);
 
@@ -52,7 +52,7 @@ final class ReactiveCapabilityCurvePoints {
         }
     }
 
-    static ReactiveCapabilityCurvePoints of(ReactiveCapabilityCurve curve) {
+    public static ReactiveCapabilityCurvePoints of(ReactiveCapabilityCurve curve) {
         return new ReactiveCapabilityCurvePoints(curve);
     }
 
@@ -63,11 +63,28 @@ final class ReactiveCapabilityCurvePoints {
         return p1 - p2 == 0 ? 0 : Double.compare(p1, p2);
     }
 
-    double getMinQ(double activePower, boolean extrapolate) {
+    /** The active power of each point (MW), increasing. Not to be modified. */
+    public double[] getP() {
+        return p;
+    }
+
+    /** The minimum reactive power of each point (MVar). Not to be modified. */
+    public double[] getMinQ() {
+        return minQ;
+    }
+
+    /** The maximum reactive power of each point (MVar). Not to be modified. */
+    public double[] getMaxQ() {
+        return maxQ;
+    }
+
+    /** The minimum reactive power (MVar) at an active power (MW). */
+    public double getMinQ(double activePower, boolean extrapolate) {
         return getLimit(activePower, extrapolate, false);
     }
 
-    double getMaxQ(double activePower, boolean extrapolate) {
+    /** The maximum reactive power (MVar) at an active power (MW). */
+    public double getMaxQ(double activePower, boolean extrapolate) {
         return getLimit(activePower, extrapolate, true);
     }
 

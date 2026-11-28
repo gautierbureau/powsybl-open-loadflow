@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.network.impl;
+package com.powsybl.openloadflow.network;
 
 import com.powsybl.iidm.network.Generator;
 import com.powsybl.iidm.network.Network;
@@ -111,5 +111,27 @@ class ReactiveCapabilityCurvePointsTest {
         Generator generator = network.getGenerator("GEN");
         double[][] points = {{-0.0, -100, 100}, {100, -50, 50}};
         assertSameLimits(curve(generator, points), List.of(0.0, -0.0, 50.0));
+    }
+
+    /** The points a generator holds are the curve's, as arrays, and its limits are read from them. */
+    @Test
+    void testGeneratorPoints() {
+        Network network = EurostagTutorialExample1Factory.create();
+        Generator generator = network.getGenerator("GEN");
+        double[][] points = {{0, -100, 100}, {200, -50, 60}};
+        curve(generator, points);
+        LfNetwork lfNetwork = com.powsybl.openloadflow.network.impl.Networks.load(network, new LfNetworkParameters()).getFirst();
+        LfGenerator lfGenerator = lfNetwork.getGeneratorById("GEN");
+        ReactiveCapabilityCurvePoints curvePoints = lfGenerator.getReactiveCapabilityCurvePoints().orElseThrow();
+        assertArrayEquals(new double[] {0, 200}, curvePoints.getP());
+        assertArrayEquals(new double[] {-100, -50}, curvePoints.getMinQ());
+        assertArrayEquals(new double[] {100, 60}, curvePoints.getMaxQ());
+        double activePower = lfGenerator.getTargetP();
+        assertEquals(curvePoints.getMinQ(activePower * com.powsybl.openloadflow.util.PerUnit.SB, lfGenerator.isExtrapolateReactiveLimits())
+                / com.powsybl.openloadflow.util.PerUnit.SB, lfGenerator.getMinQ());
+        // a generator with min max limits has no points
+        network.getGenerator("GEN").newMinMaxReactiveLimits().setMinQ(-10).setMaxQ(10).add();
+        LfNetwork minMax = com.powsybl.openloadflow.network.impl.Networks.load(network, new LfNetworkParameters()).getFirst();
+        assertTrue(minMax.getGeneratorById("GEN").getReactiveCapabilityCurvePoints().isEmpty());
     }
 }
