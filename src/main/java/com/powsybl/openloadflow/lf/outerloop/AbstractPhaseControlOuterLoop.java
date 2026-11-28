@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.network.LfNetwork;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -40,10 +41,38 @@ public abstract class AbstractPhaseControlOuterLoop<V extends Enum<V> & Quantity
         return TYPE;
     }
 
+    private static final String PHASE_CONTROLLER_BRANCHES_PROPERTY = AbstractPhaseControlOuterLoop.class.getName() + ".phaseControllerBranches";
+
+    /**
+     * The branches that are phase controllers, by number: a branch's phase control is set when the network is built,
+     * so they are gathered once per network instead of testing every branch at each check. Whether one is disabled or
+     * connected at both sides is read at each call.
+     */
+    static int[] getPhaseControllerBranchNums(LfNetwork network) {
+        Object gathered = network.getProperty(PHASE_CONTROLLER_BRANCHES_PROPERTY);
+        if (gathered == null) {
+            gathered = network.getBranches().stream()
+                    .filter(LfBranch::isPhaseController)
+                    .mapToInt(LfBranch::getNum)
+                    .toArray();
+            network.setProperty(PHASE_CONTROLLER_BRANCHES_PROPERTY, gathered);
+        }
+        return (int[]) gathered;
+    }
+
+    /** The phase controller branches that are enabled and connected at both sides, in the order of the branches. */
     protected static List<LfBranch> getControllerBranches(LfNetwork network) {
-        return network.getBranches().stream()
+        List<LfBranch> controllerBranches = new ArrayList<>();
+        for (int num : getPhaseControllerBranchNums(network)) {
+            LfBranch branch = network.getBranch(num);
+            if (!branch.isDisabled() && branch.isConnectedAtBothSides()) {
+                controllerBranches.add(branch);
+            }
+        }
+        assert controllerBranches.equals(network.getBranches().stream()
                 .filter(branch -> !branch.isDisabled() && branch.isPhaseController() && branch.isConnectedAtBothSides())
-                .collect(Collectors.toList());
+                .toList()) : "The phase controller branches gathered once are not those of the network";
+        return controllerBranches;
     }
 
     protected static void fixPhaseShifterNecessaryForConnectivity(LfNetwork network, List<LfBranch> controllerBranches) {
