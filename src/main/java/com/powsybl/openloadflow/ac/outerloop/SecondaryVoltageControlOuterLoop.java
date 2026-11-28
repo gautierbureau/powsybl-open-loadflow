@@ -21,7 +21,6 @@ import com.powsybl.openloadflow.lf.outerloop.OuterLoopResult;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
 import com.powsybl.openloadflow.network.*;
 import org.apache.commons.lang3.mutable.MutableDouble;
-import org.apache.commons.lang3.mutable.MutableInt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,21 +35,9 @@ public class SecondaryVoltageControlOuterLoop implements AcOuterLoop {
 
     public static final String NAME = "SecondaryVoltageControl";
 
-    private static final double DV_EPS = 1E-4; // 0.1 kV
-    private static final double DK_DIFF_MAX_EPS = 1E-3; // 1 MVar
-    private static final double K_SATURATION_EPS = 5E-2;
-    private static final double MAX_TARGET_VOLTAGE_STEP_KV = 2;
-
-    /**
-     * A zone error (pilot point voltage difference and controller buses k difference) has to decrease by at least this
-     * ratio from one adjustment to the next one to be considered as progressing.
-     */
-    private static final double MIN_PROGRESS_RATIO = 1E-2;
-
-    /**
-     * Number of consecutive adjustments without progress after which a zone is considered as stalled.
-     */
-    private static final int MAX_NO_PROGRESS_COUNT = 2;
+    private static final double DV_EPS = SecondaryVoltageControlDecisions.DV_EPS;
+    private static final double DK_DIFF_MAX_EPS = SecondaryVoltageControlDecisions.DK_DIFF_MAX_EPS;
+    private static final double MAX_TARGET_VOLTAGE_STEP_KV = SecondaryVoltageControlDecisions.MAX_TARGET_VOLTAGE_STEP_KV;
 
     private final double minPlausibleTargetVoltage;
 
@@ -67,30 +54,56 @@ public class SecondaryVoltageControlOuterLoop implements AcOuterLoop {
     }
 
     /**
-     * Error of a zone at the time of its last adjustment, used to detect zones that cannot be adjusted anymore (for
-     * instance because their controlled bus target voltages are clipped to the plausible voltage range, or because
-     * their controller buses reactive power cannot be aligned any better).
+     * The progress tracking of each zone, by its index in {@link LfNetwork#getSecondaryVoltageControls()}: the error of
+     * the zone at its last adjustment (pilot point voltage difference and controller buses k difference), the
+     * adjustments in a row without progress, and whether it was given up. It detects zones that cannot be adjusted
+     * anymore (for instance because their controlled bus target voltages are clipped to the plausible voltage range, or
+     * because their controller buses reactive power cannot be aligned any better).
      */
-    private record ZoneError(double pilotDvAbs, double dkDiffMax) {
-
-        boolean hasProgressedFrom(ZoneError previous) {
-            return pilotDvAbs < previous.pilotDvAbs * (1 - MIN_PROGRESS_RATIO)
-                    || dkDiffMax < previous.dkDiffMax * (1 - MIN_PROGRESS_RATIO);
-        }
-    }
-
     private static final class ContextData {
 
-        private final Map<String, ZoneError> lastZoneError = new HashMap<>();
+        private final Map<LfSecondaryVoltageControl, Integer> zoneIndex = new IdentityHashMap<>();
 
-        private final Map<String, MutableInt> noProgressCount = new HashMap<>();
+        private final boolean[] hasLastError;
 
-        private final Set<String> stalledZoneNames = new HashSet<>();
+        private final double[] lastPilotDvAbs;
+
+        private final double[] lastDkDiffMax;
+
+        private final int[] noProgressCount;
+
+        private final boolean[] stalled;
+
+        private ContextData(List<LfSecondaryVoltageControl> zones) {
+            for (int z = 0; z < zones.size(); z++) {
+                zoneIndex.put(zones.get(z), z);
+            }
+            hasLastError = new boolean[zones.size()];
+            lastPilotDvAbs = new double[zones.size()];
+            lastDkDiffMax = new double[zones.size()];
+            noProgressCount = new int[zones.size()];
+            stalled = new boolean[zones.size()];
+        }
+
+        private void resetProgress(int z) {
+            hasLastError[z] = false;
+            noProgressCount[z] = 0;
+        }
+
+        private List<String> getStalledZoneNames(List<LfSecondaryVoltageControl> zones) {
+            List<String> names = new ArrayList<>();
+            for (int z = 0; z < stalled.length; z++) {
+                if (stalled[z]) {
+                    names.add(zones.get(z).getZoneName());
+                }
+            }
+            return names;
+        }
     }
 
     @Override
     public void initialize(AcOuterLoopContext context) {
-        context.setData(new ContextData());
+        context.setData(new ContextData(context.getNetwork().getSecondaryVoltageControls()));
     }
 
     public static class SensitivityContext {
@@ -181,8 +194,7 @@ public class SecondaryVoltageControlOuterLoop implements AcOuterLoop {
     }
 
     private static double qToK(double q, LfBus controllerBus) {
-        return (2 * q - controllerBus.getMaxQ() - controllerBus.getMinQ())
-                / (controllerBus.getMaxQ() - controllerBus.getMinQ());
+        return SecondaryVoltageControlDecisions.qToK(q, controllerBus.getMinQ(), controllerBus.getMaxQ());
     }
 
     private static double calculateK(LfBus controllerBus) {
@@ -246,10 +258,8 @@ public class SecondaryVoltageControlOuterLoop implements AcOuterLoop {
 
     private static KStats calculateKStats(List<LfBus> controllerBuses) {
         double[] ks = controllerBuses.stream().mapToDouble(SecondaryVoltageControlOuterLoop::calculateK).toArray();
-        double dkDiffMax = Arrays.stream(ks).max().orElseThrow() - Arrays.stream(ks).min().orElseThrow();
-        double kAverage = Arrays.stream(ks).average().orElseThrow();
-        boolean allAtLimits = Arrays.stream(ks).allMatch(k -> k > 1) || Arrays.stream(ks).allMatch(k -> k < -1);
-        return new KStats(kAverage, dkDiffMax, allAtLimits);
+        return new KStats(SecondaryVoltageControlDecisions.kAverage(ks), SecondaryVoltageControlDecisions.dkDiffMax(ks),
+                SecondaryVoltageControlDecisions.allAtLimits(ks));
     }
 
     private static double calculatePilotPointDv(LfSecondaryVoltageControl secondaryVoltageControl) {
@@ -260,38 +270,21 @@ public class SecondaryVoltageControlOuterLoop implements AcOuterLoop {
      * A zone is stalled when its error did not decrease anymore during the last adjustments: adjusting it again would
      * just repeat the same ineffective target voltage change until max outer loop iteration is reached.
      */
-    private static boolean isStalled(ContextData contextData, String zoneName, ZoneError zoneError, double pilotNominalV) {
-        ZoneError previousZoneError = contextData.lastZoneError.put(zoneName, zoneError);
-        if (previousZoneError == null || zoneError.hasProgressedFrom(previousZoneError)) {
-            contextData.noProgressCount.remove(zoneName);
+    private static boolean isStalled(ContextData contextData, int z, String zoneName, double pilotDvAbs, double dkDiffMax, double pilotNominalV) {
+        int count = SecondaryVoltageControlDecisions.noProgressCountAfter(contextData.hasLastError[z], pilotDvAbs, dkDiffMax,
+                contextData.lastPilotDvAbs[z], contextData.lastDkDiffMax[z], contextData.noProgressCount[z]);
+        contextData.hasLastError[z] = true;
+        contextData.lastPilotDvAbs[z] = pilotDvAbs;
+        contextData.lastDkDiffMax[z] = dkDiffMax;
+        contextData.noProgressCount[z] = count;
+        if (!SecondaryVoltageControlDecisions.isStalled(count)) {
             return false;
         }
-        MutableInt count = contextData.noProgressCount.computeIfAbsent(zoneName, k -> new MutableInt());
-        count.increment();
-        if (count.intValue() < MAX_NO_PROGRESS_COUNT) {
-            return false;
-        }
-        contextData.stalledZoneNames.add(zoneName);
+        contextData.stalled[z] = true;
         LOGGER.warn("Secondary voltage control of zone '{}' is stalled after {} adjustments without progress (remaining pilot point dv is {} kV, " +
                 "controller buses dk diff max is {}): it cannot be adjusted any further and is now ignored",
-                zoneName, count.intValue(), zoneError.pilotDvAbs() * pilotNominalV, zoneError.dkDiffMax());
+                zoneName, count, pilotDvAbs * pilotNominalV, dkDiffMax);
         return true;
-    }
-
-    private static boolean shouldAdjustSecondaryVoltageControl(double pilotDv, KStats kStats) {
-        if (Math.abs(pilotDv) > DV_EPS) {
-            return pilotDv > 0 && kStats.kAverage() < 1 - K_SATURATION_EPS
-                    || pilotDv < 0 && kStats.kAverage() > -1 + K_SATURATION_EPS;
-        }
-        if (kStats.allAtLimits()) {
-            return false;
-        }
-        // Once the pilot target is reached, do not keep adjusting a globally saturated zone just to improve reactive
-        // power sharing.
-        if (kStats.kAverage() <= -1 + K_SATURATION_EPS || kStats.kAverage() >= 1 - K_SATURATION_EPS) {
-            return false;
-        }
-        return Math.abs(kStats.dkDiffMax()) > DK_DIFF_MAX_EPS;
     }
 
     private record TargetVoltageChange(DenseMatrix dv, int clippedTargetVoltageCount, double maxTargetVoltageStepKv) {
@@ -308,30 +301,19 @@ public class SecondaryVoltageControlOuterLoop implements AcOuterLoop {
         for (LfBus controlledBus : controlledBuses) {
             int i = controlledBusIndex.get(controlledBus.getNum());
             double dvValue = dv.get(i, 0);
-            double stepKv = dvValue * controlledBus.getNominalV();
-            double absStepKv = Math.abs(stepKv);
-            maxTargetVoltageStepKv = Math.max(maxTargetVoltageStepKv, absStepKv);
-            if (stepKv > MAX_TARGET_VOLTAGE_STEP_KV) {
-                clippedDv.set(i, 0, MAX_TARGET_VOLTAGE_STEP_KV / controlledBus.getNominalV());
+            double nominalV = controlledBus.getNominalV();
+            maxTargetVoltageStepKv = Math.max(maxTargetVoltageStepKv, Math.abs(dvValue * nominalV));
+            clippedDv.set(i, 0, SecondaryVoltageControlDecisions.clippedStep(dvValue, nominalV));
+            if (SecondaryVoltageControlDecisions.isStepClipped(dvValue, nominalV)) {
                 clippedTargetVoltageCount++;
-            } else if (stepKv < -MAX_TARGET_VOLTAGE_STEP_KV) {
-                clippedDv.set(i, 0, -MAX_TARGET_VOLTAGE_STEP_KV / controlledBus.getNominalV());
-                clippedTargetVoltageCount++;
-            } else {
-                clippedDv.set(i, 0, dvValue);
             }
         }
         return new TargetVoltageChange(clippedDv, clippedTargetVoltageCount, maxTargetVoltageStepKv);
     }
 
     private TargetVoltage clipTargetVoltageToPlausibleRange(double targetV) {
-        if (targetV < minPlausibleTargetVoltage) {
-            return new TargetVoltage(minPlausibleTargetVoltage, true);
-        }
-        if (targetV > maxPlausibleTargetVoltage) {
-            return new TargetVoltage(maxPlausibleTargetVoltage, true);
-        }
-        return new TargetVoltage(targetV, false);
+        return new TargetVoltage(SecondaryVoltageControlDecisions.clipToPlausibleRange(targetV, minPlausibleTargetVoltage, maxPlausibleTargetVoltage),
+                SecondaryVoltageControlDecisions.isOutOfPlausibleRange(targetV, minPlausibleTargetVoltage, maxPlausibleTargetVoltage));
     }
 
     private List<String> processSecondaryVoltageControl(List<LfSecondaryVoltageControl> secondaryVoltageControls,
@@ -341,27 +323,27 @@ public class SecondaryVoltageControlOuterLoop implements AcOuterLoop {
 
         for (LfSecondaryVoltageControl secondaryVoltageControl : secondaryVoltageControls) {
             String zoneName = secondaryVoltageControl.getZoneName();
-            if (contextData.stalledZoneNames.contains(zoneName)) {
+            int z = contextData.zoneIndex.get(secondaryVoltageControl);
+            if (contextData.stalled[z]) {
                 continue;
             }
             double pilotDv = calculatePilotPointDv(secondaryVoltageControl);
             List<LfBus> controllerBuses = secondaryVoltageControl.getControllerBuses();
             KStats kStats = calculateKStats(controllerBuses);
-            if (shouldAdjustSecondaryVoltageControl(pilotDv, kStats)) {
+            if (SecondaryVoltageControlDecisions.shouldAdjust(pilotDv, kStats.kAverage(), kStats.dkDiffMax(), kStats.allAtLimits())) {
                 var pilotBus = secondaryVoltageControl.getPilotBus();
                 if (LOGGER.isDebugEnabled()) {
                     int allControllerBusesCount = secondaryVoltageControl.getControllerBuses().size();
                     LOGGER.debug("Secondary voltage control of zone '{}': {}/{} controller buses available, pilot point dv is {} kV, controller buses dk diff max is {} (k average is {})",
                             zoneName, controllerBuses.size(), allControllerBusesCount, pilotDv * pilotBus.getNominalV(), kStats.dkDiffMax(), kStats.kAverage());
                 }
-                if (isStalled(contextData, zoneName, new ZoneError(Math.abs(pilotDv), kStats.dkDiffMax()), pilotBus.getNominalV())) {
+                if (isStalled(contextData, z, zoneName, Math.abs(pilotDv), kStats.dkDiffMax(), pilotBus.getNominalV())) {
                     continue;
                 }
                 adjustedZoneNames.add(zoneName);
             } else {
                 // zone does not need to be adjusted anymore, reset its progress tracking
-                contextData.lastZoneError.remove(zoneName);
-                contextData.noProgressCount.remove(zoneName);
+                contextData.resetProgress(z);
             }
         }
 
@@ -519,9 +501,10 @@ public class SecondaryVoltageControlOuterLoop implements AcOuterLoop {
         if (!reactivePowerNotAligned.isEmpty()) {
             LOGGER.info("Secondary voltage control zones with reactive power not aligned: {}", reactivePowerNotAligned);
         }
-        if (contextData != null && !contextData.stalledZoneNames.isEmpty()) {
+        List<String> stalledZoneNames = contextData != null ? contextData.getStalledZoneNames(secondaryVoltageControls) : List.of();
+        if (!stalledZoneNames.isEmpty()) {
             LOGGER.info("Secondary voltage control zones given up because they could not be adjusted any further: {}",
-                    contextData.stalledZoneNames);
+                    stalledZoneNames);
         }
     }
 
