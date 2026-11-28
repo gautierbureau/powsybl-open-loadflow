@@ -77,6 +77,14 @@ public class TransformerVoltageControlOuterLoop extends AbstractTransformerVolta
         return NAME;
     }
 
+    public boolean isUseInitialTapPosition() {
+        return useInitialTapPosition;
+    }
+
+    public double getMaxControlledNominalVoltageOverride() {
+        return maxControlledNominalVoltageOverride;
+    }
+
     @Override
     public OuterLoopResult check(AcOuterLoopContext context, ReportNode reportNode) {
 

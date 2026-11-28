@@ -115,7 +115,7 @@ public final class LfBatteryImpl extends AbstractLfGenerator {
     }
 
     @Override
-    protected Optional<ReactiveLimits> getReactiveLimits() {
+    public Optional<ReactiveLimits> getReactiveLimits() {
         return Optional.of(getBattery().getReactiveLimits());
     }
 

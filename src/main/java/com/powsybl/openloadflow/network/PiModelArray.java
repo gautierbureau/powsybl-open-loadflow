@@ -111,7 +111,7 @@ public class PiModelArray implements PiModel {
         return tapPositionIndex;
     }
 
-    List<PiModel> getModels() {
+    public List<PiModel> getModels() {
         return models;
     }
 

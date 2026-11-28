@@ -100,7 +100,8 @@ class LfNetworkCopyFieldGuardTest {
         expected.put(LfSecondaryVoltageControl.class, Set.of("controlUnits", "pilotBus", "targetValue", "zoneName"));
         expected.put(LfSecondaryVoltageControl.ControlUnit.class, Set.of("id", "participate", "generatorVoltageControl"));
         expected.put(LfShunt.Controller.class, Set.of("id", "sectionsB", "sectionBs", "sectionsG", "sectionGs", "position", "minPosition", "bMagnitude"));
-        expected.put(LfShuntImpl.class, Set.of("shuntCompensatorsRefs", "bus", "voltageControl", "voltageControlCapability", "voltageControlEnabled", "controllers", "b", "zb", "g"));
+        expected.put(LfShuntImpl.class, Set.of("shuntCompensatorsRefs", "bus", "voltageControl", "voltageControlCapability", "voltageControlEnabled", "controllers",
+                "initiallyDisconnectedCompensators", "b", "zb", "g"));
         expected.put(innerClass(LfShuntImpl.class, "ControllerImpl"), Set.of("shuntCompensatorRef"));
         expected.put(LfStandbyAutomatonShunt.class, Set.of("svc", "b"));
         expected.put(LfStarBus.class, Set.of("t3wtRef", "nominalV"));

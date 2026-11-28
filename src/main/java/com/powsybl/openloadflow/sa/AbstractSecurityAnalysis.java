@@ -164,6 +164,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         Actions.addAllRtcToOperate(topoConfig, actions);
         // try to find all shunts which section can change through actions.
         Actions.addAllShuntsToOperate(topoConfig, actions);
+        // and all shunts that terminals connection actions connect or disconnect.
+        Actions.addAllShuntsToConnectOrDisconnect(topoConfig, network, actions);
 
         // try to find branches (lines and two windings transformers).
         // tie lines and three windings transformers missing.
@@ -815,6 +817,23 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
     }
 
     /**
+     * Puts the network back in its base (pre-contingency) state after a contingency, before the next one is applied.
+     * The default restores the elements that changed since the last restore, which {@code modifiedElements} collected,
+     * and the voltage of every bus, which each simulation writes. An implementation that knows better what a
+     * contingency's simulation changed may restore less, provided the network ends up identical; it then resets
+     * {@code modifiedElements} itself ({@link ModifiedElementsCollector#reset()}).
+     *
+     * @param networkState the base state, saved once after the pre-contingency simulation
+     * @param network the network
+     * @param lfContingency the contingency just simulated
+     * @param modifiedElements what changed since the last restore
+     */
+    protected void restoreBaseState(NetworkState networkState, LfNetwork network, LfContingency lfContingency,
+                                    ModifiedElementsCollector modifiedElements) {
+        restoreBaseState(networkState, modifiedElements);
+    }
+
+    /**
      * Restores the base state after a contingency: the elements that changed since the last restore, and the voltage
      * of every bus, which each simulation writes. The rest of the network is as it was saved.
      */
@@ -891,6 +910,33 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         return plannedContingencies;
     }
 
+    /**
+     * Puts the network back in its post-contingency state after an operator strategy's simulation, before the next
+     * strategy of the same contingency. Overridable: a security analysis that knows what a strategy's simulation
+     * changed may restore only that.
+     */
+    protected void restorePostContingencyState(NetworkState postContingencyNetworkState, LfNetwork network,
+                                               LfContingency lfContingency) {
+        postContingencyNetworkState.restore();
+    }
+
+    /**
+     * The post-contingency result of a contingency without operator strategies, answered without changing the network,
+     * or empty to run the contingency as usual (apply, loss distribution, simulation, restore). A subclass that answers
+     * reports what the usual path would report on {@code reportNode}, and puts back whatever
+     * {@link PropagatedContingency#toLfContingency} changed in the network (the excluded slack buses of a relocated slack
+     * bus, which {@code networkState} holds); it reads the contingency's topology from its disabled network.
+     */
+    protected Optional<PostContingencyResult> resultWithoutNetwork(LfNetwork network, C context, PropagatedContingency propagatedContingency,
+                                                                   LfContingency lfContingency, NetworkState networkState,
+                                                                   LimitViolationManager preContingencyLimitViolationManager,
+                                                                   SecurityAnalysisParameters securityAnalysisParameters,
+                                                                   PreContingencyNetworkResult preContingencyNetworkResult,
+                                                                   boolean createResultExtension, List<LimitScaling> limitScalings,
+                                                                   ReportNode reportNode) {
+        return Optional.empty();
+    }
+
     private void processContingency(LfNetwork lfNetwork, SecurityAnalysisParameters securityAnalysisParameters,
                                     List<LimitScaling> limitScalings, ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution,
                                     ReportNode networkReportNode, PlannedContingency plannedContingency, P p, NetworkState networkState,
@@ -916,6 +962,18 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             postContSimReportNode = LfReports.createPostContingencySimulation(networkReportNode, lfContingency.getId());
         }
         lfNetwork.setReportNode(postContSimReportNode);
+
+        // A subclass may answer a contingency without operator strategies from a result it computed elsewhere, without
+        // changing the network: nothing is then applied, distributed, simulated or restored here
+        if (!operatorStrategiesByContingencyId.containsKey(lfContingency.getId())) {
+            Optional<PostContingencyResult> answered = resultWithoutNetwork(lfNetwork, context, propagatedContingency, lfContingency,
+                    networkState, preContingencyLimitViolationManager, securityAnalysisParameters, preContingencyNetworkResult,
+                    createResultExtension, limitScalings, postContSimReportNode);
+            if (answered.isPresent()) {
+                postContingencyResults.add(answered.get());
+                return;
+            }
+        }
 
         ContingencyLoadFlowParameters contingencyLoadFlowParameters = propagatedContingency.getContingency().getExtension(ContingencyLoadFlowParameters.class);
         if (contingencyLoadFlowParameters != null) {
@@ -995,7 +1053,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                         p.getNetworkParameters(), limitScalings)
                         .ifPresent(result -> {
                             operatorStrategyResults.add(result);
-                            postContingencyNetworkState.restore();
+                            restorePostContingencyState(postContingencyNetworkState, lfNetwork, lfContingency);
                         });
                     if (confinedConnectivity != null) {
                         confinedConnectivity.undoTemporaryChanges();
@@ -1008,7 +1066,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         }
         if (hasNextContingency) {
             // restore base state
-            restoreBaseState(networkState, modifiedElements);
+            restoreBaseState(networkState, lfNetwork, lfContingency, modifiedElements);
             if (contingencyLoadFlowParameters != null &&
                 Objects.equals(ContingencyLoadFlowParameters.Scope.CONTINGENCY_AND_OPERATOR_STRATEGY, contingencyLoadFlowParameters.getScope())) {
                 // reset parameters

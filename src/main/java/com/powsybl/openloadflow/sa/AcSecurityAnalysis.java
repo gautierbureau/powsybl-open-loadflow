@@ -158,7 +158,7 @@ public class AcSecurityAnalysis extends AbstractSecurityAnalysis<AcVariableType,
         if (!reusePivots) {
             context.forgetPivots();
         }
-        return new AcloadFlowEngine(context);
+        return context.getParameters().getSolverFactory().createLoadFlowEngine(context);
     }
 
     @Override

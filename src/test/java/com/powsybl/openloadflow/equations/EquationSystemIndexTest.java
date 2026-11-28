@@ -213,4 +213,38 @@ class EquationSystemIndexTest {
         assertEquals(List.of(x, y), equationSystem.getIndex().getSortedSingleEquationsToSolve());
         assertEquals(List.of(a, b, c), equationSystem.getIndex().getSortedVariablesToFind());
     }
+
+    @Test
+    void variablesOnly() {
+        LfNetwork network = Mockito.mock(LfNetwork.class);
+        EquationSystem<TestVariableType, TestEquationType> equationSystem = new EquationSystem<>(TestEquationType.class, network);
+        // x = a + b
+        // y = a + c
+        var a = equationSystem.getVariableSet().getVariable(0, TestVariableType.A);
+        var b = equationSystem.getVariableSet().getVariable(0, TestVariableType.B);
+        var c = equationSystem.getVariableSet().getVariable(0, TestVariableType.C);
+        var x = equationSystem.createEquation(0, TestEquationType.X)
+                .addTerm(a.createTerm())
+                .addTerm(b.createTerm());
+        var y = equationSystem.createEquation(0, TestEquationType.Y)
+                .addTerm(a.createTerm())
+                .addTerm(c.createTerm());
+        EquationSystemIndex<TestVariableType, TestEquationType> index = equationSystem.getIndex();
+
+        // the variables get their rows, the equations are left without a column
+        assertEquals(List.of(a, b, c), index.getSortedVariablesToFindOnly());
+        assertEquals(List.of(0, 1, 2), List.of(a.getRow(), b.getRow(), c.getRow()));
+        assertEquals(List.of(-1, -1), List.of(x.getColumn(), y.getColumn()));
+
+        // the next caller that needs the equations brings them up to date
+        assertEquals(List.of(x, y), index.getSortedSingleEquationsToSolve());
+        assertEquals(List.of(0, 1), List.of(x.getColumn(), y.getColumn()));
+
+        // a variable leaving the index is gone from the next variables-only update
+        y.setActive(false);
+        assertEquals(List.of(a, b), index.getSortedVariablesToFindOnly());
+        assertEquals(-1, c.getRow());
+        assertEquals(List.of(x), index.getSortedSingleEquationsToSolve());
+        assertEquals(List.of(a, b), index.getSortedVariablesToFind());
+    }
 }
