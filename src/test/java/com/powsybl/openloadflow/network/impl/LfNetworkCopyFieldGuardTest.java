@@ -99,7 +99,7 @@ class LfNetworkCopyFieldGuardTest {
         expected.put(LfOverloadManagementSystem.LfBranchTripping.class, Set.of("branchOpen", "threshold", "branchToOperate"));
         expected.put(LfSecondaryVoltageControl.class, Set.of("controlUnits", "pilotBus", "targetValue", "zoneName"));
         expected.put(LfSecondaryVoltageControl.ControlUnit.class, Set.of("id", "participate", "generatorVoltageControl"));
-        expected.put(LfShunt.Controller.class, Set.of("id", "sectionsB", "sectionsG", "position", "minPosition", "bMagnitude"));
+        expected.put(LfShunt.Controller.class, Set.of("id", "sectionsB", "sectionBs", "sectionsG", "position", "minPosition", "bMagnitude"));
         expected.put(LfShuntImpl.class, Set.of("shuntCompensatorsRefs", "bus", "voltageControl", "voltageControlCapability", "voltageControlEnabled", "controllers", "b", "zb", "g"));
         expected.put(innerClass(LfShuntImpl.class, "ControllerImpl"), Set.of("shuntCompensatorRef"));
         expected.put(LfStandbyAutomatonShunt.class, Set.of("svc", "b"));
@@ -112,7 +112,7 @@ class LfNetworkCopyFieldGuardTest {
         expected.put(LfTieLineBranch.class, Set.of("boundaryLine1Ref", "boundaryLine2Ref", "id"));
         expected.put(LfVscConverterStationImpl.class, Set.of("stationRef", "lossFactor", "hvdc", "hvdcDanglingInIidm"));
         expected.put(LfVoltageSourceConverterImpl.class, Set.of("converterRef", "isVoltageRegulatorOn", "targetQ", "targetVac", "droopBands"));
-        expected.put(PiModelArray.class, Set.of("models", "lowTapPosition", "tapPositionIndex", "a1", "r1", "continuousR1", "branch", "minR1", "maxR1"));
+        expected.put(PiModelArray.class, Set.of("models", "lowTapPosition", "tapPositionIndex", "a1", "r1", "continuousR1", "branch", "minR1", "maxR1", "tapR1s", "tapA1s"));
         expected.put(ReactivePowerControl.class, Set.of("controlledSide", "controlledBranch"));
         expected.put(ShuntVoltageControl.class, Set.of());
         expected.put(SimplePiModel.class, Set.of("r", "x", "g1", "b1", "g2", "b2", "r1", "a1"));

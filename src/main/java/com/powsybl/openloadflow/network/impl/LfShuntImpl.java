@@ -29,6 +29,11 @@ public class LfShuntImpl extends AbstractLfShunt {
             this.shuntCompensatorRef = shuntCompensatorRef;
         }
 
+        private ControllerImpl(ControllerImpl other) {
+            super(other.getId(), other, other.getPosition());
+            this.shuntCompensatorRef = other.shuntCompensatorRef;
+        }
+
         private Ref<ShuntCompensator> getShuntCompensatorRef() {
             return shuntCompensatorRef;
         }
@@ -114,9 +119,7 @@ public class LfShuntImpl extends AbstractLfShunt {
         this.b = other.b;
         this.g = other.g;
         for (Controller controller : other.controllers) {
-            ControllerImpl otherController = (ControllerImpl) controller;
-            controllers.add(new ControllerImpl(otherController.getShuntCompensatorRef(),
-                    otherController.getSectionsB(), otherController.getSectionsG(), otherController.getPosition(), otherController.getMinPosition()));
+            controllers.add(new ControllerImpl((ControllerImpl) controller));
         }
         this.disabled = other.disabled;
     }
