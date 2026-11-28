@@ -10,33 +10,35 @@ package com.powsybl.openloadflow.ac.outerloop;
 import java.util.Arrays;
 
 /**
- * What one check of {@link IncrementalTransformerVoltageControlOuterLoop} reads and decides, as arrays: the controlled
- * buses out of their deadband, in the order the check looks at them, and for each the controllers it adjusts (enabled,
- * not known as insensitive), in the order of the voltage control's controller elements. The loop fills the inputs from
- * the network, {@link TransformerVoltageControlDecisions} decides on the arrays alone, and the loop replays the moves.
+ * What one check of an incremental transformer control reads and decides, as arrays: the controlled elements out of
+ * their deadband, in the order the check looks at them (the buses of {@link
+ * IncrementalTransformerVoltageControlOuterLoop}, the branches of {@link
+ * IncrementalTransformerReactivePowerControlOuterLoop}), and for each the controllers it adjusts, in the order of the
+ * control's controller elements. The loop fills the inputs from the network, {@link TransformerControlDecisions}
+ * decides on the arrays alone, and the loop replays the moves.
  *
- * <p>The moves are the output, in the order they are decided: a controller of a bus with several controllers moves
+ * <p>The moves are the output, in the order they are decided: a controller of an element with several controllers moves
  * one tap at a time, and each move goes through the network's listeners as it did when the loop moved the taps itself.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class TransformerVoltageControlVector {
+public final class TransformerControlVector {
 
-    // ---- controlled buses ----
+    // ---- controlled elements ----
 
-    public int busCount;
-    public int[] busNum = new int[0];
-    /** Target voltage minus voltage (pu). */
-    public double[] diffV = new double[0];
+    public int controlledCount;
+    public int[] controlledNum = new int[0];
+    /** Target minus value of the controlled quantity (pu): voltage of a bus, reactive power of a branch. */
+    public double[] diff = new double[0];
     public double[] halfTargetDeadband = new double[0];
-    /** The controllers of bus {@code b} are {@code firstController[b]} to {@code firstController[b + 1] - 1}. */
+    /** The controllers of element {@code b} are {@code firstController[b]} to {@code firstController[b + 1] - 1}. */
     public int[] firstController = new int[1];
 
     // ---- controllers ----
 
     public int controllerCount;
     public int[] branchNum = new int[0];
-    /** Sensitivity of the controlled bus voltage to the controller's ratio. */
+    /** Sensitivity of the controlled quantity to the controller's ratio. */
     public double[] sensitivity = new double[0];
     /** The r1 of each tap of the controller, by tap index. */
     public double[][] tapR1s = new double[0][];
@@ -58,7 +60,7 @@ public final class TransformerVoltageControlVector {
     public double[] r1 = new double[0];
     /** The controller was found too insensitive to act. */
     public boolean[] insensitive = new boolean[0];
-    /** The controlled bus ends with all its controllers at a tap limit (for a single controller: moved to one). */
+    /** The controlled element ends with all its controllers at a tap limit (for a single controller: moved to one). */
     public boolean[] allControllersAtLimit = new boolean[0];
 
     public int moveCount;
@@ -66,14 +68,14 @@ public final class TransformerVoltageControlVector {
     public int[] moveController = new int[0];
     public int[] moveTapIndex = new int[0];
 
-    /** Starts a check of {@code newBusCount} buses and {@code newControllerCount} controllers. */
-    public void reset(int newBusCount, int newControllerCount) {
-        if (newBusCount > busNum.length) {
-            busNum = new int[newBusCount];
-            diffV = new double[newBusCount];
-            halfTargetDeadband = new double[newBusCount];
-            firstController = new int[newBusCount + 1];
-            allControllersAtLimit = new boolean[newBusCount];
+    /** Starts a check of {@code newControlledCount} controlled elements and {@code newControllerCount} controllers. */
+    public void reset(int newControlledCount, int newControllerCount) {
+        if (newControlledCount > controlledNum.length) {
+            controlledNum = new int[newControlledCount];
+            diff = new double[newControlledCount];
+            halfTargetDeadband = new double[newControlledCount];
+            firstController = new int[newControlledCount + 1];
+            allControllersAtLimit = new boolean[newControlledCount];
         }
         if (newControllerCount > branchNum.length) {
             branchNum = new int[newControllerCount];
@@ -89,9 +91,9 @@ public final class TransformerVoltageControlVector {
             r1 = new double[newControllerCount];
             insensitive = new boolean[newControllerCount];
         }
-        busCount = newBusCount;
+        controlledCount = newControlledCount;
         controllerCount = newControllerCount;
-        Arrays.fill(allControllersAtLimit, 0, newBusCount, false);
+        Arrays.fill(allControllersAtLimit, 0, newControlledCount, false);
         Arrays.fill(insensitive, 0, newControllerCount, false);
         moveCount = 0;
     }

@@ -178,8 +178,8 @@ public class IncrementalTransformerVoltageControlOuterLoop extends AbstractTrans
         List<DiscreteControllerChange> controllerBranchesAdjusted = new ArrayList<>();
         List<String> controlledBusesWithAllItsControllersToLimit = new ArrayList<>();
 
-        TransformerVoltageControlVector v = gather(controlledBusesOutOfDeadband, contextData, sensitivityContext);
-        TransformerVoltageControlDecisions.decide(v, maxTapShift, MIN_SENSI_FILTER);
+        TransformerControlVector v = gather(controlledBusesOutOfDeadband, contextData, sensitivityContext);
+        TransformerControlDecisions.decide(v, maxTapShift, MIN_SENSI_FILTER);
         apply(v, network, contextData, controllerBranchesAdjusted, controlledBusesWithAllItsControllersToLimit);
 
         if (!controllerBranchesAdjusted.isEmpty()) {
@@ -223,7 +223,7 @@ public class IncrementalTransformerVoltageControlOuterLoop extends AbstractTrans
      * insensitive, in the order of the voltage control's controller elements, with their sensitivity, their taps' r1,
      * their tap and their ratchet state.
      */
-    static TransformerVoltageControlVector gather(List<LfBus> controlledBusesOutOfDeadband, IncrementalContextData contextData,
+    static TransformerControlVector gather(List<LfBus> controlledBusesOutOfDeadband, IncrementalContextData contextData,
                                                   SensitivityContext sensitivityContext) {
         List<List<LfBranch>> controllersPerBus = new ArrayList<>(controlledBusesOutOfDeadband.size());
         int controllerCount = 0;
@@ -235,14 +235,14 @@ public class IncrementalTransformerVoltageControlOuterLoop extends AbstractTrans
             controllersPerBus.add(controllers);
             controllerCount += controllers.size();
         }
-        TransformerVoltageControlVector v = new TransformerVoltageControlVector();
+        TransformerControlVector v = new TransformerControlVector();
         v.reset(controlledBusesOutOfDeadband.size(), controllerCount);
         int c = 0;
-        for (int b = 0; b < v.busCount; b++) {
+        for (int b = 0; b < v.controlledCount; b++) {
             LfBus controlledBus = controlledBusesOutOfDeadband.get(b);
             TransformerVoltageControl voltageControl = controlledBus.getTransformerVoltageControl().orElseThrow();
-            v.busNum[b] = controlledBus.getNum();
-            v.diffV[b] = getDiffV(voltageControl);
+            v.controlledNum[b] = controlledBus.getNum();
+            v.diff[b] = getDiffV(voltageControl);
             v.halfTargetDeadband[b] = getHalfTargetDeadband(voltageControl);
             v.firstController[b] = c;
             for (LfBranch controllerBranch : controllersPerBus.get(b)) {
@@ -260,7 +260,7 @@ public class IncrementalTransformerVoltageControlOuterLoop extends AbstractTrans
                 c++;
             }
         }
-        v.firstController[v.busCount] = c;
+        v.firstController[v.controlledCount] = c;
         return v;
     }
 
@@ -275,15 +275,15 @@ public class IncrementalTransformerVoltageControlOuterLoop extends AbstractTrans
      * Replays the decided moves in their order, through the same tap moves and ratchet as before, marks the
      * insensitive controllers, and lists the changes and the buses whose controllers are all at a tap limit.
      */
-    private static void apply(TransformerVoltageControlVector v, LfNetwork network, IncrementalContextData contextData,
+    private static void apply(TransformerControlVector v, LfNetwork network, IncrementalContextData contextData,
                               List<DiscreteControllerChange> controllerBranchesAdjusted, List<String> controlledBusesWithAllItsControllersToLimit) {
         for (int m = 0; m < v.moveCount; m++) {
             LfBranch controllerBranch = network.getBranch(v.branchNum[v.moveController[m]]);
             getPiModelArray(controllerBranch).applyTapPositionIndex(v.moveTapIndex[m], true)
                     .ifPresent(contextData.getControllersContexts().get(controllerBranch.getId())::updateAllowedDirection);
         }
-        for (int b = 0; b < v.busCount; b++) {
-            LfBus controlledBus = network.getBus(v.busNum[b]);
+        for (int b = 0; b < v.controlledCount; b++) {
+            LfBus controlledBus = network.getBus(v.controlledNum[b]);
             boolean single = v.firstController[b + 1] - v.firstController[b] == 1;
             for (int c = v.firstController[b]; c < v.firstController[b + 1]; c++) {
                 LfBranch controllerBranch = network.getBranch(v.branchNum[c]);

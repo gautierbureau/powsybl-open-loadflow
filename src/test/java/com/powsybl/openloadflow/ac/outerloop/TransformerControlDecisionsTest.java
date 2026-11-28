@@ -19,14 +19,14 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-class TransformerVoltageControlDecisionsTest {
+class TransformerControlDecisionsTest {
 
     private static final double[] TAPS = {0.9, 0.925, 0.95, 0.975, 1.0, 1.025, 1.05};
 
-    private static TransformerVoltageControlVector vector(double diffV, double halfDeadband, double... sensitivities) {
-        TransformerVoltageControlVector v = new TransformerVoltageControlVector();
+    private static TransformerControlVector vector(double diffV, double halfDeadband, double... sensitivities) {
+        TransformerControlVector v = new TransformerControlVector();
         v.reset(1, sensitivities.length);
-        v.diffV[0] = diffV;
+        v.diff[0] = diffV;
         v.halfTargetDeadband[0] = halfDeadband;
         v.firstController[0] = 0;
         v.firstController[1] = sensitivities.length;
@@ -45,19 +45,19 @@ class TransformerVoltageControlDecisionsTest {
     @Test
     void singleController() {
         // 0.05 pu with a sensitivity of 1: two taps up at once, within the maximum shift
-        TransformerVoltageControlVector v = vector(0.05, 0.001, 1.0);
-        TransformerVoltageControlDecisions.decide(v, 3, 0.05);
+        TransformerControlVector v = vector(0.05, 0.001, 1.0);
+        TransformerControlDecisions.decide(v, 3, 0.05);
         assertEquals(5, v.tapIndex[0]);
         assertEquals(1, v.moveCount);
         assertFalse(v.allControllersAtLimit[0]);
         // bounded by the maximum shift, and at the last tap
         v = vector(0.5, 0.001, 1.0);
-        TransformerVoltageControlDecisions.decide(v, 3, 0.05);
+        TransformerControlDecisions.decide(v, 3, 0.05);
         assertEquals(6, v.tapIndex[0]);
         assertTrue(v.allControllersAtLimit[0]);
         // insensitive: nothing moves
         v = vector(0.05, 0.001, 0.01);
-        TransformerVoltageControlDecisions.decide(v, 3, 0.05);
+        TransformerControlDecisions.decide(v, 3, 0.05);
         assertTrue(v.insensitive[0]);
         assertEquals(0, v.moveCount);
     }
@@ -65,8 +65,8 @@ class TransformerVoltageControlDecisionsTest {
     @Test
     void severalControllersTakeTurns() {
         // 0.05 pu shared by two controllers of sensitivity 1: one tap each, in turn
-        TransformerVoltageControlVector v = vector(0.05, 0.001, 1.0, 1.0);
-        TransformerVoltageControlDecisions.decide(v, 3, 0.05);
+        TransformerControlVector v = vector(0.05, 0.001, 1.0, 1.0);
+        TransformerControlDecisions.decide(v, 3, 0.05);
         assertEquals(4, v.tapIndex[0]);
         assertEquals(4, v.tapIndex[1]);
         assertEquals(2, v.moveCount);

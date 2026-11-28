@@ -11,40 +11,44 @@ import com.powsybl.openloadflow.lf.outerloop.IncrementalControlDecisions;
 import com.powsybl.openloadflow.network.DiscretePositionDecisions;
 
 /**
- * The decisions of {@link IncrementalTransformerVoltageControlOuterLoop} on a {@link TransformerVoltageControlVector}:
- * which taps move to bring each controlled bus back into its deadband. A bus with one controller moves it at once to
- * the tap whose ratio is the closest to the one the sensitivity asks for, within the maximum tap shift. A bus with
- * several controllers moves them one tap at a time, in turn, while the remaining voltage difference is out of the
- * deadband and a controller can still move, so that the change is spread among them.
+ * The decisions of the incremental transformer controls on a {@link TransformerControlVector}: which taps move to
+ * bring each controlled element (a bus's voltage, a branch's reactive power) back into its deadband. An element with
+ * one controller moves it at once to the tap whose ratio is the closest to the one the sensitivity asks for, within the
+ * maximum tap shift. An element with several controllers moves them one tap at a time, in turn, while the remaining
+ * difference is out of the deadband and a controller can still move, so that the change is spread among them.
  *
  * <p>Nothing reads or writes a network; the ratchet and the tap choice are {@link IncrementalControlDecisions} and
  * {@link DiscretePositionDecisions}.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public final class TransformerVoltageControlDecisions {
+public final class TransformerControlDecisions {
 
-    private TransformerVoltageControlDecisions() {
+    private TransformerControlDecisions() {
     }
 
-    /** Every bus's decisions, bus after bus. */
-    public static void decide(TransformerVoltageControlVector v, int maxTapShift, double minSensitivity) {
+    /**
+     * Every controlled element's decisions, one after the other.
+     *
+     * @param minSensitivity below it a controller is insensitive and does not move; 0 to never stop on it
+     */
+    public static void decide(TransformerControlVector v, int maxTapShift, double minSensitivity) {
         for (int c = 0; c < v.controllerCount; c++) {
             v.tapIndex[c] = v.initialTapIndex[c];
             v.r1[c] = v.initialR1[c];
         }
-        for (int b = 0; b < v.busCount; b++) {
-            decideBus(v, b, maxTapShift, minSensitivity);
+        for (int b = 0; b < v.controlledCount; b++) {
+            decideControlled(v, b, maxTapShift, minSensitivity);
         }
     }
 
-    static void decideBus(TransformerVoltageControlVector v, int b, int maxTapShift, double minSensitivity) {
+    static void decideControlled(TransformerControlVector v, int b, int maxTapShift, double minSensitivity) {
         int first = v.firstController[b];
         int end = v.firstController[b + 1];
         if (end - first == 1) {
-            // only one transformer controls a bus
+            // only one transformer controls the element
             double sensitivity = v.sensitivity[first];
-            double deltaR1 = v.diffV[b] / sensitivity;
+            double deltaR1 = v.diff[b] / sensitivity;
             if (IncrementalControlDecisions.isInsensitive(sensitivity, minSensitivity)) {
                 v.insensitive[first] = true;
                 return;
@@ -56,7 +60,7 @@ public final class TransformerVoltageControlDecisions {
             // several transformers control the same bus, to give to chance to all controllers to adjust controlled bus
             // voltage and to help distributing tap changes among all controllers, we try to adjust voltage by allowing
             // one tap change at a time for each controller
-            double remainingDiffV = v.diffV[b];
+            double remainingDiffV = v.diff[b];
             boolean hasChanged = true;
             while (hasChanged) {
                 hasChanged = false;
@@ -86,7 +90,7 @@ public final class TransformerVoltageControlDecisions {
         }
     }
 
-    public static boolean isAtTapLimit(TransformerVoltageControlVector v, int c) {
+    public static boolean isAtTapLimit(TransformerControlVector v, int c) {
         return v.tapIndex[c] == 0 || v.tapIndex[c] == v.tapR1s[c].length - 1;
     }
 
@@ -96,7 +100,7 @@ public final class TransformerVoltageControlDecisions {
      *
      * @return whether the tap moved
      */
-    static boolean moveToClosestTap(TransformerVoltageControlVector v, int c, double newR1, int maxTapShift) {
+    static boolean moveToClosestTap(TransformerControlVector v, int c, double newR1, int maxTapShift) {
         double[] values = v.tapR1s[c];
         int index = v.tapIndex[c];
         int allowed = v.allowedDirection[c];
