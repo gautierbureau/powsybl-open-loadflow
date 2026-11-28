@@ -8,7 +8,6 @@
 package com.powsybl.openloadflow.network;
 
 import com.powsybl.openloadflow.util.Evaluable;
-import org.apache.commons.lang3.Range;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,9 +36,13 @@ public interface LfShunt extends LfElement, LfCopyable<LfShunt, LfBus> {
 
         private final double bMagnitude;
 
+        // the susceptance of each section, as an array: read once, the sections do not change
+        private final double[] sectionBs;
+
         public Controller(String id, List<Double> sectionsB, List<Double> sectionsG, int position, int minPosition) {
             this.id = Objects.requireNonNull(id);
             this.sectionsB = Objects.requireNonNull(sectionsB);
+            this.sectionBs = sectionsB.stream().mapToDouble(Double::doubleValue).toArray();
             this.sectionsG = Objects.requireNonNull(sectionsG);
             this.position = position;
             this.minPosition = minPosition;
@@ -54,6 +57,11 @@ public interface LfShunt extends LfElement, LfCopyable<LfShunt, LfBus> {
 
         public List<Double> getSectionsB() {
             return sectionsB;
+        }
+
+        /** The susceptance of each section, by position. Not to be modified. */
+        public double[] getSectionBs() {
+            return sectionBs;
         }
 
         public List<Double> getSectionsG() {
@@ -84,34 +92,18 @@ public interface LfShunt extends LfElement, LfCopyable<LfShunt, LfBus> {
             return bMagnitude;
         }
 
-        private Range<Integer> getAllowedPositionRange(AllowedDirection allowedDirection) {
-            return switch (allowedDirection) {
-                case INCREASE -> Range.of(position, sectionsB.size() - 1);
-                case DECREASE -> Range.of(minPosition, position);
-                case BOTH -> Range.of(minPosition, sectionsB.size() - 1);
-            };
-        }
-
         public Optional<Direction> updateSectionB(double deltaB, int maxSectionShift, AllowedDirection allowedDirection) {
             // an increase allowed direction means that the section could increase.
             // a decrease allowed direction means that the section could decrease.
             double newB = getB() + deltaB;
-            Range<Integer> positionRange = getAllowedPositionRange(allowedDirection);
+            int allowed = DiscretePositionDecisions.toCode(allowedDirection);
 
             int oldSection = position;
             // find section with the closest b value without exceeding the maximum of sections to switch.
-            double smallestDistance = Math.abs(deltaB);
-            for (int p = positionRange.getMinimum(); p <= positionRange.getMaximum(); p++) {
-                if (Math.abs(p - oldSection) > maxSectionShift) {
-                    // we are not allowed to go further than maxSectionShift sections
-                    continue;
-                }
-                double distance = Math.abs(newB - sectionsB.get(p));
-                if (distance < smallestDistance) {
-                    position = p;
-                    smallestDistance = distance;
-                }
-            }
+            position = DiscretePositionDecisions.closestPosition(sectionBs, oldSection,
+                    DiscretePositionDecisions.allowedFrom(allowed, oldSection, minPosition),
+                    DiscretePositionDecisions.allowedTo(allowed, oldSection, sectionBs.length),
+                    maxSectionShift, newB, Math.abs(deltaB));
 
             boolean hasChanged = position != oldSection;
             if (hasChanged) {
