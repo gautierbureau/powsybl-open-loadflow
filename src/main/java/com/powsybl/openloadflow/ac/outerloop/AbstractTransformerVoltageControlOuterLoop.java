@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.outerloop;
 
+import com.powsybl.openloadflow.lf.outerloop.IncrementalControlDecisions;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -50,6 +51,7 @@ public abstract class AbstractTransformerVoltageControlOuterLoop implements AcOu
     }
 
     protected static double getHalfTargetDeadband(TransformerVoltageControl voltageControl) {
-        return voltageControl.getTargetDeadband().orElse(MIN_TARGET_DEADBAND_KV / voltageControl.getControlledBus().getNominalV()) / 2;
+        return IncrementalControlDecisions.halfVoltageTargetDeadband(voltageControl.getTargetDeadband().orElse(Double.NaN),
+                voltageControl.getControlledBus().getNominalV(), MIN_TARGET_DEADBAND_KV);
     }
 }
