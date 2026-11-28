@@ -159,6 +159,8 @@ public abstract class AbstractIncrementalPhaseControlOuterLoop<V extends Enum<V>
         LfBranch controlledBranch = phaseControl.getControlledBranch();
         v.branchNum[k] = phaseControl.getControllerBranch().getNum();
         v.limiter[k] = false;
+        v.controlledBranchNum[k] = controlledBranch.getNum();
+        v.controlledSide[k] = phaseControl.getControlledSide() == TwoSides.ONE ? 1 : 2;
         v.value[k] = (phaseControl.getControlledSide() == TwoSides.ONE ? controlledBranch.getP1() : controlledBranch.getP2()).eval();
         v.target[k] = phaseControl.getTargetValue();
         v.halfTargetDeadband[k] = getHalfTargetDeadband(phaseControl);

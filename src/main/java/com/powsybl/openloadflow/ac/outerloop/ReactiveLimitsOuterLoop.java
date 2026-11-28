@@ -108,7 +108,8 @@ public class ReactiveLimitsOuterLoop implements AcOuterLoop {
         controllerBus.getMinMaxQ(minMaxQ);
         r.minQ[i] = minMaxQ[0];
         r.maxQ[i] = minMaxQ[1];
-        r.q[i] = controllerBus.getQ().eval() + controllerBus.getLoadTargetQ();
+        r.loadTargetQ[i] = controllerBus.getLoadTargetQ();
+        r.q[i] = controllerBus.getQ().eval() + r.loadTargetQ[i];
         r.v[i] = controllerBus.getV();
         GeneratorVoltageControl voltageControl = controllerBus.getGeneratorVoltageControl().orElse(null);
         r.remoteController[i] = voltageControl != null && voltageControl.getControlledBus() != controllerBus;

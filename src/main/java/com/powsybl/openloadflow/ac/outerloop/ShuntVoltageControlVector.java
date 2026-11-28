@@ -26,6 +26,8 @@ public final class ShuntVoltageControlVector {
     public int[] busNum = new int[0];
     /** Target voltage minus voltage (pu). */
     public double[] diffV = new double[0];
+    /** The bus's target voltage (pu). */
+    public double[] target = new double[0];
     public double[] halfTargetDeadband = new double[0];
     /** The shunts of bus {@code b} are {@code firstShunt[b]} to {@code firstShunt[b + 1] - 1}. */
     public int[] firstShunt = new int[1];
@@ -73,6 +75,7 @@ public final class ShuntVoltageControlVector {
             busNum = new int[newBusCount];
             diffV = new double[newBusCount];
             halfTargetDeadband = new double[newBusCount];
+            target = new double[newBusCount];
             firstShunt = new int[newBusCount + 1];
         }
         if (newShuntCount > shuntNum.length) {
