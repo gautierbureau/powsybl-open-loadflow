@@ -53,6 +53,20 @@ public class PiModelArray implements PiModel {
         tapA1s = this.models.stream().mapToDouble(PiModel::getA1).toArray();
     }
 
+    /** A copy over copies of the taps' models: the arrays of their r1 and a1, which do not change, are shared. */
+    private PiModelArray(PiModelArray other, List<PiModel> modelCopies) {
+        this.models = modelCopies;
+        this.lowTapPosition = other.lowTapPosition;
+        this.tapPositionIndex = other.tapPositionIndex;
+        this.minR1 = other.minR1;
+        this.maxR1 = other.maxR1;
+        this.tapR1s = other.tapR1s;
+        this.tapA1s = other.tapA1s;
+        this.a1 = other.a1;
+        this.r1 = other.r1;
+        this.continuousR1 = other.continuousR1;
+    }
+
     /** The r1 of each tap, by tap index (tap position minus the low tap position). Not to be modified. */
     public double[] getTapR1s() {
         return tapR1s;
@@ -366,12 +380,7 @@ public class PiModelArray implements PiModel {
 
     @Override
     public PiModelArray copy() {
-        List<PiModel> modelCopies = models.stream().map(PiModel::copy).collect(Collectors.toList());
-        PiModelArray c = new PiModelArray(modelCopies, lowTapPosition, lowTapPosition + tapPositionIndex);
-        c.a1 = a1;
-        c.r1 = r1;
-        c.continuousR1 = continuousR1;
-        return c;
+        return new PiModelArray(this, models.stream().map(PiModel::copy).collect(Collectors.toList()));
     }
 
 }
