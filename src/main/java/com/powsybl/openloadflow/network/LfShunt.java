@@ -46,9 +46,9 @@ public interface LfShunt extends LfElement, LfCopyable<LfShunt, LfBus> {
                     sectionsG.stream().mapToDouble(Double::doubleValue).toArray(), position, minPosition);
         }
 
-        /** A controller over the sections of another one: the array of their susceptances is shared. */
+        /** A controller over the sections of another one, with its own arrays of their susceptances and conductances. */
         protected Controller(String id, Controller sections, int position) {
-            this(id, sections.sectionsB, sections.sectionBs, sections.sectionsG, sections.sectionGs, position, sections.minPosition);
+            this(id, sections.sectionsB, sections.sectionBs.clone(), sections.sectionsG, sections.sectionGs.clone(), position, sections.minPosition);
         }
 
         private Controller(String id, List<Double> sectionsB, double[] sectionBs, List<Double> sectionsG, double[] sectionGs,

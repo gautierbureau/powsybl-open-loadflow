@@ -12,8 +12,6 @@ import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.iidm.network.extensions.SecondaryVoltageControlAdder;
 import com.powsybl.openloadflow.network.impl.Networks;
-import com.powsybl.openloadflow.test.networks.AutomationSystemNetworkFactory;
-import com.powsybl.openloadflow.test.networks.MultiAreaNetworkFactory;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
