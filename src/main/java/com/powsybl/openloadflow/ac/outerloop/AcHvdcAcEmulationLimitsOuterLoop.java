@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.lf.outerloop.AbstractHvdcAcEmulationLimitsOuterLoop;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopResult;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
+import com.powsybl.openloadflow.network.HvdcAcEmulationVector;
 import com.powsybl.openloadflow.network.LfHvdc;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,12 +32,12 @@ public class AcHvdcAcEmulationLimitsOuterLoop
     private static final Logger LOGGER = LoggerFactory.getLogger(AcHvdcAcEmulationLimitsOuterLoop.class);
 
     /** The HVDC lines in AC emulation, gathered once when the outer loop is initialized, in the order of the network. */
-    private record ContextData(LfHvdc[] acEmulationHvdcs) {
+    private record ContextData(HvdcAcEmulationVector acEmulationHvdcs) {
     }
 
     @Override
     public void initialize(AcOuterLoopContext context) {
-        context.setData(new ContextData(context.getNetwork().getHvdcs().stream().filter(LfHvdc::isAcEmulation).toArray(LfHvdc[]::new)));
+        context.setData(new ContextData(HvdcAcEmulationVector.of(context.getNetwork())));
     }
 
     /**
@@ -47,7 +48,9 @@ public class AcHvdcAcEmulationLimitsOuterLoop
     public OuterLoopResult check(AcOuterLoopContext context, ReportNode reportNode) {
         OuterLoopStatus status = OuterLoopStatus.STABLE;
 
-        for (LfHvdc hvdc : ((ContextData) context.getData()).acEmulationHvdcs()) {
+        HvdcAcEmulationVector hvdcs = ((ContextData) context.getData()).acEmulationHvdcs();
+        for (int i = 0; i < hvdcs.count; i++) {
+            LfHvdc hvdc = context.getNetwork().getHvdc(hvdcs.hvdcNum[i]);
             if (hvdc.getBus1().isDisabled() || hvdc.getBus2().isDisabled() || hvdc.isDisabled()) {
                 continue;
             }
