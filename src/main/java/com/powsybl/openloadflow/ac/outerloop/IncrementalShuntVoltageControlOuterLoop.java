@@ -30,9 +30,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.function.Predicate;
 
 /**
@@ -143,53 +141,6 @@ public class IncrementalShuntVoltageControlOuterLoop extends AbstractShuntVoltag
         }
     }
 
-    private void adjustB(ShuntVoltageControl voltageControl, List<LfShunt> sortedControllerShunts, LfBus controlledBus, IncrementalContextData contextData,
-                         SensitivityContext sensitivityContext, double diffV, List<DiscreteControllerChange> adjustedControllers) {
-        // several shunts could control the same bus
-        double remainingDiffV = diffV;
-        boolean hasChanged = true;
-        Map<LfShunt.Controller, Integer> sectionShiftPerController = new HashMap<>();
-        Map<LfShunt.Controller, Integer> initialSectionPerController = new HashMap<>();
-        while (hasChanged) {
-            hasChanged = false;
-            for (LfShunt controllerShunt : sortedControllerShunts) {
-                List<LfShunt.Controller> controllers = controllerShunt.getControllers();
-                if (!controllers.isEmpty()) {
-                    double sensitivity = sensitivityContext.calculateSensitivityFromBToV(controllerShunt, controlledBus);
-                    for (LfShunt.Controller controller : controllers) {
-                        var controllerContext = contextData.getControllersContexts().get(controller.getId());
-                        double halfTargetDeadband = getHalfTargetDeadband(voltageControl);
-                        if (Math.abs(remainingDiffV) > halfTargetDeadband) {
-                            initialSectionPerController.computeIfAbsent(controller, LfShunt.Controller::getPosition);
-                            int sectionShift = sectionShiftPerController.getOrDefault(controller, 0);
-                            if (sectionShift >= maxSectionShift) {
-                                // already changed by maximum allowed number of sections shift in this outerloop
-                                LOGGER.debug("Controller shunt '{}' is not in its deadband but will not be adjusted further because reached max section shift in this outerloop",
-                                    controllerShunt.getId());
-                                continue;
-                            }
-                            double previousB = controller.getB();
-                            double deltaB = remainingDiffV / sensitivity;
-                            Direction direction = controller.updateSectionB(deltaB, 1, controllerContext.getAllowedDirection()).orElse(null);
-                            if (direction != null) {
-                                sectionShiftPerController.put(controller, sectionShift + 1);
-                                controllerContext.updateAllowedDirection(direction);
-                                remainingDiffV -= (controller.getB() - previousB) * sensitivity;
-                                hasChanged = true;
-                            }
-                        } else {
-                            LOGGER.trace("Controller shunt '{}' is in its deadband: deadband {} vs voltage difference {}", controllerShunt.getId(),
-                                    halfTargetDeadband * controlledBus.getNominalV(), Math.abs(diffV) * controlledBus.getNominalV());
-                        }
-                    }
-                }
-            }
-        }
-        sectionShiftPerController.keySet().forEach(controller -> adjustedControllers.add(
-                DiscreteControllerChange.ofShunt(controller, initialSectionPerController.get(controller), controller.getPosition())));
-
-    }
-
     private static double getDiffV(ShuntVoltageControl voltageControl) {
         double targetV = voltageControl.getControlledBus().getHighestPriorityTargetV().orElseThrow();
         double v = voltageControl.getControlledBus().getV();
@@ -233,15 +184,9 @@ public class IncrementalShuntVoltageControlOuterLoop extends AbstractShuntVoltag
         SensitivityContext sensitivityContext = new SensitivityContext(network, controllerShuntsOutOfDeadband,
                 loadFlowContext.getEquationSystem(), loadFlowContext.getJacobianMatrix());
 
-        controlledBusesOutOfDeadband.forEach(controlledBus -> {
-            ShuntVoltageControl voltageControl = controlledBus.getShuntVoltageControl().orElseThrow();
-            double diffV = getDiffV(voltageControl);
-            List<LfShunt> sortedControllers = voltageControl.getMergedControllerElements().stream()
-                    .filter(shunt -> !shunt.isDisabled())
-                    .sorted(Comparator.comparingDouble(LfShunt::getBMagnitude).reversed())
-                    .toList();
-            adjustB(voltageControl, sortedControllers, controlledBus, contextData, sensitivityContext, diffV, adjustedControllers);
-        });
+        ShuntVoltageControlVector v = gather(controlledBusesOutOfDeadband, contextData, sensitivityContext);
+        ShuntVoltageControlDecisions.decide(v, maxSectionShift);
+        apply(v, network, contextData, adjustedControllers);
 
         if (!adjustedControllers.isEmpty()) {
             status.setValue(OuterLoopStatus.UNSTABLE);
@@ -251,6 +196,107 @@ public class IncrementalShuntVoltageControlOuterLoop extends AbstractShuntVoltag
         }
 
         return new OuterLoopResult(this, status.get());
+    }
+
+    /**
+     * The controlled buses out of their deadband and, for each, its enabled controller shunts by decreasing
+     * susceptance magnitude with their sensitivity, and their section controllers with their sections, their section
+     * and their ratchet state.
+     */
+    static ShuntVoltageControlVector gather(List<LfBus> controlledBusesOutOfDeadband, IncrementalContextData contextData,
+                                            SensitivityContext sensitivityContext) {
+        List<List<LfShunt>> shuntsPerBus = new ArrayList<>(controlledBusesOutOfDeadband.size());
+        int shuntCount = 0;
+        int controllerCount = 0;
+        for (LfBus controlledBus : controlledBusesOutOfDeadband) {
+            List<LfShunt> sortedControllers = controlledBus.getShuntVoltageControl().orElseThrow().getMergedControllerElements().stream()
+                    .filter(shunt -> !shunt.isDisabled())
+                    .sorted(Comparator.comparingDouble(LfShunt::getBMagnitude).reversed())
+                    .toList();
+            shuntsPerBus.add(sortedControllers);
+            shuntCount += sortedControllers.size();
+            for (LfShunt shunt : sortedControllers) {
+                controllerCount += shunt.getControllers().size();
+            }
+        }
+        ShuntVoltageControlVector v = new ShuntVoltageControlVector();
+        v.reset(controlledBusesOutOfDeadband.size(), shuntCount, controllerCount);
+        int s = 0;
+        int k = 0;
+        for (int b = 0; b < v.busCount; b++) {
+            LfBus controlledBus = controlledBusesOutOfDeadband.get(b);
+            ShuntVoltageControl voltageControl = controlledBus.getShuntVoltageControl().orElseThrow();
+            v.busNum[b] = controlledBus.getNum();
+            v.diffV[b] = getDiffV(voltageControl);
+            v.halfTargetDeadband[b] = getHalfTargetDeadband(voltageControl);
+            v.firstShunt[b] = s;
+            for (LfShunt shunt : shuntsPerBus.get(b)) {
+                v.shuntNum[s] = shunt.getNum();
+                v.firstController[s] = k;
+                List<LfShunt.Controller> controllers = shunt.getControllers();
+                v.sensitivity[s] = controllers.isEmpty() ? Double.NaN : sensitivityContext.calculateSensitivityFromBToV(shunt, controlledBus);
+                for (int i = 0; i < controllers.size(); i++) {
+                    LfShunt.Controller controller = controllers.get(i);
+                    IncrementalContextData.ControllerContext controllerContext = contextData.getControllersContexts().get(controller.getId());
+                    v.indexInShunt[k] = i;
+                    v.sectionBs[k] = controller.getSectionBs();
+                    v.minPosition[k] = controller.getMinPosition();
+                    v.initialPosition[k] = controller.getPosition();
+                    v.maxDirectionChange[k] = controllerContext.getMaxDirectionChange();
+                    v.directionChangeCount[k] = controllerContext.getDirectionChangeCount();
+                    v.currentDirection[k] = controllerContext.getCurrentDirectionCode();
+                    v.allowedDirection[k] = controllerContext.getAllowedDirectionCode();
+                    k++;
+                }
+                s++;
+            }
+        }
+        v.firstShunt[v.busCount] = s;
+        v.firstController[v.shuntCount] = k;
+        return v;
+    }
+
+    /** The shunt each section controller belongs to. */
+    private static int[] shuntOfController(ShuntVoltageControlVector v) {
+        int[] shuntOf = new int[v.controllerCount];
+        for (int s = 0; s < v.shuntCount; s++) {
+            for (int k = v.firstController[s]; k < v.firstController[s + 1]; k++) {
+                shuntOf[k] = s;
+            }
+        }
+        return shuntOf;
+    }
+
+    /**
+     * Replays the decided moves in their order, through the same section changes (the shunt's susceptance and
+     * conductance summed again, its listeners told) and ratchet as before, then lists a change per controller that
+     * moved.
+     */
+    private static void apply(ShuntVoltageControlVector v, LfNetwork network, IncrementalContextData contextData,
+                              List<DiscreteControllerChange> adjustedControllers) {
+        int[] shuntOf = shuntOfController(v);
+        for (int m = 0; m < v.moveCount; m++) {
+            int k = v.moveController[m];
+            LfShunt.Controller controller = network.getShunt(v.shuntNum[shuntOf[k]]).getControllers().get(v.indexInShunt[k]);
+            int oldSection = controller.getPosition();
+            int newSection = v.movePosition[m];
+            controller.updateSectionB(newSection);
+            LOGGER.debug("Controller '{}' change section from {} to {}", controller.getId(), oldSection, newSection);
+            contextData.getControllersContexts().get(controller.getId())
+                    .updateAllowedDirection(newSection - oldSection > 0 ? Direction.INCREASE : Direction.DECREASE);
+        }
+        for (int k = 0; k < v.controllerCount; k++) {
+            LfShunt.Controller controller = network.getShunt(v.shuntNum[shuntOf[k]]).getControllers().get(v.indexInShunt[k]);
+            IncrementalContextData.ControllerContext controllerContext = contextData.getControllersContexts().get(controller.getId());
+            assert controllerContext.getAllowedDirectionCode() == v.allowedDirection[k]
+                    && controllerContext.getDirectionChangeCount() == v.directionChangeCount[k]
+                    && controllerContext.getCurrentDirectionCode() == v.currentDirection[k]
+                    && controller.getPosition() == v.position[k]
+                    : "Shunt controller '" + controller.getId() + "' differs from its decided state";
+            if (v.sectionShift[k] > 0) {
+                adjustedControllers.add(DiscreteControllerChange.ofShunt(controller, v.initialPosition[k], controller.getPosition()));
+            }
+        }
     }
 
     protected static double getHalfTargetDeadband(ShuntVoltageControl voltageControl) {
