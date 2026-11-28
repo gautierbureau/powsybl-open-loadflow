@@ -47,57 +47,23 @@ public class MonitoringVoltageOuterLoop implements AcOuterLoop {
         MAX
     }
 
-    private static final class PqToPvBus {
-
-        private final LfBus controllerBus;
-
-        private final VoltageLimitDirection voltageLimitDirection;
-
-        private PqToPvBus(LfBus controllerBus, VoltageLimitDirection voltageLimitDirection) {
-            this.controllerBus = controllerBus;
-            this.voltageLimitDirection = voltageLimitDirection;
-        }
-    }
-
-    private static void switchPqPv(List<PqToPvBus> pqToPvBuses, ReportNode reportNode) {
-        for (PqToPvBus pqToPvBus : pqToPvBuses) {
-            LfBus controllerBus = pqToPvBus.controllerBus;
-
-            controllerBus.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(true);
-            double newTargetV;
-            if (pqToPvBus.voltageLimitDirection == VoltageLimitDirection.MAX
-                    || pqToPvBus.voltageLimitDirection == VoltageLimitDirection.MIN) {
-                newTargetV = getSvcTargetV(controllerBus, pqToPvBus.voltageLimitDirection);
-                controllerBus.getGeneratorVoltageControl().ifPresent(vc -> vc.setTargetValue(newTargetV));
-                LfReports.reportStandByAutomatonActivation(reportNode, controllerBus.getId(), newTargetV);
-                if (LOGGER.isTraceEnabled()) {
-                    if (pqToPvBus.voltageLimitDirection == VoltageLimitDirection.MAX) {
-                        LOGGER.trace("Switch bus '{}' PQ -> PV with high targetV={}", controllerBus.getId(), newTargetV);
-                    } else {
-                        LOGGER.trace("Switch bus '{}' PQ -> PV with low targetV={}", controllerBus.getId(), newTargetV);
-                    }
-                }
+    /** Switches the bus PQ to PV, at the automaton's target in the given direction. */
+    private static void switchPqPv(LfBus controllerBus, VoltageLimitDirection voltageLimitDirection, ReportNode reportNode) {
+        controllerBus.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(true);
+        double newTargetV = getSvcTargetV(controllerBus, voltageLimitDirection);
+        controllerBus.getGeneratorVoltageControl().ifPresent(vc -> vc.setTargetValue(newTargetV));
+        LfReports.reportStandByAutomatonActivation(reportNode, controllerBus.getId(), newTargetV);
+        if (LOGGER.isTraceEnabled()) {
+            if (voltageLimitDirection == VoltageLimitDirection.MAX) {
+                LOGGER.trace("Switch bus '{}' PQ -> PV with high targetV={}", controllerBus.getId(), newTargetV);
+            } else {
+                LOGGER.trace("Switch bus '{}' PQ -> PV with low targetV={}", controllerBus.getId(), newTargetV);
             }
         }
     }
 
     private static double getBusV(LfBus bus) {
         return bus.getGeneratorVoltageControl().map(vc -> vc.getControlledBus().getV()).orElse(Double.NaN);
-    }
-
-    /**
-     * A PQ bus with a static var compensator monitoring voltage can be switched to PV in 2 cases:
-     *  - if the voltage of the controlled bus is higher than the high voltage threshold.
-     *  - if the voltage of the controlled bus is lower that the low voltage threshold.
-     */
-    private static void checkPqBusForVoltageLimits(LfBus controllerCapableBus, List<PqToPvBus> pqToPvBuses, Range<Double> voltageLimit) {
-        double busV = getBusV(controllerCapableBus);
-        if (busV > voltageLimit.getMaximum()) {
-            pqToPvBuses.add(new PqToPvBus(controllerCapableBus, VoltageLimitDirection.MAX));
-        }
-        if (busV < voltageLimit.getMinimum()) {
-            pqToPvBuses.add(new PqToPvBus(controllerCapableBus, VoltageLimitDirection.MIN));
-        }
     }
 
     private static Optional<LfStaticVarCompensator> findMonitoringSvc(LfBus bus) {
@@ -156,26 +122,56 @@ public class MonitoringVoltageOuterLoop implements AcOuterLoop {
         return gathered instanceof boolean[] monitored ? monitored : null;
     }
 
+    /**
+     * Gathers the buses that can switch, decides on the arrays alone, then applies. A PQ bus with a static var
+     * compensator monitoring voltage is switched to PV when the voltage of the controlled bus is above the high
+     * threshold or below the low threshold ({@link MonitoringVoltageDecisions}); every bus is read before any switch.
+     */
     @Override
     public OuterLoopResult check(AcOuterLoopContext context, ReportNode reportNode) {
-        OuterLoopStatus status = OuterLoopStatus.STABLE;
-
-        List<PqToPvBus> pqToPvBuses = new ArrayList<>();
-        boolean[] monitoredBuses = getMonitoredBuses(context.getNetwork());
-        if (monitoredBuses != null) {
-            for (LfBus bus : getMonitoredControllerBuses(context.getNetwork(), monitoredBuses)) {
-                if (!bus.isGeneratorVoltageControlEnabled()) {
-                    getControlledBusVoltageLimits(bus).ifPresent(voltageLimits -> checkPqBusForVoltageLimits(bus, pqToPvBuses, voltageLimits));
-                }
+        LfNetwork network = context.getNetwork();
+        MonitoringVoltageVector m = gather(network);
+        MonitoringVoltageDecisions.decideEntries(m);
+        for (int i = 0; i < m.count; i++) {
+            int decision = m.decision[i];
+            LfBus bus = network.getBus(m.busNum[i]);
+            if (MonitoringVoltageDecisions.switchesAtHigh(decision)) {
+                switchPqPv(bus, VoltageLimitDirection.MAX, reportNode);
+            }
+            if (MonitoringVoltageDecisions.switchesAtLow(decision)) {
+                switchPqPv(bus, VoltageLimitDirection.MIN, reportNode);
             }
         }
+        return new OuterLoopResult(this, MonitoringVoltageDecisions.changesNetwork(m) ? OuterLoopStatus.UNSTABLE : OuterLoopStatus.STABLE);
+    }
 
-        if (!pqToPvBuses.isEmpty()) {
-            switchPqPv(pqToPvBuses, reportNode);
-            status = OuterLoopStatus.UNSTABLE;
+    /** The buses the check looks at: monitored controller buses with their voltage control off and a stand-by automaton. */
+    static MonitoringVoltageVector gather(LfNetwork network) {
+        MonitoringVoltageVector m = new MonitoringVoltageVector();
+        boolean[] monitoredBuses = getMonitoredBuses(network);
+        if (monitoredBuses == null) {
+            m.reset(0);
+            return m;
         }
-
-        return new OuterLoopResult(this, status);
+        List<LfBus> buses = new ArrayList<>(2);
+        List<Range<Double>> limits = new ArrayList<>(2);
+        for (LfBus bus : getMonitoredControllerBuses(network, monitoredBuses)) {
+            if (!bus.isGeneratorVoltageControlEnabled()) {
+                getControlledBusVoltageLimits(bus).ifPresent(voltageLimits -> {
+                    buses.add(bus);
+                    limits.add(voltageLimits);
+                });
+            }
+        }
+        m.reset(buses.size());
+        for (int i = 0; i < m.count; i++) {
+            LfBus bus = buses.get(i);
+            m.busNum[i] = bus.getNum();
+            m.controlledV[i] = getBusV(bus);
+            m.lowThreshold[i] = limits.get(i).getMinimum();
+            m.highThreshold[i] = limits.get(i).getMaximum();
+        }
+        return m;
     }
 
     /** Needed when a monitored bus that holds its own voltage is a controller element of the generator voltage controls, with voltage limits. */
