@@ -32,7 +32,11 @@ public final class KluParameters extends AbstractMathNative {
     public enum Ordering {
         AMD,
         COLAMD,
-        /** Tinney's scheme 3: the elimination that adds the fewest edges first. */
+        /**
+         * Tinney's scheme 3, the elimination that adds the fewest edges first, or AMD, the one whose factorization has
+         * the fewer operations (AMD without trying the minimum fill when a row is dense). Some 30 times longer to
+         * compute than AMD: for a pattern factorized many times.
+         */
         MINIMUM_FILL
     }
 
@@ -56,7 +60,7 @@ public final class KluParameters extends AbstractMathNative {
     private boolean btf = true;
     private int scale = 2;
     private double tol = 0.001;
-    private Check check = Check.RGROWTH;
+    private Check check = Check.RCOND;
     private double rcondThreshold = 1e-12;
 
     private static native void setDefaults(int ordering, boolean btf, int scale, double tol, int check, double rcondThreshold);

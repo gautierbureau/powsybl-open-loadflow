@@ -57,7 +57,7 @@ class KluParametersTest {
                 Arguments.of(new KluParameters().setBtf(false)),
                 Arguments.of(new KluParameters().setScale(0)),
                 Arguments.of(new KluParameters().setScale(-1)),
-                Arguments.of(new KluParameters().setCheck(KluParameters.Check.RCOND)),
+                Arguments.of(new KluParameters().setCheck(KluParameters.Check.RGROWTH)),
                 Arguments.of(new KluParameters().setCheck(KluParameters.Check.NONE)),
                 Arguments.of(new KluParameters().setOrdering(KluParameters.Ordering.MINIMUM_FILL).setBtf(false).setScale(0)
                         .setCheck(KluParameters.Check.RCOND)));
@@ -83,12 +83,12 @@ class KluParametersTest {
             }
         }
         System.setProperty("olf.klu.ordering", "minimum_fill");
-        System.setProperty("olf.klu.check", "rcond");
+        System.setProperty("olf.klu.check", "rgrowth");
         System.setProperty("olf.klu.scale", "0");
         try {
             KluParameters parameters = KluParameters.fromSystemProperties();
             assertEquals(KluParameters.Ordering.MINIMUM_FILL, parameters.getOrdering());
-            assertEquals(KluParameters.Check.RCOND, parameters.getCheck());
+            assertEquals(KluParameters.Check.RGROWTH, parameters.getCheck());
             assertEquals(0, parameters.getScale());
             assertTrue(parameters.isBtf());
         } finally {
