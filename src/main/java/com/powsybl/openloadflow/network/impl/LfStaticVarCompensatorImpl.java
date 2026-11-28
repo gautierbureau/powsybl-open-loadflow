@@ -224,6 +224,11 @@ public final class LfStaticVarCompensatorImpl extends AbstractLfGenerator implem
     }
 
     @Override
+    protected boolean hasFixedReactiveLimits() {
+        return false; // they follow the voltage of the bus
+    }
+
+    @Override
     public void updateState(LfNetworkStateUpdateParameters parameters) {
         double vSquare = bus.getV() * bus.getV() * nominalV * nominalV;
         double q = (Double.isNaN(calculatedQ) ? -targetQ : -calculatedQ) * PerUnit.SB;

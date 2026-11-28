@@ -20,9 +20,7 @@ import com.powsybl.security.results.ChangedPhaseTapChanger;
 import com.powsybl.security.results.ThreeWindingsTransformerResult;
 
 import java.util.*;
-import java.util.function.Function;
 import java.util.function.Predicate;
-import java.util.stream.Collectors;
 
 /**
  * @author Geoffroy Jamgotchian {@literal <geoffroy.jamgotchian at rte-france.com>}
@@ -144,17 +142,17 @@ public class PostContingencyNetworkResult extends AbstractNetworkResult {
     @Override
     protected void storeInitialPhaseTapChangerInfo() {
         var preContingencyChangedTaps = preContingencyNetworkResult.getChangedPhaseTapChangers();
-        phaseTapChangerInfos = network.getBranches().stream()
-                .filter(b -> !b.isDisabled())
-                .filter(LfBranch::hasPhaseControllerCapability)
-                .collect(Collectors.toMap(
-                        Function.identity(),
-                        b -> {
-                            // Finding if phase tap has been changed in previous pre contingency state
-                            ChangedPhaseTapChanger changedPhaseTapChanger = preContingencyChangedTaps.getOrDefault(b, null);
-                            // Creating initial info with either network initial tap, or pre contingency tap if it has been changed
-                            return changedPhaseTapChanger != null ? changedPhaseTapChanger.finalTap() : b.getPhaseTapChanger().orElseThrow().getTapPosition();
-                        }));
+        // at each contingency and each strategy: the few branches that can control a phase, kept by the pre-contingency result
+        Map<LfBranch, Integer> infos = new HashMap<>();
+        for (LfBranch b : preContingencyNetworkResult.getPhaseControllerBranches()) {
+            if (!b.isDisabled()) {
+                // Finding if phase tap has been changed in previous pre contingency state
+                ChangedPhaseTapChanger changedPhaseTapChanger = preContingencyChangedTaps.getOrDefault(b, null);
+                // Creating initial info with either network initial tap, or pre contingency tap if it has been changed
+                infos.put(b, changedPhaseTapChanger != null ? changedPhaseTapChanger.finalTap() : b.getPhaseTapChanger().orElseThrow().getTapPosition());
+            }
+        }
+        phaseTapChangerInfos = infos;
     }
 
     public void update(Predicate<LfBranch> isBranchDisabled) {

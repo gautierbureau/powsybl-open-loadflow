@@ -83,6 +83,33 @@ public final class ActivePowerDistribution {
         List<ParticipatingElement> getParticipatingElements(Collection<LfBus> participatingBuses, double mismatch);
 
         double run(List<ParticipatingElement> participatingElements, int iteration, double remainingMismatch);
+
+        /**
+         * Distributes an active power mismatch over the participating buses: resets the participating elements to their
+         * initial target, then distributes the mismatch and what the reset undid, iteration after iteration, until it
+         * is below {@link #P_RESIDUE_EPS} or no element can take more.
+         */
+        default Result distribute(LfGenerator referenceGenerator, Collection<LfBus> participatingBuses, double activePowerMismatch) {
+            PreviousStateInfo previousStateInfo = resetToInitialState(participatingBuses, referenceGenerator);
+            double remainingMismatch = activePowerMismatch + previousStateInfo.previousMismatch();
+            List<ParticipatingElement> participatingElements = getParticipatingElements(participatingBuses, remainingMismatch);
+
+            int iteration = 0;
+
+            while (!participatingElements.isEmpty()
+                    && Math.abs(remainingMismatch) > P_RESIDUE_EPS) {
+
+                if (ParticipatingElement.participationFactorNorm(participatingElements) > 0.0) {
+                    double done = run(participatingElements, iteration, remainingMismatch);
+                    remainingMismatch -= done;
+                } else {
+                    break;
+                }
+                iteration++;
+            }
+
+            return new Result(iteration, remainingMismatch, previousStateInfo.moved());
+        }
     }
 
     public record Result(int iteration, double remainingMismatch, boolean movedBuses) { }
@@ -118,26 +145,29 @@ public final class ActivePowerDistribution {
     }
 
     public Result run(LfGenerator referenceGenerator, Collection<LfBus> buses, double activePowerMismatch) {
-        var participatingBuses = filterParticipatingBuses(buses);
-        PreviousStateInfo previousStateInfo = step.resetToInitialState(participatingBuses, referenceGenerator);
-        double remainingMismatch = activePowerMismatch + previousStateInfo.previousMismatch();
-        List<ParticipatingElement> participatingElements = step.getParticipatingElements(participatingBuses, remainingMismatch);
+        return step.distribute(referenceGenerator, filterParticipatingBuses(buses), activePowerMismatch);
+    }
 
-        int iteration = 0;
-
-        while (!participatingElements.isEmpty()
-                && Math.abs(remainingMismatch) > P_RESIDUE_EPS) {
-
-            if (ParticipatingElement.participationFactorNorm(participatingElements) > 0.0) {
-                double done = step.run(participatingElements, iteration, remainingMismatch);
-                remainingMismatch -= done;
-            } else {
-                break;
-            }
-            iteration++;
+    /** The compensated sum of {@code DoubleStream.sum}, term for term, of the values at the given indices. */
+    static double compensatedSum(double[] values, int[] indices, int count) {
+        double sum = 0;
+        double compensation = 0;
+        double simpleSum = 0;
+        for (int k = 0; k < count; k++) {
+            double value = values[indices[k]];
+            double tmp = value - compensation;
+            double velvel = sum + tmp;
+            compensation = (velvel - sum) - tmp;
+            sum = velvel;
+            simpleSum += value;
         }
+        return finalSum(sum, compensation, simpleSum);
+    }
 
-        return new Result(iteration, remainingMismatch, previousStateInfo.moved());
+    /** The end of {@code DoubleStream.sum}: the compensated sum, or the simple one when it overflowed. */
+    static double finalSum(double sum, double compensation, double simpleSum) {
+        double tmp = sum - compensation;
+        return Double.isNaN(tmp) && Double.isInfinite(simpleSum) ? simpleSum : tmp;
     }
 
     public static ActivePowerDistribution create(LoadFlowParameters.BalanceType balanceType, boolean loadPowerFactorConstant, boolean useActiveLimits) {
@@ -160,9 +190,13 @@ public final class ActivePowerDistribution {
     }
 
     public static Collection<LfBus> filterParticipatingBuses(Collection<LfBus> buses) {
-        return buses.stream()
-                .filter(bus -> bus.isParticipating() && !bus.isDisabled() && !bus.isFictitious())
-                .toList();
+        List<LfBus> participatingBuses = new ArrayList<>();
+        for (LfBus bus : buses) {
+            if (bus.isParticipating() && !bus.isDisabled() && !bus.isFictitious()) {
+                participatingBuses.add(bus);
+            }
+        }
+        return Collections.unmodifiableList(participatingBuses);
     }
 
     public record ResultWithFailureBehaviorHandling(boolean failed, String failedMessage, int iteration, double remainingMismatch, boolean movedBuses, double failedDistributedActivePower) { }

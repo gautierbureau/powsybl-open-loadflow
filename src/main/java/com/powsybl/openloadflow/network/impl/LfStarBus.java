@@ -78,8 +78,8 @@ public class LfStarBus extends AbstractLfBus {
     @Override
     public void updateState(LfNetworkStateUpdateParameters parameters) {
         var t3wt = getT3wt();
-        Networks.setPropertyV(t3wt, v);
-        Networks.setPropertyAngle(t3wt, Math.toDegrees(angle));
+        Networks.setPropertyV(t3wt, getVoltageKv());
+        Networks.setPropertyAngle(t3wt, Math.toDegrees(getAngle()));
 
         super.updateState(parameters);
     }

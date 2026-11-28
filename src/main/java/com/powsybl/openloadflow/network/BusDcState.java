@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.network;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -16,7 +17,7 @@ import java.util.Map;
  */
 public class BusDcState extends ElementState<LfBus> {
 
-    // a bus keeps its generators once the network is loaded: their states are saved by position, like the load states
+    // by position in the generators of the bus, a list that does not change once the network is loaded
     private final double[] generatorsTargetP;
     private final double[] generatorsInitialTargetP;
     private final boolean[] participatingGenerators;
@@ -39,27 +40,41 @@ public class BusDcState extends ElementState<LfBus> {
         protected void restore(LfLoad load) {
             load.setTargetP(loadTargetP);
             load.setAbsVariableTargetP(absVariableLoadTargetP);
-            // A copy again: handing the saved map itself to the load would let the next contingency's
-            // setOriginalLoadDisabled write into the SAVED state, and every later restore would bring it back.
             load.setOriginalLoadsDisablingStatus(new HashMap<>(loadsDisablingStatus));
+        }
+
+        protected String findDifference(LfLoad load) {
+            if (!same(load.getTargetP(), loadTargetP)) {
+                return "target P of load " + load.getId();
+            }
+            if (!same(load.getAbsVariableTargetP(), absVariableLoadTargetP)) {
+                return "variable target P of load " + load.getId();
+            }
+            return load.getOriginalLoadsDisablingStatus().equals(loadsDisablingStatus) ? null : "disabled loads of load " + load.getId();
         }
     }
 
     public BusDcState(LfBus bus) {
         super(bus);
         List<LfGenerator> generators = bus.getGenerators();
-        this.generatorsTargetP = new double[generators.size()];
-        this.generatorsInitialTargetP = new double[generators.size()];
-        this.participatingGenerators = new boolean[generators.size()];
-        this.disablingStatusGenerators = new boolean[generators.size()];
-        for (int i = 0; i < generators.size(); i++) {
+        int count = generators.size();
+        generatorsTargetP = new double[count];
+        generatorsInitialTargetP = new double[count];
+        participatingGenerators = new boolean[count];
+        disablingStatusGenerators = new boolean[count];
+        for (int i = 0; i < count; i++) {
             LfGenerator generator = generators.get(i);
             generatorsTargetP[i] = generator.getTargetP();
             generatorsInitialTargetP[i] = generator.getInitialTargetP();
             participatingGenerators[i] = generator.isParticipating();
             disablingStatusGenerators[i] = generator.isDisabled();
         }
-        loadStates = bus.getLoads().stream().map(load -> createLoadState().save(load)).toList();
+        List<LfLoad> loads = bus.getLoads();
+        List<LoadDcState> states = new ArrayList<>(loads.size());
+        for (LfLoad load : loads) {
+            states.add(createLoadState().save(load));
+        }
+        loadStates = states;
     }
 
     protected LoadDcState createLoadState() {
@@ -70,17 +85,50 @@ public class BusDcState extends ElementState<LfBus> {
     public void restore() {
         super.restore();
         List<LfGenerator> generators = element.getGenerators();
+        // one pass per attribute, in this order, as each setter may notify
         for (int i = 0; i < generators.size(); i++) {
-            LfGenerator generator = generators.get(i);
-            generator.setTargetP(generatorsTargetP[i]);
-            generator.setInitialTargetP(generatorsInitialTargetP[i]);
-            generator.setParticipating(participatingGenerators[i]);
-            generator.setDisabled(disablingStatusGenerators[i]);
+            generators.get(i).setTargetP(generatorsTargetP[i]);
+        }
+        for (int i = 0; i < generators.size(); i++) {
+            generators.get(i).setInitialTargetP(generatorsInitialTargetP[i]);
+        }
+        for (int i = 0; i < generators.size(); i++) {
+            generators.get(i).setParticipating(participatingGenerators[i]);
+        }
+        for (int i = 0; i < generators.size(); i++) {
+            generators.get(i).setDisabled(disablingStatusGenerators[i]);
         }
         for (int i = 0; i < loadStates.size(); i++) {
             LfLoad load = element.getLoads().get(i);
             loadStates.get(i).restore(load);
         }
+    }
+
+    @Override
+    String findDifference() {
+        String difference = super.findDifference();
+        List<LfGenerator> generators = element.getGenerators();
+        for (int i = 0; i < generators.size() && difference == null; i++) {
+            difference = findDifference(generators.get(i), i);
+        }
+        for (int i = 0; i < loadStates.size() && difference == null; i++) {
+            difference = loadStates.get(i).findDifference(element.getLoads().get(i));
+        }
+        return difference;
+    }
+
+    private String findDifference(LfGenerator generator, int i) {
+        String id = generator.getId();
+        if (!same(generator.getTargetP(), generatorsTargetP[i])) {
+            return "target P of generator " + id;
+        }
+        if (!same(generator.getInitialTargetP(), generatorsInitialTargetP[i])) {
+            return "initial target P of generator " + id;
+        }
+        if (generator.isParticipating() != participatingGenerators[i]) {
+            return "participation of generator " + id;
+        }
+        return generator.isDisabled() == disablingStatusGenerators[i] ? null : "disabling of generator " + id;
     }
 
     public static BusDcState save(LfBus bus) {

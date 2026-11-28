@@ -549,14 +549,14 @@ class OpenLoadFlowParametersTest {
                 "minPlausibleTargetVoltage=0.8, maxPlausibleTargetVoltage=1.2, minRealisticVoltage=0.5, maxRealisticVoltage=2.0, " +
                 "minNominalVoltageRealisticVoltageCheck=0.0, reactiveRangeCheckMode=MAX, lowImpedanceThreshold=1.0E-8, networkCacheEnabled=false, " +
                 "svcVoltageMonitoring=true, stateVectorScalingMode=NONE, maxSlackBusCount=1, debugDir=null, " +
-                "incrementalTransformerRatioTapControlOuterLoopMaxTapShift=3, secondaryVoltageControl=false, reactiveLimitsMaxPqPvSwitch=3, " +
+                "incrementalTransformerRatioTapControlOuterLoopMaxTapShift=3, secondaryVoltageControl=false, reactiveLimitsMaxPqPvSwitch=3, reactiveLimitsPqPvSwitchVoltageDeadband=0.0, " +
                 "phaseShifterControlMode=CONTINUOUS_WITH_DISCRETISATION, alwaysUpdateNetwork=false, mostMeshedSlackBusSelectorMaxNominalVoltagePercentile=95.0, " +
                 "reportedFeatures=[], slackBusCountryFilter=[], actionableSwitchesIds=[], actionableTransformersIds=[], asymmetrical=false, " +
                 "minNominalVoltageTargetVoltageCheck=20.0, reactivePowerDispatchMode=Q_EQUAL_PROPORTION, outerLoopNames=null, " +
                 "useActiveLimits=true, disableVoltageControlOfGeneratorsOutsideActivePowerLimits=false, lineSearchStateVectorScalingMaxIteration=10, " +
                 "lineSearchStateVectorScalingStepFold=1.3333333333333333, maxVoltageChangeStateVectorScalingMaxDv=0.1, " +
                 "maxVoltageChangeStateVectorScalingMaxDphi=0.17453292519943295, linePerUnitMode=IMPEDANCE, useLoadModel=false, dcApproximationType=IGNORE_R, " +
-                "simulateAutomationSystems=false, acSolverType=NEWTON_RAPHSON, maxNewtonKrylovIterations=100, newtonKrylovLineSearch=false, " +
+                "simulateAutomationSystems=false, acSolverType=NEWTON_RAPHSON, acJacobianStructure=FIXED, maxNewtonKrylovIterations=100, newtonKrylovLineSearch=false, " +
                 "referenceBusSelectionMode=FIRST_SLACK, writeReferenceTerminals=true, voltageTargetPriorities=[VOLTAGE_SOURCE_CONVERTER, GENERATOR, TRANSFORMER, SHUNT], " +
                 "transformerVoltageControlUseInitialTapPosition=false, generatorVoltageControlMinNominalVoltage=-1.0, fictitiousGeneratorVoltageControlCheckMode=FORCED, " +
                 "areaInterchangeControl=false, areaInterchangeControlAreaType=ControlArea, areaInterchangePMaxMismatch=2.0, voltageRemoteControlRobustMode=true, " +
@@ -671,6 +671,9 @@ class OpenLoadFlowParametersTest {
 
         e = assertThrows(IllegalArgumentException.class, () -> olfParameters.setReactiveLimitsMaxPqPvSwitch(-1));
         assertEquals("Invalid value for parameter reactiveLimitsMaxPqPvSwitch: -1", e.getMessage());
+
+        e = assertThrows(IllegalArgumentException.class, () -> olfParameters.setReactiveLimitsPqPvSwitchVoltageDeadband(-1e-5));
+        assertEquals("Invalid value for parameter reactiveLimitsPqPvSwitchVoltageDeadband: -1.0E-5", e.getMessage());
 
         e = assertThrows(IllegalArgumentException.class, () -> olfParameters.setLineSearchStateVectorScalingMaxIteration(0));
         assertEquals("Invalid value for parameter lineSearchStateVectorScalingMaxIteration: 0", e.getMessage());

@@ -11,6 +11,7 @@ import com.powsybl.commons.report.ReportNode;
 import com.powsybl.openloadflow.ac.AcOuterLoopContext;
 import com.powsybl.openloadflow.ac.outerloop.tap.GeneratorVoltageControlManager;
 import com.powsybl.openloadflow.ac.outerloop.tap.TransformerRatioManager;
+import com.powsybl.openloadflow.lf.outerloop.IncrementalControlDecisions;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopResult;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
 import com.powsybl.openloadflow.lf.util.LfReports;
@@ -112,7 +113,7 @@ public class TransformerVoltageControlOuterLoop extends AbstractTransformerVolta
                 double v = voltageControl.getControlledBus().getV();
                 double diffV = targetV - v;
                 double halfTargetDeadband = getHalfTargetDeadband(voltageControl);
-                if (Math.abs(diffV) > halfTargetDeadband && branch.isConnectedAtBothSides()) {
+                if (IncrementalControlDecisions.isOutOfDeadband(diffV, halfTargetDeadband) && branch.isConnectedAtBothSides()) {
                     branch.setVoltageControlEnabled(true);
                     needRun = true;
                 }

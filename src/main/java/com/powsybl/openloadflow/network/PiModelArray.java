@@ -13,7 +13,6 @@ import org.apache.commons.math3.complex.Complex;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.function.ToDoubleFunction;
 import java.util.stream.Collectors;
 
 /**
@@ -39,12 +38,77 @@ public class PiModelArray implements PiModel {
 
     private final double maxR1;
 
+    // the r1 and the a1 of each tap, by tap index: read once, the taps' models do not change their ratio or their shift
+    private final double[] tapR1s;
+
+    private final double[] tapA1s;
+
     public PiModelArray(List<PiModel> models, int lowTapPosition, int tapPosition) {
         this.models = Objects.requireNonNull(models);
         this.lowTapPosition = lowTapPosition;
         tapPositionIndex = tapPosition - lowTapPosition;
         minR1 = this.models.stream().mapToDouble(PiModel::getMinR1).min().orElseThrow();
         maxR1 = this.models.stream().mapToDouble(PiModel::getMaxR1).max().orElseThrow();
+        tapR1s = this.models.stream().mapToDouble(PiModel::getR1).toArray();
+        tapA1s = this.models.stream().mapToDouble(PiModel::getA1).toArray();
+    }
+
+    /** A copy over copies of the taps' models, with its own arrays of their r1 and a1. */
+    private PiModelArray(PiModelArray other, List<PiModel> modelCopies) {
+        this.models = modelCopies;
+        this.lowTapPosition = other.lowTapPosition;
+        this.tapPositionIndex = other.tapPositionIndex;
+        this.minR1 = other.minR1;
+        this.maxR1 = other.maxR1;
+        this.tapR1s = other.tapR1s.clone();
+        this.tapA1s = other.tapA1s.clone();
+        this.a1 = other.a1;
+        this.r1 = other.r1;
+        this.continuousR1 = other.continuousR1;
+    }
+
+    /** The r1 of each tap, by tap index (tap position minus the low tap position). Not to be modified. */
+    public double[] getTapR1s() {
+        return tapR1s;
+    }
+
+    /** The a1 of each tap, by tap index (tap position minus the low tap position). Not to be modified. */
+    public double[] getTapA1s() {
+        return tapA1s;
+    }
+
+    /** Every tap's pi model as columns, read from the taps' models now. */
+    public TapPiModels getTapModels() {
+        int n = models.size();
+        double[] r = new double[n];
+        double[] x = new double[n];
+        double[] y = new double[n];
+        double[] ksi = new double[n];
+        double[] g1 = new double[n];
+        double[] b1 = new double[n];
+        double[] g2 = new double[n];
+        double[] b2 = new double[n];
+        for (int i = 0; i < n; i++) {
+            PiModel model = models.get(i);
+            r[i] = model.getR();
+            x[i] = model.getX();
+            y[i] = model.getY();
+            ksi[i] = model.getKsi();
+            g1[i] = model.getG1();
+            b1[i] = model.getB1();
+            g2[i] = model.getG2();
+            b2[i] = model.getB2();
+        }
+        return new TapPiModels(r, x, y, ksi, g1, b1, g2, b2, tapR1s.clone(), tapA1s.clone());
+    }
+
+    public int getLowTapPosition() {
+        return lowTapPosition;
+    }
+
+    /** The index of the current tap: the tap position minus the low tap position. */
+    public int getTapPositionIndex() {
+        return tapPositionIndex;
     }
 
     public List<PiModel> getModels() {
@@ -149,102 +213,10 @@ public class PiModelArray implements PiModel {
         return this;
     }
 
-    interface TapPositionFinder {
-
-        int find(List<PiModel> models, int tapPositionIndex, ToDoubleFunction<PiModel> valueGetter,
-                 Range<Integer> positionIndexRange, int maxTapShift);
-    }
-
-    static class ClosestTapPositionFinder implements TapPositionFinder {
-
-        private final double targetValue;
-
-        ClosestTapPositionFinder(double targetValue) {
-            this.targetValue = targetValue;
-        }
-
-        @Override
-        public int find(List<PiModel> models, int tapPositionIndex, ToDoubleFunction<PiModel> valueGetter,
-                        Range<Integer> positionIndexRange, int maxTapShift) {
-            int closestTapPositionIndex = tapPositionIndex;
-            double smallestDistance = Math.abs(targetValue - valueGetter.applyAsDouble(models.get(tapPositionIndex)));
-            for (int i = positionIndexRange.getMinimum(); i <= positionIndexRange.getMaximum(); i++) {
-                if (Math.abs(i - tapPositionIndex) > maxTapShift) { // we are not allowed to go further than maxTapShift positions
-                    continue;
-                }
-                double distance = Math.abs(targetValue - valueGetter.applyAsDouble(models.get(i)));
-                if (distance < smallestDistance) {
-                    closestTapPositionIndex = i;
-                    smallestDistance = distance;
-                }
-            }
-            return closestTapPositionIndex;
-        }
-    }
-
-    static class FirstTapPositionAboveFinder implements TapPositionFinder {
-
-        private final double valueShift;
-
-        FirstTapPositionAboveFinder(double valueShift) {
-            this.valueShift = valueShift;
-        }
-
-        private static boolean isDescending(int n1, int n2, double valueShift, List<PiModel> models, ToDoubleFunction<PiModel> valueGetter) {
-            return valueShift > 0 ? valueGetter.applyAsDouble(models.get(n1)) < valueGetter.applyAsDouble(models.get(n2))
-                    : valueGetter.applyAsDouble(models.get(n1)) > valueGetter.applyAsDouble(models.get(n2));
-        }
-
-        static int nextTapPositionIndex(int i, double valueShift, List<PiModel> models, ToDoubleFunction<PiModel> valueGetter) {
-            if (valueShift == 0) {
-                return -1;
-            }
-            if (i == 0 && isDescending(i + 1, i, valueShift, models, valueGetter)) {
-                return -1;
-            }
-            if (i > 0 && isDescending(i, i - 1, valueShift, models, valueGetter)) {
-                return i - 1;
-            }
-            if (i < models.size() - 1 && isDescending(i, i + 1, valueShift, models, valueGetter)) {
-                return i + 1;
-            }
-            if (i == models.size() - 1 && isDescending(i, i - 1, valueShift, models, valueGetter)) {
-                return -1;
-            }
-            return -1;
-        }
-
-        @Override
-        public int find(List<PiModel> models, int tapPositionIndex, ToDoubleFunction<PiModel> valueGetter,
-                        Range<Integer> positionIndexRange, int maxTapShift) {
-            int currentTapPositionIndex = tapPositionIndex;
-            double remainingValueShift = valueShift;
-            int nextTapPositionIndex;
-            while ((nextTapPositionIndex = nextTapPositionIndex(currentTapPositionIndex, remainingValueShift, models, valueGetter)) != -1) {
-                if (!positionIndexRange.contains(nextTapPositionIndex)
-                        || Math.abs(nextTapPositionIndex - tapPositionIndex) > maxTapShift) {
-                    break;
-                }
-                double value = valueGetter.applyAsDouble(models.get(currentTapPositionIndex));
-                double nextValue = valueGetter.applyAsDouble(models.get(nextTapPositionIndex));
-                currentTapPositionIndex = nextTapPositionIndex;
-                // stop when shift is not enough to go to next position
-                if (remainingValueShift < 0 && value + remainingValueShift > nextValue
-                        || remainingValueShift > 0 && value + remainingValueShift < nextValue) {
-                    break;
-                }
-                remainingValueShift -= nextValue - value;
-            }
-            return currentTapPositionIndex;
-        }
-    }
-
-    private Optional<Direction> updateTapPosition(ToDoubleFunction<PiModel> valueGetter, Range<Integer> positionIndexRange,
-                                                  int maxTapShift, TapPositionFinder finder) {
+    /** Moves to tap index {@code newPositionIndex}, telling the listeners. */
+    private Optional<Direction> moveToTapPositionIndex(int newPositionIndex) {
         int oldPositionIndex = tapPositionIndex;
-
-        // find tap position with the closest value without exceeding the maximum of taps to switch.
-        tapPositionIndex = finder.find(models, tapPositionIndex, valueGetter, positionIndexRange, maxTapShift);
+        tapPositionIndex = newPositionIndex;
 
         if (tapPositionIndex != oldPositionIndex) {
             PiModel oldPiModel = models.get(oldPositionIndex);
@@ -260,17 +232,35 @@ public class PiModelArray implements PiModel {
         return Optional.empty();
     }
 
-    private Range<Integer> getAllowedPositionIndexRange(AllowedDirection allowedDirection) {
-        switch (allowedDirection) {
-            case INCREASE:
-                return Range.of(tapPositionIndex, models.size() - 1);
-            case DECREASE:
-                return Range.of(0, tapPositionIndex);
-            case BOTH:
-                return Range.of(0, models.size() - 1);
-            default:
-                throw new IllegalStateException("Unknown direction: " + allowedDirection);
+    /**
+     * Moves to the tap the decisions on arrays chose, with the effects of a move of {@link
+     * #updateTapPositionToReachNewR1} (the overriding r1 dropped) when {@code ratio}, of {@link
+     * #updateTapPositionToReachNewA1} (the overriding a1 dropped) otherwise. Nothing changes when the index is the
+     * current one.
+     *
+     * @param newPositionIndex a tap index, as {@link #getTapPositionIndex()}
+     */
+    public Optional<Direction> applyTapPositionIndex(int newPositionIndex, boolean ratio) {
+        if (newPositionIndex < 0 || newPositionIndex >= models.size()) {
+            throw new IllegalArgumentException("Tap index " + newPositionIndex + " out of range [0, " + (models.size() - 1) + "]");
         }
+        Optional<Direction> direction = moveToTapPositionIndex(newPositionIndex);
+        if (direction.isPresent()) {
+            if (ratio) {
+                r1 = Double.NaN;
+            } else {
+                a1 = Double.NaN;
+            }
+        }
+        return direction;
+    }
+
+    private int closestTapPositionIndex(double[] values, double target, AllowedDirection allowedDirection, int maxTapShift) {
+        int allowed = DiscretePositionDecisions.toCode(allowedDirection);
+        return DiscretePositionDecisions.closestPosition(values, tapPositionIndex,
+                DiscretePositionDecisions.allowedFrom(allowed, tapPositionIndex, 0),
+                DiscretePositionDecisions.allowedTo(allowed, tapPositionIndex, models.size()),
+                maxTapShift, target, Math.abs(target - values[tapPositionIndex]));
     }
 
     @Override
@@ -280,8 +270,7 @@ public class PiModelArray implements PiModel {
         }
 
         // find tap position with the closest a1 value
-        updateTapPosition(PiModel::getA1, getAllowedPositionIndexRange(AllowedDirection.BOTH), Integer.MAX_VALUE,
-                new ClosestTapPositionFinder(a1));
+        moveToTapPositionIndex(closestTapPositionIndex(tapA1s, a1, AllowedDirection.BOTH, Integer.MAX_VALUE));
         a1 = Double.NaN;
     }
 
@@ -292,8 +281,7 @@ public class PiModelArray implements PiModel {
         }
 
         // find tap position with the closest r1 value
-        updateTapPosition(PiModel::getR1, getAllowedPositionIndexRange(AllowedDirection.BOTH), Integer.MAX_VALUE,
-                new ClosestTapPositionFinder(r1));
+        moveToTapPositionIndex(closestTapPositionIndex(tapR1s, r1, AllowedDirection.BOTH, Integer.MAX_VALUE));
         continuousR1 = r1;
         r1 = Double.NaN;
     }
@@ -305,21 +293,7 @@ public class PiModelArray implements PiModel {
         double currentA1 = getA1();
         int oldTapPositionIndex = tapPositionIndex;
 
-        if (tapPositionIndex < models.size() - 1) {
-            double nextA1 = models.get(tapPositionIndex + 1).getA1(); // abs?
-            if (direction == Direction.INCREASE && nextA1 > currentA1
-                    || direction == Direction.DECREASE && nextA1 < currentA1) {
-                tapPositionIndex++;
-            }
-        }
-
-        if (tapPositionIndex > 0) {
-            double previousA1 = models.get(tapPositionIndex - 1).getA1(); // abs?
-            if (direction == Direction.INCREASE && previousA1 > currentA1
-                    || direction == Direction.DECREASE && previousA1 < currentA1) {
-                tapPositionIndex--;
-            }
-        }
+        tapPositionIndex = DiscretePositionDecisions.shiftOnePosition(tapA1s, tapPositionIndex, currentA1, direction == Direction.INCREASE);
 
         if (tapPositionIndex != oldTapPositionIndex) {
             a1 = Double.NaN;
@@ -338,9 +312,7 @@ public class PiModelArray implements PiModel {
     @Override
     public Optional<Direction> updateTapPositionToReachNewR1(double deltaR1, int maxTapShift, AllowedDirection allowedDirection) {
         double newR1 = getR1() + deltaR1;
-        Range<Integer> positionIndexRange = getAllowedPositionIndexRange(allowedDirection);
-        Optional<Direction> direction = updateTapPosition(PiModel::getR1, positionIndexRange, maxTapShift,
-                new ClosestTapPositionFinder(newR1));
+        Optional<Direction> direction = moveToTapPositionIndex(closestTapPositionIndex(tapR1s, newR1, allowedDirection, maxTapShift));
         if (direction.isPresent()) {
             r1 = Double.NaN;
         }
@@ -349,9 +321,11 @@ public class PiModelArray implements PiModel {
 
     @Override
     public Optional<Direction> updateTapPositionToExceedNewA1(double deltaA1, int maxTapShift, AllowedDirection allowedDirection) {
-        Range<Integer> positionIndexRange = getAllowedPositionIndexRange(allowedDirection);
-        Optional<Direction> direction = updateTapPosition(PiModel::getA1, positionIndexRange, maxTapShift,
-                new FirstTapPositionAboveFinder(deltaA1));
+        int allowed = DiscretePositionDecisions.toCode(allowedDirection);
+        Optional<Direction> direction = moveToTapPositionIndex(DiscretePositionDecisions.firstPositionAbove(tapA1s, tapPositionIndex,
+                DiscretePositionDecisions.allowedFrom(allowed, tapPositionIndex, 0),
+                DiscretePositionDecisions.allowedTo(allowed, tapPositionIndex, models.size()),
+                maxTapShift, deltaA1));
         if (direction.isPresent()) {
             a1 = Double.NaN;
         }
@@ -361,9 +335,7 @@ public class PiModelArray implements PiModel {
     @Override
     public Optional<Direction> updateTapPositionToReachNewA1(double deltaA1, int maxTapShift, AllowedDirection allowedDirection) {
         double newA1 = getA1() + deltaA1;
-        Range<Integer> positionIndexRange = getAllowedPositionIndexRange(allowedDirection);
-        Optional<Direction> direction = updateTapPosition(PiModel::getA1, positionIndexRange, maxTapShift,
-                new ClosestTapPositionFinder(newA1));
+        Optional<Direction> direction = moveToTapPositionIndex(closestTapPositionIndex(tapA1s, newA1, allowedDirection, maxTapShift));
         if (direction.isPresent()) {
             a1 = Double.NaN;
         }
@@ -433,12 +405,7 @@ public class PiModelArray implements PiModel {
 
     @Override
     public PiModelArray copy() {
-        List<PiModel> modelCopies = models.stream().map(PiModel::copy).collect(Collectors.toList());
-        PiModelArray c = new PiModelArray(modelCopies, lowTapPosition, lowTapPosition + tapPositionIndex);
-        c.a1 = a1;
-        c.r1 = r1;
-        c.continuousR1 = continuousR1;
-        return c;
+        return new PiModelArray(this, models.stream().map(PiModel::copy).collect(Collectors.toList()));
     }
 
 }

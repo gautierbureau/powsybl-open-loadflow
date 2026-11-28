@@ -11,6 +11,7 @@ import com.powsybl.commons.PowsyblException;
 import com.powsybl.math.matrix.DenseMatrix;
 import com.powsybl.openloadflow.network.ElementType;
 import com.powsybl.openloadflow.network.LfElement;
+import com.powsybl.openloadflow.util.ArrayEvaluable;
 import gnu.trove.impl.Constants;
 import gnu.trove.list.array.TByteArrayList;
 import gnu.trove.list.array.TIntArrayList;
@@ -52,9 +53,22 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
 
         double eval(int termElementNum);
 
+        /**
+         * Whether {@code eval(termElementNum) == eval()[termElementNum]} with an array that stays the same: the
+         * elements are then {@link ArrayEvaluable}, read from the array by callers reading many of them.
+         */
+        default boolean evaluatesElementsFromArray() {
+            return false;
+        }
+
         double[][] evalDer();
 
         List<Derivative<V>> getDerivatives(int termElementNum);
+
+        /** Called when a term of the element is added to the array. */
+        default void onTermAdded(int termElementNum) {
+            // nothing to do by default
+        }
     }
 
     private final ElementType elementType;
@@ -128,6 +142,11 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
         return termActive.getQuick(termNum) == 1;
     }
 
+    /** The number of terms, active or not. */
+    public int getTermCount() {
+        return termElementNums.size();
+    }
+
     public int getEquationElementNum(int termNum) {
         return equationElementNums.getQuick(termNum);
     }
@@ -154,6 +173,7 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
         termElementNums.add(termElementNum);
         termActive.add((byte) (evaluator.isDisabled(termElementNum) ? 0 : 1));
         termDerivatives.add(evaluator.getDerivatives(termElementNum));
+        evaluator.onTermAdded(termElementNum);
         equationArray.invalidateEquationDerivativeVectors();
         equationArray.getEquationSystem().notifyEquationTermArrayChange(this, termNum, EquationTermEventType.EQUATION_TERM_ADDED);
         return this;
@@ -222,6 +242,14 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
 
         public Evaluator<V> getEvaluator() {
             return equationTermArray.evaluator;
+        }
+
+        /**
+         * A term for a single equation that has the value and the derivatives of this element, read in the array: for
+         * an equation that needs the same quantity as the one this element gives to its equation array.
+         */
+        public EquationTermArrayElementReference<V, E> createReference() {
+            return new EquationTermArrayElementReference<>(equationTermArray, termElementNum);
         }
 
         @Override
@@ -302,7 +330,28 @@ public class EquationTermArray<V extends Enum<V> & Quantity, E extends Enum<E> &
     }
 
     public EquationTerm<V, E> getElement(int termElementNum) {
-        return new EquationTermArrayElementImpl<>(this, termElementNum);
+        return evaluator.evaluatesElementsFromArray()
+                ? new ArrayEquationTermArrayElement<>(this, termElementNum)
+                : new EquationTermArrayElementImpl<>(this, termElementNum);
+    }
+
+    /** An element whose value is read in the array of its evaluator, at its term element number. */
+    public static class ArrayEquationTermArrayElement<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity>
+            extends EquationTermArrayElementImpl<V, E> implements ArrayEvaluable {
+
+        public ArrayEquationTermArrayElement(EquationTermArray<V, E> equationTermArray, int termElementNum) {
+            super(equationTermArray, termElementNum);
+        }
+
+        @Override
+        public double[] getValues() {
+            return equationTermArray.evaluator.eval();
+        }
+
+        @Override
+        public int getValueIndex() {
+            return termElementNum;
+        }
     }
 
     public boolean write(Writer writer, boolean writeInactiveTerms, int elementNum, boolean first) throws IOException {

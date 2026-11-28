@@ -33,6 +33,10 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
 
     private boolean startWithFrozenACEmulation = START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE;
 
+    private boolean keepOnlyNecessarySwitches = KEEP_ONLY_NECESSARY_SWITCHES_DEFAULT_VALUE;
+
+    private boolean reusePivots = REUSE_PIVOTS_DEFAULT_VALUE;
+
     public static final String CREATE_RESULT_EXTENSION_PARAM_NAME = "createResultExtension";
     public static final boolean CREATE_RESULT_EXTENSION_DEFAULT_VALUE = false;
     public static final String CONTINGENCY_PROPAGATION_PARAM_NAME = "contingencyPropagation";
@@ -45,12 +49,18 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
     public static final boolean START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE = true;
     public static final String CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME = "contingencyActivePowerLossDistribution";
     public static final String CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE = "Default";
+    public static final String KEEP_ONLY_NECESSARY_SWITCHES_PARAM_NAME = "keepOnlyNecessarySwitches";
+    public static final boolean KEEP_ONLY_NECESSARY_SWITCHES_DEFAULT_VALUE = false;
+    public static final String REUSE_PIVOTS_PARAM_NAME = "reusePivots";
+    public static final boolean REUSE_PIVOTS_DEFAULT_VALUE = true;
     public static final List<String> SPECIFIC_PARAMETERS_NAMES = List.of(CREATE_RESULT_EXTENSION_PARAM_NAME,
             CONTINGENCY_PROPAGATION_PARAM_NAME,
             THREAD_COUNT_PARAM_NAME,
             DC_FAST_MODE_PARAM_NAME,
             CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME,
-            START_WITH_FROZEN_AC_EMULATION_PARAM_NAME);
+            START_WITH_FROZEN_AC_EMULATION_PARAM_NAME,
+            KEEP_ONLY_NECESSARY_SWITCHES_PARAM_NAME,
+            REUSE_PIVOTS_PARAM_NAME);
 
     @Override
     public String getName() {
@@ -115,6 +125,41 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
         return this;
     }
 
+    /**
+     * Whether a contingency keeps only the switches that separate parts of a voltage level that stay connected to the
+     * network: a coupler that splits a voltage level, a busbar section between two others. A switch that only cuts
+     * off a part the contingency loses anyway (a generator bay with its auxiliary load, a line bay, the elements of a
+     * lost busbar section) is not kept, and the equipment of that part is lost instead. The networks of the security
+     * analysis then keep fewer switches, and are faster to solve. The equipment lost is the same; a lost busbar
+     * section that leaves the voltage level connected has then no impact, and a voltage level split only by such
+     * switches reports its violations once.
+     */
+    public boolean isKeepOnlyNecessarySwitches() {
+        return keepOnlyNecessarySwitches;
+    }
+
+    public OpenSecurityAnalysisParameters setKeepOnlyNecessarySwitches(boolean keepOnlyNecessarySwitches) {
+        this.keepOnlyNecessarySwitches = keepOnlyNecessarySwitches;
+        return this;
+    }
+
+    /**
+     * When true (the default), each simulation of the AC security analysis (a contingency, an operator strategy)
+     * refactorises its Jacobian on the pivots the previous simulation ended with, and chooses new ones only when one of
+     * them is no longer good: this saves a full numerical factorisation per simulation, but the last bits of the
+     * results may then depend on the simulations run before (their order, the number of threads). When false, each
+     * simulation factorises its Jacobian with pivots chosen from its own matrices: its results do not depend on the
+     * simulations run before it.
+     */
+    public boolean isReusePivots() {
+        return reusePivots;
+    }
+
+    public OpenSecurityAnalysisParameters setReusePivots(boolean reusePivots) {
+        this.reusePivots = reusePivots;
+        return this;
+    }
+
     public static OpenSecurityAnalysisParameters getOrDefault(SecurityAnalysisParameters parameters) {
         OpenSecurityAnalysisParameters parametersExt = parameters.getExtension(OpenSecurityAnalysisParameters.class);
         if (parametersExt == null) {
@@ -137,7 +182,9 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
                         .setDcFastMode(config.getBooleanProperty(DC_FAST_MODE_PARAM_NAME, DC_FAST_MODE_DEFAULT_VALUE))
                         .setContingencyActivePowerLossDistribution(config.getStringProperty(CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_PARAM_NAME,
                             CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE))
-                        .setStartWithFrozenACEmulation(config.getBooleanProperty(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME, START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE)));
+                        .setStartWithFrozenACEmulation(config.getBooleanProperty(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME, START_WITH_FROZEN_AC_EMULATION_DEFAULT_VALUE))
+                        .setKeepOnlyNecessarySwitches(config.getBooleanProperty(KEEP_ONLY_NECESSARY_SWITCHES_PARAM_NAME, KEEP_ONLY_NECESSARY_SWITCHES_DEFAULT_VALUE))
+                        .setReusePivots(config.getBooleanProperty(REUSE_PIVOTS_PARAM_NAME, REUSE_PIVOTS_DEFAULT_VALUE)));
         return parameters;
     }
 
@@ -159,6 +206,10 @@ public class OpenSecurityAnalysisParameters extends AbstractExtension<SecurityAn
                 .ifPresent(this::setContingencyActivePowerLossDistribution);
         Optional.ofNullable(properties.get(START_WITH_FROZEN_AC_EMULATION_PARAM_NAME))
                 .ifPresent(value -> this.setStartWithFrozenACEmulation(Boolean.parseBoolean(value)));
+        Optional.ofNullable(properties.get(KEEP_ONLY_NECESSARY_SWITCHES_PARAM_NAME))
+                .ifPresent(value -> this.setKeepOnlyNecessarySwitches(Boolean.parseBoolean(value)));
+        Optional.ofNullable(properties.get(REUSE_PIVOTS_PARAM_NAME))
+                .ifPresent(value -> this.setReusePivots(Boolean.parseBoolean(value)));
         return this;
     }
 }

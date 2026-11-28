@@ -30,6 +30,11 @@ public class LfShuntImpl extends AbstractLfShunt {
             this.shuntCompensatorRef = shuntCompensatorRef;
         }
 
+        private ControllerImpl(ControllerImpl other) {
+            super(other.getId(), other, other.getPosition());
+            this.shuntCompensatorRef = other.shuntCompensatorRef;
+        }
+
         private Ref<ShuntCompensator> getShuntCompensatorRef() {
             return shuntCompensatorRef;
         }
@@ -125,9 +130,7 @@ public class LfShuntImpl extends AbstractLfShunt {
         this.b = other.b;
         this.g = other.g;
         for (Controller controller : other.controllers) {
-            ControllerImpl otherController = (ControllerImpl) controller;
-            controllers.add(new ControllerImpl(otherController.getShuntCompensatorRef(),
-                    otherController.getSectionsB(), otherController.getSectionsG(), otherController.getPosition(), otherController.getMinPosition()));
+            controllers.add(new ControllerImpl((ControllerImpl) controller));
         }
         this.disabled = other.disabled;
         this.initiallyDisconnectedCompensators = other.initiallyDisconnectedCompensators;
@@ -265,16 +268,11 @@ public class LfShuntImpl extends AbstractLfShunt {
     }
 
     private void roundBToClosestSection(double b, Controller controller) {
-        List<Double> sections = controller.getSectionsB();
+        double[] sections = controller.getSectionBs();
         // find tap position with the closest b value
-        double smallestDistance = Math.abs(b - sections.get(controller.getPosition()));
-        for (int s = controller.getMinPosition(); s < sections.size(); s++) {
-            double distance = Math.abs(b - sections.get(s));
-            if (distance < smallestDistance) {
-                controller.setPosition(s);
-                smallestDistance = distance;
-            }
-        }
+        int position = controller.getPosition();
+        controller.setPosition(DiscretePositionDecisions.closestPosition(sections, position, controller.getMinPosition(),
+                sections.length - 1, Integer.MAX_VALUE, b, Math.abs(b - sections[position])));
         LOGGER.trace("Round B shift of shunt '{}': {} -> {}", controller.getId(), b * zb, controller.getB() * zb);
     }
 

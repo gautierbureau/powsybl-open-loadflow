@@ -106,7 +106,7 @@ class OpenLoadFlowProviderTest {
                 "maxOuterLoopIterations=20, matrixFactory=DenseMatrixFactory, voltageInitializer=UniformValueVoltageInitializer, " +
                 "asymmetrical=false, slackDistributionFailureBehavior=FAIL, solverFactory=NewtonRaphsonFactory, detailedReport=false, " +
                 "voltageRemoteControlRobustMode=true, minRealisticVoltage=0.5, maxRealisticVoltage=2.0, minNominalVoltageRealisticVoltageCheck=0.0, " +
-                "fixVoltageTargets=false, vectorized=true, voltageInitReport=true)",
+                "fixVoltageTargets=false, vectorized=true, jacobianStructure=FIXED, voltageInitReport=true)",
                      acParameters.toString());
     }
 
@@ -136,7 +136,7 @@ class OpenLoadFlowProviderTest {
     void specificParametersTest() {
         OpenLoadFlowProvider provider = new OpenLoadFlowProvider();
 
-        assertEquals(84, provider.getSpecificParameters().size());
+        assertEquals(86, provider.getSpecificParameters().size());
 
         LoadFlowParameters parameters = new LoadFlowParameters();
 
@@ -162,7 +162,7 @@ class OpenLoadFlowProviderTest {
         Map<String, String> map = provider.createMapFromSpecificParameters(parametersExt);
         // Null values are not serialized by the provider
         long nullValueCount = parametersExt.toMap().values().stream().filter(Objects::isNull).count();
-        assertEquals(84, map.size() + nullValueCount);
+        assertEquals(86, map.size() + nullValueCount);
         assertEquals(3, nullValueCount); // debugDir, outerLoopNames and networkCacheScope are nullable
         assertEquals(provider.getRawSpecificParameters().size(), map.size() + nullValueCount);
     }

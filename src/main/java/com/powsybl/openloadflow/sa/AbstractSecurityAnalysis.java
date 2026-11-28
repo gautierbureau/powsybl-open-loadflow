@@ -61,7 +61,6 @@ import org.slf4j.event.Level;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -98,6 +97,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
     protected Level logLevel = Level.INFO; // level of the post contingency and action logs
 
+    protected boolean reusePivots = OpenSecurityAnalysisParameters.REUSE_PIVOTS_DEFAULT_VALUE;
+
     protected AbstractSecurityAnalysis(Network network, MatrixFactory matrixFactory, GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory,
                                        List<StateMonitor> stateMonitors, ReportNode reportNode) {
         this.network = Objects.requireNonNull(network);
@@ -120,7 +121,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         Objects.requireNonNull(securityAnalysisParameters);
         Objects.requireNonNull(contingenciesProvider);
         return CompletableFutureTask.runAsync(() -> runSync(securityAnalysisParameters, contingenciesProvider, operatorStrategies,
-            actions, limitScalings, workingVariantId, computationManager.getExecutor()), computationManager.getExecutor());
+            actions, limitScalings, workingVariantId), computationManager.getExecutor());
     }
 
     protected abstract ReportNode createSaRootReportNode();
@@ -134,7 +135,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
     SecurityAnalysisReport runSync(SecurityAnalysisParameters securityAnalysisParameters, ContingenciesProvider contingenciesProvider,
                                    List<OperatorStrategy> operatorStrategies, List<Action> actions, List<LimitScaling> limitScalings,
-                                   String workingVariantId, Executor executor) throws ExecutionException {
+                                   String workingVariantId) throws ExecutionException {
         var saReportNode = createSaRootReportNode();
 
         Stopwatch stopwatch = Stopwatch.createStarted();
@@ -142,6 +143,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         LoadFlowParameters lfParameters = securityAnalysisParameters.getLoadFlowParameters();
         OpenLoadFlowParameters lfParametersExt = OpenLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters());
         OpenSecurityAnalysisParameters securityAnalysisParametersExt = OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters);
+        reusePivots = securityAnalysisParametersExt.isReusePivots();
 
         if ((lfParametersExt.isAcDcNetwork()) && (lfParameters.isDc())) {
             throw new PowsyblException("Security analysis does not support DC load flow on AC-DC networks");
@@ -182,7 +184,8 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 .setContingencyPropagation(securityAnalysisParametersExt.isContingencyPropagation())
                 .setShuntCompensatorVoltageControlOn(isShuntCompensatorVoltageControlOn(lfParameters))
                 .setSlackDistributionOnConformLoad(lfParameters.getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD)
-                .setHvdcAcEmulation(lfParameters.isHvdcAcEmulation());
+                .setHvdcAcEmulation(lfParameters.isHvdcAcEmulation())
+                .setKeepOnlyNecessarySwitches(securityAnalysisParametersExt.isKeepOnlyNecessarySwitches());
 
         SecurityAnalysisResult finalResult;
 
@@ -215,7 +218,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                             actions, limitScalings, lfParameters));
             ContingencyMultiThreadHelper.ReportMerger reportMerger = ContingencyMultiThreadHelper::mergeReportThreadResults;
             ContingencyMultiThreadHelper.createLFNetworksPerContingencyPartitionAndRunAnalysis(network, workingVariantId, contingenciesPartitions, creationParameters, topoConfig,
-                    parameterProvider, contingencyRunner, saReportNode, reportMerger, executor);
+                    parameterProvider, contingencyRunner, saReportNode, reportMerger);
 
             // we just need to merge post contingency and operator strategy results, all pre contingency are the same
             List<PostContingencyResult> postContingencyResults = new ArrayList<>();
@@ -460,6 +463,43 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
     protected abstract C createLoadFlowContext(LfNetwork lfNetwork, P parameters);
 
+    /**
+     * A contingency's change, recorded once OLF has applied it and spread its loss: the simulation of the contingency
+     * installs it on the base state instead of applying OLF's rules again, as a device installs the data of a scenario.
+     */
+    protected interface RecordedContingency {
+
+        /** Writes the contingency on the network, which is in its base state. */
+        void install();
+
+        /** The active power the spreading of the loss distributed before the solve. */
+        double getPreDistributedActivePower();
+    }
+
+    /** Records a contingency applied on the base state; null when it cannot be recorded. */
+    protected interface ContingencyRecorder {
+
+        /** Records a contingency from the buses and the branches it touched (a {@link ModifiedElementsCollector}'s). */
+        RecordedContingency record(LfContingency lfContingency, double preDistributedActivePower,
+                                   Collection<LfBus> touchedBuses, Collection<LfBranch> touchedBranches);
+    }
+
+    /**
+     * The recorder of the contingencies of a simulation, created once its base state is saved; null when the model
+     * records none, and its contingencies are applied with OLF's rules.
+     */
+    protected ContingencyRecorder createContingencyRecorder(C context) {
+        return null;
+    }
+
+    /**
+     * A contingency planned before the simulations: its OLF contingency, its report node, and its record when it has
+     * one. Without a recorder, nothing is created ahead: the simulation creates them as it always did.
+     */
+    private record PlannedContingency(PropagatedContingency propagatedContingency, LfContingency lfContingency,
+                                      ReportNode reportNode, RecordedContingency recorded, boolean lossDistributionReported) {
+    }
+
     protected abstract LoadFlowEngine<V, E, P, R> createLoadFlowEngine(C context);
 
     /**
@@ -514,6 +554,11 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         return parameters;
     }
 
+    /** Called once the base case is solved, with its context, before the simulations of the contingencies. */
+    protected void beforeContingencySimulations(C context) {
+        // nothing by default
+    }
+
     protected void afterPreContingencySimulation(P parameters) {
     }
 
@@ -562,6 +607,7 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             // only run post-contingency simulations if pre-contingency simulation is ok
             if (preContingencyComputationOk) {
                 afterPreContingencySimulation(p);
+                beforeContingencySimulations(context);
 
                 // update network result
                 preContingencyNetworkResult.update();
@@ -571,6 +617,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
 
                 // save base state for later restoration after each contingency
                 NetworkState networkState = NetworkState.save(lfNetwork);
+                // and collect what the contingencies, the actions and the simulations modify: only that is restored
+                ModifiedElementsCollector modifiedElements = new ModifiedElementsCollector(lfNetwork);
+                lfNetwork.addListener(modifiedElements);
 
                 // Reset parameters for next component
                 Consumer<P> componentParametersResetter = createParametersResetter(p);
@@ -581,21 +630,24 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
                 // Reset parameters between contingencies
                 Consumer<P> contingencyParametersResetter = createParametersResetter(p);
 
+                // plan the contingencies: each one is applied with OLF's rules, recorded and restored
+                List<PlannedContingency> plannedContingencies = planContingencies(lfNetwork, propagatedContingencies, context,
+                        networkReportNode, securityAnalysisParameters, loadFlowParameters, contingencyActivePowerLossDistribution,
+                        networkState, modifiedElements);
+
                 // start a simulation for each of the contingency
-                Iterator<PropagatedContingency> contingencyIt = propagatedContingencies.iterator();
-                while (contingencyIt.hasNext() && !Thread.currentThread().isInterrupted()) {
-                    PropagatedContingency propagatedContingency = contingencyIt.next();
-                    propagatedContingency.toLfContingency(lfNetwork)
-                            .ifPresent(lfContingency -> processContingency(lfNetwork, securityAnalysisParameters,
-                                limitScalings, contingencyActivePowerLossDistribution,
-                                networkReportNode, lfContingency, p, networkState,
-                                propagatedContingency, context, lfActionById,
-                                loadFlowParameters, contingencyOpenLoadFlowParameters,
-                                createResultExtension, preContingencyLimitViolationManager,
-                                preContingencyNetworkResult, postContingencyResults,
-                                contingencyParametersResetter, operatorStrategiesByContingencyId,
-                                operatorStrategyResults, contingencyIt));
+                for (int i = 0; i < plannedContingencies.size() && !Thread.currentThread().isInterrupted(); i++) {
+                    processContingency(lfNetwork, securityAnalysisParameters,
+                        limitScalings, contingencyActivePowerLossDistribution,
+                        networkReportNode, plannedContingencies.get(i), p, networkState,
+                        context, lfActionById,
+                        loadFlowParameters, contingencyOpenLoadFlowParameters,
+                        createResultExtension, preContingencyLimitViolationManager,
+                        preContingencyNetworkResult, postContingencyResults,
+                        contingencyParametersResetter, operatorStrategiesByContingencyId,
+                        operatorStrategyResults, i < plannedContingencies.size() - 1, modifiedElements);
                 }
+                lfNetwork.removeListener(modifiedElements);
 
                 // Restore parameters in case they are used for another component
                 componentParametersResetter.accept(p);
@@ -783,16 +835,97 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
     }
 
     /**
-     * Put the network back in its base (pre-contingency) state after a contingency, before the next one is applied.
-     * The default restores every saved bus, branch, HVDC and area state; an implementation that knows what a
-     * contingency's simulation changed may restore less, provided the network ends up identical.
+     * Puts the network back in its base (pre-contingency) state after a contingency, before the next one is applied.
+     * The default restores the elements that changed since the last restore, which {@code modifiedElements} collected,
+     * and the voltage of every bus, which each simulation writes. An implementation that knows better what a
+     * contingency's simulation changed may restore less, provided the network ends up identical; it then resets
+     * {@code modifiedElements} itself ({@link ModifiedElementsCollector#reset()}).
      *
      * @param networkState the base state, saved once after the pre-contingency simulation
      * @param network the network
      * @param lfContingency the contingency just simulated
+     * @param modifiedElements what changed since the last restore
      */
-    protected void restoreBaseState(NetworkState networkState, LfNetwork network, LfContingency lfContingency) {
-        networkState.restore();
+    protected void restoreBaseState(NetworkState networkState, LfNetwork network, LfContingency lfContingency,
+                                    ModifiedElementsCollector modifiedElements) {
+        restoreBaseState(networkState, modifiedElements);
+    }
+
+    /**
+     * Restores the base state after a contingency: the elements that changed since the last restore, and the voltage
+     * of every bus, which each simulation writes. The rest of the network is as it was saved.
+     */
+    private static void restoreBaseState(NetworkState networkState, ModifiedElementsCollector modifiedElements) {
+        restoreBaseState(networkState, modifiedElements, true);
+    }
+
+    /** With {@code voltages} false, after a contingency applied but not simulated, which wrote no voltage. */
+    private static void restoreBaseState(NetworkState networkState, ModifiedElementsCollector modifiedElements, boolean voltages) {
+        modifiedElements.setEnabled(false);
+        networkState.restore(modifiedElements.getBuses(), modifiedElements.getBranches(), voltages);
+        modifiedElements.setEnabled(true);
+        modifiedElements.reset();
+        assert networkState.findDifference() == null : "Not restored after a contingency, " + networkState.findDifference();
+    }
+
+    /**
+     * The connectivity whose changes processContingency confines to a contingency and to each of its operator strategies,
+     * null when no simulation changes it for good: only an automation system does (AutomationSystemOuterLoop), on a
+     * connectivity that nests temporary changes. Within a contingency's simulation it holds the contingency's openings,
+     * and an operator strategy's switches before its load flow, so that the switches of an automation system are compared
+     * with the topology the load flow solves.
+     */
+    private static GraphConnectivity<LfBus, LfBranch> connectivityToConfine(LfNetwork network) {
+        if (network.getOverloadManagementSystems().isEmpty()) {
+            return null;
+        }
+        GraphConnectivity<LfBus, LfBranch> connectivity = network.getConnectivity();
+        return connectivity.supportTemporaryChangesNesting() ? connectivity : null;
+    }
+
+    /**
+     * Creates the OLF contingency and the report node of each contingency, in the order of the simulations, and, when
+     * the model records contingencies, applies each one with OLF's rules, spreads its loss as its simulation would,
+     * records the result and restores the base state. The spreading reports in the contingency's report node, as it
+     * does when the simulation applies the contingency itself.
+     */
+    private List<PlannedContingency> planContingencies(LfNetwork lfNetwork, List<PropagatedContingency> propagatedContingencies, C context,
+                                                       ReportNode networkReportNode, SecurityAnalysisParameters securityAnalysisParameters,
+                                                       LoadFlowParameters loadFlowParameters,
+                                                       ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution,
+                                                       NetworkState networkState, ModifiedElementsCollector modifiedElements) {
+        ContingencyRecorder recorder = createContingencyRecorder(context);
+        List<PlannedContingency> plannedContingencies = new ArrayList<>(propagatedContingencies.size());
+        if (recorder == null) {
+            // creating an OLF contingency can move the slack bus (PropagatedContingency.toLfContingency): it is done just
+            // before the simulation of the contingency, after the base state of the previous one is restored
+            for (PropagatedContingency propagatedContingency : propagatedContingencies) {
+                plannedContingencies.add(new PlannedContingency(propagatedContingency, null, null, null, false));
+            }
+            return plannedContingencies;
+        }
+        for (PropagatedContingency propagatedContingency : propagatedContingencies) {
+            if (Thread.currentThread().isInterrupted()) {
+                break;
+            }
+            Optional<LfContingency> optionalLfContingency = propagatedContingency.toLfContingency(lfNetwork);
+            if (optionalLfContingency.isEmpty()) {
+                continue;
+            }
+            LfContingency lfContingency = optionalLfContingency.get();
+            ReportNode postContSimReportNode = LfReports.createPostContingencySimulation(networkReportNode, lfContingency.getId());
+            lfNetwork.setReportNode(postContSimReportNode);
+            lfContingency.apply(loadFlowParameters.getBalanceType());
+            modifiedElements.add(lfContingency);
+            double preDistributedActivePower = contingencyActivePowerLossDistribution.run(lfNetwork, lfContingency,
+                    propagatedContingency.getContingency(), securityAnalysisParameters,
+                    propagatedContingency.getContingency().getExtension(ContingencyLoadFlowParameters.class), postContSimReportNode);
+            RecordedContingency recorded = recorder.record(lfContingency, preDistributedActivePower,
+                    modifiedElements.getBuses(), modifiedElements.getBranches());
+            restoreBaseState(networkState, modifiedElements, false);
+            plannedContingencies.add(new PlannedContingency(propagatedContingency, lfContingency, postContSimReportNode, recorded, true));
+        }
+        return plannedContingencies;
     }
 
     /**
@@ -845,31 +978,30 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         return Optional.empty();
     }
 
-    /**
-     * The connectivity whose changes processContingency confines to a contingency and to each of its operator strategies,
-     * null when no simulation changes it for good: only an automation system does (AutomationSystemOuterLoop), on a
-     * connectivity that nests temporary changes. Within a contingency's simulation it holds the contingency's openings,
-     * and an operator strategy's switches before its load flow, so that the switches of an automation system are compared
-     * with the topology the load flow solves.
-     */
-    private static GraphConnectivity<LfBus, LfBranch> connectivityToConfine(LfNetwork network) {
-        if (network.getOverloadManagementSystems().isEmpty()) {
-            return null;
-        }
-        GraphConnectivity<LfBus, LfBranch> connectivity = network.getConnectivity();
-        return connectivity.supportTemporaryChangesNesting() ? connectivity : null;
-    }
-
     private void processContingency(LfNetwork lfNetwork, SecurityAnalysisParameters securityAnalysisParameters,
                                     List<LimitScaling> limitScalings, ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution,
-                                    ReportNode networkReportNode, LfContingency lfContingency, P p, NetworkState networkState,
-                                    PropagatedContingency propagatedContingency, C context, Map<String, LfAction> lfActionById,
+                                    ReportNode networkReportNode, PlannedContingency plannedContingency, P p, NetworkState networkState,
+                                    C context, Map<String, LfAction> lfActionById,
                                     LoadFlowParameters loadFlowParameters, OpenLoadFlowParameters contingencyOpenLoadFlowParameters,
                                     boolean createResultExtension, LimitViolationManager preContingencyLimitViolationManager,
                                     PreContingencyNetworkResult preContingencyNetworkResult, List<PostContingencyResult> postContingencyResults,
                                     Consumer<P> contingencyParametersResetter, Map<String, List<Indexed<OperatorStrategy>>> operatorStrategiesByContingencyId,
-                                    List<OperatorStrategyResult> operatorStrategyResults, Iterator<PropagatedContingency> contingencyIt) {
-        ReportNode postContSimReportNode = LfReports.createPostContingencySimulation(networkReportNode, lfContingency.getId());
+                                    List<OperatorStrategyResult> operatorStrategyResults, boolean hasNextContingency,
+                                    ModifiedElementsCollector modifiedElements) {
+        PropagatedContingency propagatedContingency = plannedContingency.propagatedContingency();
+        LfContingency lfContingency;
+        ReportNode postContSimReportNode;
+        if (plannedContingency.lfContingency() != null) {
+            lfContingency = plannedContingency.lfContingency();
+            postContSimReportNode = plannedContingency.reportNode();
+        } else {
+            Optional<LfContingency> optionalLfContingency = propagatedContingency.toLfContingency(lfNetwork);
+            if (optionalLfContingency.isEmpty()) {
+                return;
+            }
+            lfContingency = optionalLfContingency.get();
+            postContSimReportNode = LfReports.createPostContingencySimulation(networkReportNode, lfContingency.getId());
+        }
         lfNetwork.setReportNode(postContSimReportNode);
 
         // A subclass may answer a contingency and its operator strategies from results it computed elsewhere, without
@@ -901,10 +1033,21 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
             lfContingency.getDisabledNetwork().getBranches().forEach(confinedConnectivity::removeEdge);
         }
 
-        lfContingency.apply(loadFlowParameters.getBalanceType());
-
-        double preDistributedActivePower = contingencyActivePowerLossDistribution.run(lfNetwork, lfContingency,
-            propagatedContingency.getContingency(), securityAnalysisParameters, contingencyLoadFlowParameters, postContSimReportNode);
+        double preDistributedActivePower;
+        RecordedContingency recorded = plannedContingency.recorded();
+        if (recorded != null) {
+            // the contingency as it was recorded, without OLF's rules
+            recorded.install();
+            modifiedElements.add(lfContingency);
+            preDistributedActivePower = recorded.getPreDistributedActivePower();
+        } else {
+            lfContingency.apply(loadFlowParameters.getBalanceType());
+            modifiedElements.add(lfContingency);
+            // planning already reported the spreading of a contingency it could not record
+            preDistributedActivePower = contingencyActivePowerLossDistribution.run(lfNetwork, lfContingency,
+                propagatedContingency.getContingency(), securityAnalysisParameters, contingencyLoadFlowParameters,
+                plannedContingency.lossDistributionReported() ? ReportNode.NO_OP : postContSimReportNode);
+        }
 
         var postContingencyResult = runPostContingencySimulation(lfNetwork, context, propagatedContingency.getContingency(),
             lfContingency, preContingencyLimitViolationManager,
@@ -964,9 +1107,9 @@ public abstract class AbstractSecurityAnalysis<V extends Enum<V> & Quantity, E e
         if (confinedConnectivity != null) {
             confinedConnectivity.undoTemporaryChanges();
         }
-        if (contingencyIt.hasNext()) {
+        if (hasNextContingency) {
             // restore base state
-            restoreBaseState(networkState, lfNetwork, lfContingency);
+            restoreBaseState(networkState, lfNetwork, lfContingency, modifiedElements);
             if (contingencyLoadFlowParameters != null &&
                 Objects.equals(ContingencyLoadFlowParameters.Scope.CONTINGENCY_AND_OPERATOR_STRATEGY, contingencyLoadFlowParameters.getScope())) {
                 // reset parameters

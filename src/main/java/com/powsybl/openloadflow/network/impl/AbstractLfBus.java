@@ -39,11 +39,15 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     protected boolean reference = false;
 
-    protected double v;
+    /*
+     * The voltage (kV) and the angle until the bus is added to its network, which keeps them from then on, by bus
+     * number ({@link LfNetwork#getBusVoltages()}, {@link LfNetwork#getBusAngles()}).
+     */
+    private double initialV;
 
     protected Evaluable calculatedV = NAN;
 
-    protected double angle;
+    private double initialAngle;
 
     private boolean hasGeneratorsWithSlope;
 
@@ -111,8 +115,8 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     protected AbstractLfBus(LfNetwork network, double v, double angle, int numSC, LfNetworkParameters parameters) {
         super(network);
-        this.v = v;
-        this.angle = angle;
+        this.initialV = v;
+        this.initialAngle = angle;
         this.numSC = numSC;
         this.distributedOnConformLoad = parameters.isDistributedOnConformLoad();
         this.forceTargetQInReactiveLimits = parameters.isForceTargetQInReactiveLimits() && parameters.isReactiveLimits();
@@ -121,8 +125,8 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
     protected AbstractLfBus(AbstractLfBus other, LfNetwork network) {
         super(network);
         this.numSC = other.numSC;
-        this.v = other.v;
-        this.angle = other.angle;
+        this.initialV = other.getVoltageKv();
+        this.initialAngle = other.getAngle();
         this.distributedOnConformLoad = other.distributedOnConformLoad;
         this.forceTargetQInReactiveLimits = other.forceTargetQInReactiveLimits;
 
@@ -239,7 +243,13 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     @Override
     public Optional<VoltageControl<?>> getVoltageControl(VoltageControl.Type type) {
-        return getVoltageControls().stream().filter(vc -> vc.getType() == type).findAny();
+        // a bus has at most one voltage control of each type
+        return Optional.ofNullable(switch (type) {
+            case GENERATOR -> generatorVoltageControl;
+            case TRANSFORMER -> transformerVoltageControl;
+            case SHUNT -> shuntVoltageControl;
+            case VOLTAGE_SOURCE_CONVERTER -> voltageSourceConverterVoltageControl;
+        });
     }
 
     @Override
@@ -569,16 +579,73 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
     }
 
     private double getLimitQ(ToDoubleFunction<LfGenerator> limitQ) {
-        return generators.stream()
-                .filter(g -> !g.isDisabled())
-                .mapToDouble(generator -> (generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE ||
-                        generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER) ?
-                        limitQ.applyAsDouble(generator) : generator.getTargetQ()).sum();
+        // the compensated sum of DoubleStream.sum, term for term, without the stream
+        double sum = 0;
+        double compensation = 0;
+        double simpleSum = 0;
+        for (LfGenerator generator : generators) {
+            if (generator.isDisabled()) {
+                continue;
+            }
+            double value = generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE
+                    || generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER
+                    ? limitQ.applyAsDouble(generator) : generator.getTargetQ();
+            double tmp = value - compensation;
+            double velvel = sum + tmp;
+            compensation = (velvel - sum) - tmp;
+            sum = velvel;
+            simpleSum += value;
+        }
+        double tmp = sum - compensation;
+        return Double.isNaN(tmp) && Double.isInfinite(simpleSum) ? simpleSum : tmp;
     }
 
     @Override
     public double getMinQ() {
         return getLimitQ(LfGenerator::getMinQ);
+    }
+
+    /**
+     * Both sums of {@link #getLimitQ} in one pass over the generators: the target Q of a generator that does not
+     * control is read once for both.
+     */
+    @Override
+    public void getMinMaxQ(double[] minMaxQ) {
+        double minSum = 0;
+        double minCompensation = 0;
+        double minSimpleSum = 0;
+        double maxSum = 0;
+        double maxCompensation = 0;
+        double maxSimpleSum = 0;
+        for (LfGenerator generator : generators) {
+            if (generator.isDisabled()) {
+                continue;
+            }
+            double minValue;
+            double maxValue;
+            if (generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE
+                    || generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER) {
+                minValue = generator.getMinQ();
+                maxValue = generator.getMaxQ();
+            } else {
+                minValue = generator.getTargetQ();
+                maxValue = minValue;
+            }
+            double minTmp = minValue - minCompensation;
+            double minVelvel = minSum + minTmp;
+            minCompensation = (minVelvel - minSum) - minTmp;
+            minSum = minVelvel;
+            minSimpleSum += minValue;
+            double maxTmp = maxValue - maxCompensation;
+            double maxVelvel = maxSum + maxTmp;
+            maxCompensation = (maxVelvel - maxSum) - maxTmp;
+            maxSum = maxVelvel;
+            maxSimpleSum += maxValue;
+        }
+        double minTmp = minSum - minCompensation;
+        minMaxQ[0] = Double.isNaN(minTmp) && Double.isInfinite(minSimpleSum) ? minSimpleSum : minTmp;
+        double maxTmp = maxSum - maxCompensation;
+        minMaxQ[1] = Double.isNaN(maxTmp) && Double.isInfinite(maxSimpleSum) ? maxSimpleSum : maxTmp;
     }
 
     @Override
@@ -597,13 +664,34 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
     }
 
     @Override
+    public void setNum(int num) {
+        super.setNum(num);
+        network.getBusVoltages()[num] = initialV;
+        network.getBusAngles()[num] = initialAngle;
+        // the network keeps them from now on
+        initialV = Double.NaN;
+        initialAngle = Double.NaN;
+    }
+
+    /** The voltage in kV. */
+    protected double getVoltageKv() {
+        return num >= 0 ? network.getBusVoltages()[num] : initialV;
+    }
+
+    @Override
     public double getV() {
-        return v / getNominalV();
+        return getVoltageKv() / getNominalV();
     }
 
     @Override
     public void setV(double v) {
-        this.v = v * getNominalV();
+        double kv = v * getNominalV();
+        if (num >= 0) {
+            network.getBusVoltages()[num] = kv;
+        } else {
+            initialV = kv;
+        }
+        network.onStateWrite();
     }
 
     @Override
@@ -618,12 +706,17 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
 
     @Override
     public double getAngle() {
-        return angle;
+        return num >= 0 ? network.getBusAngles()[num] : initialAngle;
     }
 
     @Override
     public void setAngle(double angle) {
-        this.angle = angle;
+        if (num >= 0) {
+            network.getBusAngles()[num] = angle;
+        } else {
+            initialAngle = angle;
+        }
+        network.onStateWrite();
     }
 
     @Override

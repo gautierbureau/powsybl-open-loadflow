@@ -50,7 +50,7 @@ class LfNetworkCopyFieldGuardTest {
                 "apparentPowerLimits2", "piModel", "phaseControl", "phaseControlEnabled", "voltageControl", "voltageControlEnabled", "transformerReactivePowerControl",
                 "zeroImpedanceContextByModel", "a1", "generatorReactivePowerControl", "asymLine"));
         expected.put(AbstractLfBranch.ZeroImpedanceContext.class, Set.of("spanningTreeEdge", "zeroImpedance"));
-        expected.put(AbstractLfBus.class, Set.of("slack", "reference", "v", "calculatedV", "angle", "hasGeneratorsWithSlope", "generatorVoltageControlEnabled",
+        expected.put(AbstractLfBus.class, Set.of("slack", "reference", "initialV", "calculatedV", "initialAngle", "hasGeneratorsWithSlope", "generatorVoltageControlEnabled",
                 "generatorReactivePowerControlEnabled", "generationTargetP", "generationTargetQ", "invalidatedGenerationTargetQ", "qLimitType", "generators",
                 "converters", "shunt", "controllerShunt", "svcShunt", "distributedOnConformLoad", "loads", "loadTargetP", "loadTargetQ", "branches", "hvdcs",
                 "generatorVoltageControl", "generatorReactivePowerControl", "transformerVoltageControl", "voltageSourceConverterVoltageControl", "shuntVoltageControl",
@@ -58,7 +58,8 @@ class LfNetworkCopyFieldGuardTest {
         expected.put(AbstractLfDcBus.class, Set.of("numDCC", "v", "nominalV"));
         expected.put(AbstractLfDcBranch.class, Set.of("numDCC", "dcBus1", "dcBus2", "p1", "i1", "p2", "i2", "r"));
         expected.put(AbstractLfGenerator.class, Set.of("network", "bus", "calculatedQ", "targetV", "switchedToLocalVoltageRegulation", "generatorControlType",
-                "controlledBusId", "controlledBranchId", "controlledBranchSide", "remoteTargetQ", "disabled", "asym", "referencePriority", "reference", "extrapolateReactiveLimits"));
+                "controlledBusId", "controlledBranchId", "controlledBranchSide", "remoteTargetQ", "disabled", "asym", "referencePriority", "reference", "extrapolateReactiveLimits",
+                "limitsKind", "fixedMinQ", "fixedMaxQ", "curvePoints", "curveLimitsRead", "activePowerBitsOfReadQ", "readMinQ", "readMaxQ"));
         expected.put(AbstractLfInjection.class, Set.of("initialTargetP", "targetP"));
         expected.put(AbstractLfShunt.class, Set.of("q", "p"));
         expected.put(AbstractPropertyBag.class, Set.of("properties"));
@@ -74,7 +75,7 @@ class LfNetworkCopyFieldGuardTest {
         expected.put(LfBoundaryLineBranch.class, Set.of("boundaryLineRef"));
         expected.put(LfBoundaryLineBus.class, Set.of("boundaryLineRef", "nominalV"));
         expected.put(LfBoundaryLineGenerator.class, Set.of("boundaryLineRef"));
-        expected.put(LfBranchImpl.class, Set.of("branchRef"));
+        expected.put(LfBranchImpl.class, Set.of("phaseControllerCapability", "branchRef"));
         expected.put(LfBusImpl.class, Set.of("busRef", "nominalV", "lowVoltageLimit", "highVoltageLimit", "participating", "breakers", "country", "bbsIds", "fictitiousInjectionTargetP",
                 "fictitiousInjectionTargetQ", "violationLocation"));
         expected.put(LfDcBusImpl.class, Set.of("dcBusRef", "isGrounded"));
@@ -91,13 +92,14 @@ class LfNetworkCopyFieldGuardTest {
         expected.put(LfNetwork.class, Set.of("numCC", "synchronousNetworks", "slackBusSelector", "referenceBusSelector", "maxSlackBusCount", "busesById", "busesByIndex",
                 "branches", "branchesById", "branchesByOriginalId", "shuntCount", "shuntsByIndex", "shuntsById", "generatorsById", "loadsById", "areasById", "areas", "hvdcs",
                 "hvdcsById", "dcBusByIndex", "dcBusById", "dcBranchesByIndex", "voltageSourceConvertersByIndex", "listeners", "validity", "connectivityFactory", "connectivity",
-                "zeroImpedanceNetworksByModel", "reportNode", "secondaryVoltageControls", "voltageAngleLimits", "overloadManagementSystems", "connectivityRemovedBranches"));
+                "zeroImpedanceNetworksByModel", "reportNode", "secondaryVoltageControls", "voltageAngleLimits", "overloadManagementSystems", "connectivityRemovedBranches",
+                "controllerElementsByType", "stateWriteCount", "branchEvaluableVersion", "busVoltages", "busAngles", "busNominalVoltages"));
         expected.put(LfNetwork.LfVoltageAngleLimit.class, Set.of("id", "from", "to", "highValue", "lowValue"));
         expected.put(LfOverloadManagementSystem.class, Set.of("monitoredBranch", "monitoredSide", "branchTrippingList"));
         expected.put(LfOverloadManagementSystem.LfBranchTripping.class, Set.of("branchOpen", "threshold", "branchToOperate"));
         expected.put(LfSecondaryVoltageControl.class, Set.of("controlUnits", "pilotBus", "targetValue", "zoneName"));
         expected.put(LfSecondaryVoltageControl.ControlUnit.class, Set.of("id", "participate", "generatorVoltageControl"));
-        expected.put(LfShunt.Controller.class, Set.of("id", "sectionsB", "sectionsG", "position", "minPosition", "bMagnitude"));
+        expected.put(LfShunt.Controller.class, Set.of("id", "sectionsB", "sectionBs", "sectionsG", "sectionGs", "position", "minPosition", "bMagnitude"));
         expected.put(LfShuntImpl.class, Set.of("shuntCompensatorsRefs", "bus", "voltageControl", "voltageControlCapability", "voltageControlEnabled", "controllers",
                 "initiallyDisconnectedCompensators", "b", "zb", "g"));
         expected.put(innerClass(LfShuntImpl.class, "ControllerImpl"), Set.of("shuntCompensatorRef"));
@@ -111,7 +113,7 @@ class LfNetworkCopyFieldGuardTest {
         expected.put(LfTieLineBranch.class, Set.of("boundaryLine1Ref", "boundaryLine2Ref", "id"));
         expected.put(LfVscConverterStationImpl.class, Set.of("stationRef", "lossFactor", "hvdc", "hvdcDanglingInIidm"));
         expected.put(LfVoltageSourceConverterImpl.class, Set.of("converterRef", "isVoltageRegulatorOn", "targetQ", "targetVac", "droopBands"));
-        expected.put(PiModelArray.class, Set.of("models", "lowTapPosition", "tapPositionIndex", "a1", "r1", "continuousR1", "branch", "minR1", "maxR1"));
+        expected.put(PiModelArray.class, Set.of("models", "lowTapPosition", "tapPositionIndex", "a1", "r1", "continuousR1", "branch", "minR1", "maxR1", "tapR1s", "tapA1s"));
         expected.put(ReactivePowerControl.class, Set.of("controlledSide", "controlledBranch"));
         expected.put(ShuntVoltageControl.class, Set.of());
         expected.put(SimplePiModel.class, Set.of("r", "x", "g1", "b1", "g2", "b2", "r1", "a1"));

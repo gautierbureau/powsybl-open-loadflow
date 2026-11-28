@@ -36,7 +36,9 @@ public class DefaultNewtonRaphsonStoppingCriteria implements NewtonRaphsonStoppi
     public TestResult test(double[] fx, EquationSystem<AcVariableType, AcEquationType> equationSystem) {
         // calculate norm L2 of equations mismatch vector
         double norm = Vectors.norm2(fx);
-        boolean stop = norm < FastMath.sqrt(convEpsPerEq * convEpsPerEq * fx.length);
+        // the ghost columns of the index (zero) are not equations of the system
+        int equationCount = fx.length - equationSystem.getIndex().getGhostColumns().length;
+        boolean stop = norm < FastMath.sqrt(convEpsPerEq * convEpsPerEq * equationCount);
         return new TestResult(stop, norm);
     }
 }

@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationVector;
 import com.powsybl.openloadflow.equations.JacobianMatrix;
 import com.powsybl.openloadflow.equations.TargetVector;
+import com.powsybl.openloadflow.equations.fixed.FixedEquationVector;
 import com.powsybl.openloadflow.lf.AbstractLoadFlowContext;
 import com.powsybl.openloadflow.network.LfNetwork;
 
@@ -34,10 +35,22 @@ public class AcLoadFlowContext extends AbstractLoadFlowContext<AcVariableType, A
         super(network, parameters);
     }
 
+    /**
+     * The next factorisation of the Jacobian chooses its pivots ({@link com.powsybl.openloadflow.equations.fixed.FixedJacobian#forgetPivots()}).
+     * Nothing is done when the Jacobian is not created yet: its first factorisation chooses them anyway, and creating it
+     * here would create it earlier than the load flow does.
+     */
+    public void forgetPivots() {
+        if (jacobianMatrix instanceof AcJacobianMatrix acJacobianMatrix && acJacobianMatrix.isFixed()) {
+            acJacobianMatrix.getFixedJacobian().forgetPivots();
+        }
+    }
+
     @Override
     public JacobianMatrix<AcVariableType, AcEquationType> getJacobianMatrix() {
         if (jacobianMatrix == null) {
-            jacobianMatrix = new AcJacobianMatrix(getEquationSystem(), parameters.getMatrixFactory(), network);
+            jacobianMatrix = new AcJacobianMatrix(getEquationSystem(), parameters.getMatrixFactory(), network,
+                                                  parameters.getJacobianStructure());
         }
         return jacobianMatrix;
     }
@@ -67,7 +80,13 @@ public class AcLoadFlowContext extends AbstractLoadFlowContext<AcVariableType, A
 
     public EquationVector<AcVariableType, AcEquationType> getEquationVector() {
         if (equationVector == null) {
-            equationVector = new EquationVector<>(getEquationSystem());
+            if (parameters.getJacobianStructure() == AcJacobianStructure.FIXED) {
+                // computed from the structure the Jacobian is filled from
+                equationVector = new FixedEquationVector<>(getEquationSystem(),
+                    () -> ((AcJacobianMatrix) getJacobianMatrix()).getFixedJacobian().getFixedEquationSystem());
+            } else {
+                equationVector = new EquationVector<>(getEquationSystem());
+            }
         }
         return equationVector;
     }

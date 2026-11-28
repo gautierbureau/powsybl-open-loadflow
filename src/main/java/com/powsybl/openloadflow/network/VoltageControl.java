@@ -97,15 +97,21 @@ public class VoltageControl<T extends LfElement> extends Control {
         if (disabled) {
             return true;
         }
-        if (getMergedControlledBuses().stream().allMatch(LfElement::isDisabled)) {
+        // the merged controlled buses and controller elements, without building the lists when nothing is merged
+        if (controlledBus.isDisabled() && mergedDependentVoltageControls.stream().allMatch(mvc -> mvc.getControlledBus().isDisabled())) {
             return true;
         }
-        return getMergedControllerElements().stream()
-                .allMatch(LfElement::isDisabled);
+        for (T controllerElement : getMergedControllerElements()) {
+            if (!controllerElement.isDisabled()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public void setDisabled(boolean disabled) {
         this.disabled = disabled;
+        controlledBus.getNetwork().invalidateControllerElements();
     }
 
     public MergeStatus getMergeStatus() {

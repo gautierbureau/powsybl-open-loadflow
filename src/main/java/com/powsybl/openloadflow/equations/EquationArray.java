@@ -36,9 +36,24 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
 
     private int[] elementNumToColumn;
 
+    private boolean elementNumToColumnValid;
+
     private TIntIntMap columnToElementNum;
 
     private int length;
+
+    /*
+     * Ghost mode (see EquationSystemIndex#setGhostMode): an element deactivated while it has a column keeps it, as a
+     * ghost, so that the columns of the array do not change. An element activated while it has none (it was inactive
+     * at the last build of the index) is new: the index is built again.
+     */
+    private boolean ghostMode;
+    /** For each element, whether it had a column at the last build of the index, valid in ghost mode. */
+    private boolean[] elementInStructure;
+    private boolean[] elementGhost;
+    private int ghostCount;
+    /** The active elements without a column, in ghost mode. */
+    private int newActiveCount;
 
     // All terms that are in a vectorized view (in EquationTermArrays)
     private final List<EquationTermArray<V, E>> termArrays = new ArrayList<>();
@@ -121,11 +136,15 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     }
 
     public int[] getElementNumToColumn() {
-        if (elementNumToColumn == null) {
-            elementNumToColumn = new int[elementCount];
+        if (!elementNumToColumnValid) {
+            // computed again in the same array when the elements are as many: nothing keeps it across a change
+            if (elementNumToColumn == null || elementNumToColumn.length != elementCount) {
+                elementNumToColumn = new int[elementCount];
+            }
+            elementNumToColumnValid = true;
             int column = firstColumn;
             for (int elementNum = 0; elementNum < elementCount; elementNum++) {
-                if (elementActive[elementNum]) {
+                if (hasColumn(elementNum)) {
                     elementNumToColumn[elementNum] = column++;
                 } else {
                     elementNumToColumn[elementNum] = -1;
@@ -153,7 +172,7 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     }
 
     private void invalidateElementNumToColumn() {
-        elementNumToColumn = null;
+        elementNumToColumnValid = false;
         columnToElementNum = null;
         matrixElementIndexes.reset();
     }
@@ -171,12 +190,30 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
         invalidateElementNumToColumn();
     }
 
+    /** The number of columns of the array: its active elements, and its ghosts in ghost mode. */
     public int getLength() {
-        return length;
+        return length + ghostCount;
     }
 
     public boolean isElementActive(int elementNum) {
         return elementActive[elementNum];
+    }
+
+    /** True when the element has a column in the equation system: active, or a ghost. */
+    public boolean hasColumn(int elementNum) {
+        return elementActive[elementNum] || ghostCount > 0 && elementGhost[elementNum];
+    }
+
+    public boolean isElementGhost(int elementNum) {
+        return ghostCount > 0 && elementGhost[elementNum];
+    }
+
+    int getGhostCount() {
+        return ghostCount;
+    }
+
+    int getNewActiveCount() {
+        return newActiveCount;
     }
 
     public void setElementActive(int elementNum, boolean active) {
@@ -187,9 +224,52 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
             } else {
                 length--;
             }
-            invalidateElementNumToColumn();
+            if (ghostMode && elementInStructure[elementNum]) {
+                // the element keeps its column: a ghost when inactive
+                elementGhost[elementNum] = !active;
+                ghostCount += active ? -1 : 1;
+            } else {
+                if (ghostMode) {
+                    newActiveCount += active ? 1 : -1;
+                }
+                invalidateElementNumToColumn();
+            }
             equationSystem.notifyEquationArrayChange(this, elementNum,
                     active ? EquationEventType.EQUATION_ACTIVATED : EquationEventType.EQUATION_DEACTIVATED);
+        }
+    }
+
+    void setGhostMode(boolean ghostMode) {
+        if (ghostMode == this.ghostMode) {
+            return;
+        }
+        if (!ghostMode) {
+            removeGhosts();
+        }
+        this.ghostMode = ghostMode;
+        if (ghostMode) {
+            if (elementGhost == null) {
+                elementGhost = new boolean[elementCount];
+                elementInStructure = new boolean[elementCount];
+            }
+            snapshotStructure();
+        }
+    }
+
+    /** Called when the index is built again in ghost mode: the elements that have a column are the active ones. */
+    void snapshotStructure() {
+        if (ghostMode) {
+            System.arraycopy(elementActive, 0, elementInStructure, 0, elementCount);
+            newActiveCount = 0;
+        }
+    }
+
+    /** The ghosts lose their column: they are inactive elements, as without ghost mode. */
+    void removeGhosts() {
+        if (ghostCount > 0) {
+            Arrays.fill(elementGhost, false);
+            ghostCount = 0;
+            invalidateElementNumToColumn();
         }
     }
 
@@ -358,22 +438,14 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
     public void eval(double[] values) {
         for (EquationTermArray<V, E> termArray : termArrays) {
             double[] termValues = termArray.eval();
-            int[] termNumsConcatenatedStartIndices = termArray.getTermNumsConcatenatedStartIndices();
-            for (int elementNum = 0; elementNum < elementCount; elementNum++) {
-                // skip inactive equations
-                if (!elementActive[elementNum]) {
-                    continue;
-                }
-                int column = getElementNumToColumn(elementNum);
-                var termNums = termArray.getTermNumsConcatenated();
-                int iStart = termNumsConcatenatedStartIndices[elementNum];
-                int iEnd = termNumsConcatenatedStartIndices[elementNum + 1];
-                for (int i = iStart; i < iEnd; i++) {
-                    int termNum = termNums.getQuick(i);
-                    // skip inactive terms
-                    if (termArray.isTermActive(termNum)) {
-                        int termElementNum = termArray.getTermElementNum(termNum);
-                        values[column] += termValues[termElementNum];
+            // by term and not by equation: a term array may hold terms for few equations, and the terms of an
+            // equation come in the order they were added either way, so each sum is the same
+            for (int termNum = 0; termNum < termArray.getTermCount(); termNum++) {
+                // skip inactive terms and the terms of inactive equations
+                if (termArray.isTermActive(termNum)) {
+                    int elementNum = termArray.getEquationElementNum(termNum);
+                    if (elementActive[elementNum]) {
+                        values[getElementNumToColumn(elementNum)] += termValues[termArray.getTermElementNum(termNum)];
                     }
                 }
             }
@@ -595,6 +667,7 @@ public class EquationArray<V extends Enum<V> & Quantity, E extends Enum<E> & Qua
                         if (!term.isActive()) {
                             writer.write(" ]");
                         }
+                        first = false;
                     }
                 }
                 if (!isElementActive(elementNum)) {

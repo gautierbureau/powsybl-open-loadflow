@@ -26,11 +26,12 @@ public class BusState extends BusDcState {
     private final double controllerShuntB;
     private final double controllerShuntG;
     private final double svcShuntB;
-    private final LfGenerator.GeneratorControlType[] generatorsControlType;
     // the section of each compensator of the controller shunt and of the shunt, when they have sections (voltage control,
     // operated by an action): the susceptance and conductance are their sum, and a section change sums them again
     private final int[] controllerShuntPositions;
     private final int[] shuntPositions;
+    /** By position in the generators of the bus. */
+    private final LfGenerator.GeneratorControlType[] generatorsControlType;
     private final LfBus.QLimitType qLimitType;
     private final double remoteControlReactivePercent;
     private final double generatorVoltageControlTargetValue;
@@ -50,6 +51,12 @@ public class BusState extends BusDcState {
         protected void restore(LfLoad load) {
             super.restore(load);
             load.setTargetQ(loadTargetQ);
+        }
+
+        @Override
+        protected String findDifference(LfLoad load) {
+            String difference = super.findDifference(load);
+            return difference != null || same(load.getTargetQ(), loadTargetQ) ? difference : "target Q of load " + load.getId();
         }
     }
 
@@ -72,7 +79,11 @@ public class BusState extends BusDcState {
         shuntPositions = shunt != null ? savePositions(shunt) : null;
         LfShunt svcShunt = bus.getSvcShunt().orElse(null);
         svcShuntB = svcShunt != null ? svcShunt.getB() : Double.NaN;
-        this.generatorsControlType = bus.getGenerators().stream().map(LfGenerator::getGeneratorControlType).toArray(LfGenerator.GeneratorControlType[]::new);
+        List<LfGenerator> generators = bus.getGenerators();
+        generatorsControlType = new LfGenerator.GeneratorControlType[generators.size()];
+        for (int i = 0; i < generators.size(); i++) {
+            generatorsControlType[i] = generators.get(i).getGeneratorControlType();
+        }
         qLimitType = bus.getQLimitType().orElse(null);
         // the reactive key of this bus in a shared remote voltage control: renormalized over the remaining
         // generators when a contingency loses one (LfContingency.processLostGenerators)
@@ -140,6 +151,49 @@ public class BusState extends BusDcState {
         if (!Double.isNaN(generatorVoltageControlTargetValue)) {
             element.getGeneratorVoltageControl().orElseThrow().setTargetValue(generatorVoltageControlTargetValue);
         }
+    }
+
+    @Override
+    String findDifference() {
+        String difference = super.findDifference();
+        if (difference != null) {
+            return difference;
+        }
+        if (!same(element.getAngle(), angle) || !same(element.getV(), voltage)) {
+            return "voltage";
+        }
+        if (element.isGeneratorVoltageControlEnabled() != voltageControlEnabled
+                || element.isGeneratorReactivePowerControlEnabled() != reactiveControlEnabled) {
+            return "generator control";
+        }
+        if (element.isGenerationTargetQFrozen() != isGenerationTargetQFrozen
+                || isGenerationTargetQFrozen && !same(element.getGenerationTargetQ(), generationTargetQ)) {
+            return "frozen generation target Q";
+        }
+        if (element.getQLimitType().orElse(null) != qLimitType) {
+            return "reactive limit type";
+        }
+        List<LfGenerator> generators = element.getGenerators();
+        for (int i = 0; i < generators.size(); i++) {
+            if (generators.get(i).getGeneratorControlType() != generatorsControlType[i]) {
+                return "control type of generator " + generators.get(i).getId();
+            }
+        }
+        return findShuntDifference();
+    }
+
+    private String findShuntDifference() {
+        LfShunt controllerShunt = element.getControllerShunt().orElse(null);
+        if (controllerShunt != null && (controllerShunt.isVoltageControlEnabled() != shuntVoltageControlEnabled
+                || !same(controllerShunt.getB(), controllerShuntB) || !same(controllerShunt.getG(), controllerShuntG))) {
+            return "controller shunt";
+        }
+        LfShunt shunt = element.getShunt().orElse(null);
+        if (shunt != null && (!same(shunt.getB(), shuntB) || !same(shunt.getG(), shuntG))) {
+            return "shunt";
+        }
+        LfShunt svcShunt = element.getSvcShunt().orElse(null);
+        return svcShunt == null || same(svcShunt.getB(), svcShuntB) ? null : "static var compensator shunt";
     }
 
     private static int[] savePositions(LfShunt shunt) {

@@ -22,6 +22,7 @@ import com.powsybl.math.matrix.DenseMatrixFactory;
 import com.powsybl.openloadflow.graph.dtree.DTreeGraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfContingency;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.ModifiedElementsCollector;
 import com.powsybl.openloadflow.network.NetworkState;
 import com.powsybl.security.PostContingencyComputationStatus;
 import com.powsybl.security.SecurityAnalysisParameters;
@@ -62,9 +63,10 @@ class SecurityAnalysisRestoreHooksTest {
         AcSecurityAnalysis securityAnalysis = new AcSecurityAnalysis(network, new DenseMatrixFactory(),
                 new DTreeGraphConnectivityFactory<>(), Collections.emptyList(), ReportNode.NO_OP) {
             @Override
-            protected void restoreBaseState(NetworkState networkState, LfNetwork lfNetwork, LfContingency lfContingency) {
+            protected void restoreBaseState(NetworkState networkState, LfNetwork lfNetwork, LfContingency lfContingency,
+                                            ModifiedElementsCollector modifiedElements) {
                 restores.add("base after " + lfContingency.getId());
-                super.restoreBaseState(networkState, lfNetwork, lfContingency);
+                super.restoreBaseState(networkState, lfNetwork, lfContingency, modifiedElements);
             }
 
             @Override

@@ -8,7 +8,6 @@
 package com.powsybl.openloadflow.network;
 
 import com.powsybl.openloadflow.util.Evaluable;
-import org.apache.commons.lang3.Range;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,9 +44,27 @@ public interface LfShunt extends LfElement, LfCopyable<LfShunt, LfBus> {
 
         private final double bMagnitude;
 
+        // the susceptance and the conductance of each section, as arrays: read once, the sections do not change
+        private final double[] sectionBs;
+
+        private final double[] sectionGs;
+
         public Controller(String id, List<Double> sectionsB, List<Double> sectionsG, int position, int minPosition) {
+            this(id, sectionsB, sectionsB.stream().mapToDouble(Double::doubleValue).toArray(), sectionsG,
+                    sectionsG.stream().mapToDouble(Double::doubleValue).toArray(), position, minPosition);
+        }
+
+        /** A controller over the sections of another one, with its own arrays of their susceptances and conductances. */
+        protected Controller(String id, Controller sections, int position) {
+            this(id, sections.sectionsB, sections.sectionBs.clone(), sections.sectionsG, sections.sectionGs.clone(), position, sections.minPosition);
+        }
+
+        private Controller(String id, List<Double> sectionsB, double[] sectionBs, List<Double> sectionsG, double[] sectionGs,
+                           int position, int minPosition) {
             this.id = Objects.requireNonNull(id);
             this.sectionsB = Objects.requireNonNull(sectionsB);
+            this.sectionBs = sectionBs;
+            this.sectionGs = sectionGs;
             this.sectionsG = Objects.requireNonNull(sectionsG);
             this.position = position;
             this.minPosition = minPosition;
@@ -62,6 +79,16 @@ public interface LfShunt extends LfElement, LfCopyable<LfShunt, LfBus> {
 
         public List<Double> getSectionsB() {
             return sectionsB;
+        }
+
+        /** The susceptance of each section, by position. Not to be modified. */
+        public double[] getSectionBs() {
+            return sectionBs;
+        }
+
+        /** The conductance of each section, by position. Not to be modified. */
+        public double[] getSectionGs() {
+            return sectionGs;
         }
 
         public List<Double> getSectionsG() {
@@ -92,34 +119,18 @@ public interface LfShunt extends LfElement, LfCopyable<LfShunt, LfBus> {
             return bMagnitude;
         }
 
-        private Range<Integer> getAllowedPositionRange(AllowedDirection allowedDirection) {
-            return switch (allowedDirection) {
-                case INCREASE -> Range.of(position, sectionsB.size() - 1);
-                case DECREASE -> Range.of(minPosition, position);
-                case BOTH -> Range.of(minPosition, sectionsB.size() - 1);
-            };
-        }
-
         public Optional<Direction> updateSectionB(double deltaB, int maxSectionShift, AllowedDirection allowedDirection) {
             // an increase allowed direction means that the section could increase.
             // a decrease allowed direction means that the section could decrease.
             double newB = getB() + deltaB;
-            Range<Integer> positionRange = getAllowedPositionRange(allowedDirection);
+            int allowed = DiscretePositionDecisions.toCode(allowedDirection);
 
             int oldSection = position;
             // find section with the closest b value without exceeding the maximum of sections to switch.
-            double smallestDistance = Math.abs(deltaB);
-            for (int p = positionRange.getMinimum(); p <= positionRange.getMaximum(); p++) {
-                if (Math.abs(p - oldSection) > maxSectionShift) {
-                    // we are not allowed to go further than maxSectionShift sections
-                    continue;
-                }
-                double distance = Math.abs(newB - sectionsB.get(p));
-                if (distance < smallestDistance) {
-                    position = p;
-                    smallestDistance = distance;
-                }
-            }
+            position = DiscretePositionDecisions.closestPosition(sectionBs, oldSection,
+                    DiscretePositionDecisions.allowedFrom(allowed, oldSection, minPosition),
+                    DiscretePositionDecisions.allowedTo(allowed, oldSection, sectionBs.length),
+                    maxSectionShift, newB, Math.abs(deltaB));
 
             boolean hasChanged = position != oldSection;
             if (hasChanged) {

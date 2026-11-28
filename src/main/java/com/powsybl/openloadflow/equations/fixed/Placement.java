@@ -1,0 +1,56 @@
+/**
+ * Copyright (c) 2026, RTE (http://www.rte-france.com)
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ * SPDX-License-Identifier: MPL-2.0
+ */
+package com.powsybl.openloadflow.equations.fixed;
+
+import com.powsybl.openloadflow.equations.Quantity;
+
+/**
+ * Which variable an equation is paired with: its column is that variable's slot. The only model knowledge a
+ * {@link FixedEquationSystem} needs.
+ *
+ * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
+ */
+public interface Placement<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> {
+
+    /**
+     * The type of the variable, of the equation's own element, that an equation of this type is paired with, or null
+     * when it has none: the equation then takes a slot that the active equations leave free.
+     */
+    V variableType(E equationType);
+
+    /**
+     * True for an equation that fixes its variable ({@code x = target}). When two active equations are paired with one
+     * variable, this one keeps the slot and the other takes a free one.
+     */
+    boolean fixesVariable(E equationType);
+
+    /**
+     * The slots an equation may take besides its own, each given as the variable of the slot: where a balance goes
+     * when the equation that fixes its variable holds its slot. They are in the pattern from the start, so that it
+     * does not grow the first time the equation is placed there. None by default: the pattern then grows as the
+     * placements are met.
+     */
+    default void forEachCandidate(CandidateConsumer<V, E> consumer) {
+    }
+
+    /**
+     * The kind of a variable. An equation that would leave a zero on the diagonal where it is moves to the slot of
+     * another variable of the kind of its own: there its derivative is as strong as on its own slot. One kind by
+     * default.
+     */
+    default int kind(V variableType) {
+        return 0;
+    }
+
+    /** An equation, by type and element, and the variable of a slot it may take, by type and element. */
+    @FunctionalInterface
+    interface CandidateConsumer<V extends Enum<V> & Quantity, E extends Enum<E> & Quantity> {
+
+        void accept(E equationType, int equationElementNum, V variableType, int variableElementNum);
+    }
+}

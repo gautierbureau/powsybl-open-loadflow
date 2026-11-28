@@ -42,6 +42,7 @@ public class LfZeroImpedanceNetwork {
         if (loadFlowModel == LoadFlowModel.AC) {
             updateVoltageControlMergeStatus();
             disableInvalidGeneratorVoltageControls();
+            network.invalidateControllerElements();
         }
     }
 

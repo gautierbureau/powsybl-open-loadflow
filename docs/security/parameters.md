@@ -32,7 +32,39 @@ this could lead to more equipments to be simulated as tripped, because disconnec
 
 The default value is `true`.
 
-(param-secu-create-result-extension)=
+(param-secu-keep-only-necessary-switches)=
+### keepOnlyNecessarySwitches
+The `keepOnlyNecessarySwitches` property is applicable only to the portions of the network modeled with a Node/Breaker
+representation, with [`contingencyPropagation`](#contingencypropagation) set to `true`.
+
+To simulate a contingency, the Security Analysis keeps as real switches, in the networks it solves, the switches the
+contingency opens. When `keepOnlyNecessarySwitches` is set to `true`, it keeps only those that separate parts of a voltage
+level that stay connected to the rest of the network: a coupler that splits a voltage level, a busbar section between
+two others. A switch that only cuts off a part the contingency loses anyway (a generator bay with its auxiliary load,
+a line bay, the elements of a lost busbar section) is not kept: the equipment of that part is simulated as tripped
+instead. The networks then keep far fewer switches, and are faster to solve, all the more so with one thread, where
+one network holds the switches of every contingency.
+
+The equipment tripped is the same. Two results change:
+- a voltage level that only such switches would split reports its voltage violations once, instead of once by part;
+- the loss of a busbar section whose voltage level stays connected without it (another coupler joins its neighbours)
+has no impact, where keeping its switches simulated an empty bus.
+
+The default value is `false`.
+
+(param-secu-reuse-pivots)=
+### reusePivots
+The `reusePivots` property applies to the AC Security Analysis.
+
+When `reusePivots` is set to `true`, each simulation (a contingency, an operator strategy) refactorises its Jacobian on
+the pivots the previous one ended with, and chooses new ones only when one of them is no longer good. This saves a full
+numerical factorisation per simulation, but the last bits of the results may then depend on the simulations run before
+it: their order, and the number of threads. When it is set to `false`, each simulation factorises its Jacobian with
+pivots chosen from its own matrices: its results do not depend on the simulations run before it, at the cost of a full
+numerical factorisation per simulation.
+
+The default value is `true`.
+
 ### createResultExtension
 The `createResultExtension` property defines whether Open Load Flow specific results extensions should be created
 in the security analysis results. Today the available extensions provide information about branches and three-windings

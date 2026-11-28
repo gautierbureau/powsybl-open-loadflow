@@ -45,4 +45,21 @@ public interface EquationSystemIndexListener<V extends Enum<V> & Quantity, E ext
      * Called when a constant has been modified in the equation terms (e.g. R or X of branches after tap position change)
      */
     void onEquationTermConstantsChanged();
+
+    /**
+     * Called in ghost mode ({@link EquationSystemIndex#setGhostMode(boolean)}) when equations became ghosts (inactive
+     * but keeping their column) or ghosts became active again: the columns and the rows are unchanged, but the ghost
+     * columns are not the same: zero in the vectors.
+     */
+    default void onGhostChange() {
+        // nothing to do by default
+    }
+
+    /**
+     * Called in ghost mode when a variable no active term refers to anymore keeps its row as an orphan, or when an
+     * orphan is referred to again. Its row does not change.
+     */
+    default void onVariableOrphanChange(Variable<V> variable, boolean orphan) {
+        // nothing to do by default
+    }
 }

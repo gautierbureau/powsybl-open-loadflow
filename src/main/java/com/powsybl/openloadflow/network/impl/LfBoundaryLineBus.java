@@ -84,8 +84,8 @@ public class LfBoundaryLineBus extends AbstractLfBus {
     @Override
     public void updateState(LfNetworkStateUpdateParameters parameters) {
         var boundaryLine = getBoundaryLine();
-        Networks.setPropertyV(boundaryLine, v);
-        Networks.setPropertyAngle(boundaryLine, Math.toDegrees(angle));
+        Networks.setPropertyV(boundaryLine, getVoltageKv());
+        Networks.setPropertyAngle(boundaryLine, Math.toDegrees(getAngle()));
 
         super.updateState(parameters);
     }

@@ -31,7 +31,6 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
-import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -114,6 +113,20 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
     private final List<LfVoltageSourceConverter> voltageSourceConvertersByIndex = new ArrayList<>();
 
     private final List<LfNetworkListener> listeners = new ArrayList<>();
+
+    /** How many times a bus voltage or angle was written: a state kept from a solve is valid while it does not move. */
+    private long stateWriteCount;
+
+    /*
+     * The voltage (kV) and the angle of each bus, and its nominal voltage, by bus number: the buses keep their state
+     * here rather than in their objects, so that a solver writes it into arrays (see AbstractLfBus#getV).
+     */
+    private double[] busVoltages = new double[16];
+    private double[] busAngles = new double[16];
+    private double[] busNominalVoltages = new double[16];
+
+    /** Incremented each time a branch flow evaluable is replaced: what caches them compares it. */
+    private int branchEvaluableVersion;
 
     private Validity validity = Validity.VALID;
 
@@ -347,7 +360,15 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
 
     public void addBus(LfBus bus) {
         Objects.requireNonNull(bus);
-        bus.setNum(busesByIndex.size());
+        int num = busesByIndex.size();
+        if (num >= busVoltages.length) {
+            int length = Math.max(2 * busVoltages.length, num + 1);
+            busVoltages = Arrays.copyOf(busVoltages, length);
+            busAngles = Arrays.copyOf(busAngles, length);
+            busNominalVoltages = Arrays.copyOf(busNominalVoltages, length);
+        }
+        busNominalVoltages[num] = bus.getNominalV();
+        bus.setNum(num);
         busesByIndex.add(bus);
         busesById.put(bus.getId(), bus);
         // Create a new LfSynchronousNetwork if this bus belongs to a synchronous component not stored yet
@@ -1206,6 +1227,41 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
         listeners.remove(listener);
     }
 
+    /**
+     * To be called when a branch flow evaluable (P, Q or I) is replaced, so that users caching them can be updated.
+     */
+    public void onBranchEvaluableChange() {
+        branchEvaluableVersion++;
+    }
+
+    public int getBranchEvaluableVersion() {
+        return branchEvaluableVersion;
+    }
+
+    public long getStateWriteCount() {
+        return stateWriteCount;
+    }
+
+    /** Notes that a bus voltage or angle was written. */
+    public void onStateWrite() {
+        stateWriteCount++;
+    }
+
+    /** The voltage of each bus in kV, by bus number. */
+    public double[] getBusVoltages() {
+        return busVoltages;
+    }
+
+    /** The angle of each bus in radians, by bus number. */
+    public double[] getBusAngles() {
+        return busAngles;
+    }
+
+    /** The nominal voltage of each bus in kV, by bus number. */
+    public double[] getBusNominalVoltages() {
+        return busNominalVoltages;
+    }
+
     public List<LfNetworkListener> getListeners() {
         return listeners;
     }
@@ -1317,15 +1373,45 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
     }
 
     @SuppressWarnings("unchecked")
+    /**
+     * The controller elements of each voltage control type, kept from one call to the next. They are computed again
+     * after any change they depend on: an element disabled or enabled, a zero impedance network created (merge status),
+     * or a voltage control disabled or enabled.
+     */
+    private final EnumMap<VoltageControl.Type, List<? extends LfElement>> controllerElementsByType = new EnumMap<>(VoltageControl.Type.class);
+
+    public void invalidateControllerElements() {
+        controllerElementsByType.clear();
+    }
+
+    @SuppressWarnings("unchecked")
     public <E extends LfElement> List<E> getControllerElements(VoltageControl.Type type) {
-        return busesByIndex.stream()
-                .filter(bus -> bus.isVoltageControlled(type))
-                .filter(bus -> bus.getVoltageControl(type).orElseThrow().getMergeStatus() == VoltageControl.MergeStatus.MAIN)
-                .filter(bus -> bus.getVoltageControl(type).orElseThrow().isVisible())
-                .flatMap(bus -> bus.getVoltageControl(type).orElseThrow().getMergedControllerElements().stream())
-                .filter(Predicate.not(LfElement::isDisabled))
-                .map(element -> (E) element)
-                .toList();
+        List<E> controllerElements = (List<E>) controllerElementsByType.get(type);
+        if (controllerElements == null) {
+            controllerElements = computeControllerElements(type);
+            controllerElementsByType.put(type, controllerElements);
+        } else {
+            assert controllerElements.equals(computeControllerElements(type)) : "Stale controller elements of type " + type;
+        }
+        return controllerElements;
+    }
+
+    private <E extends LfElement> List<E> computeControllerElements(VoltageControl.Type type) {
+        // a loop on the buses: it runs again after each change of the controls, and most buses are not controlled
+        List<E> controllerElements = new ArrayList<>();
+        for (LfBus bus : busesByIndex) {
+            if (bus.isVoltageControlled(type)) {
+                VoltageControl<?> voltageControl = bus.getVoltageControl(type).orElseThrow();
+                if (voltageControl.getMergeStatus() == VoltageControl.MergeStatus.MAIN && voltageControl.isVisible()) {
+                    for (LfElement element : voltageControl.getMergedControllerElements()) {
+                        if (!element.isDisabled()) {
+                            controllerElements.add((E) element);
+                        }
+                    }
+                }
+            }
+        }
+        return Collections.unmodifiableList(controllerElements);
     }
 
     public List<LfBus> getControlledBuses(VoltageControl.Type type) {
@@ -1345,7 +1431,11 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
     }
 
     public void setGeneratorsInitialTargetPToTargetP() {
-        getBuses().stream().flatMap(b -> b.getGenerators().stream()).forEach(LfGenerator::setInitialTargetPToTargetP);
+        for (LfBus bus : getBuses()) {
+            for (LfGenerator generator : bus.getGenerators()) {
+                generator.setInitialTargetPToTargetP();
+            }
+        }
     }
 
     @Override

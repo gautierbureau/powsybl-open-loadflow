@@ -19,6 +19,7 @@ import com.powsybl.iidm.network.Country;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.MatrixFactory;
+import com.powsybl.openloadflow.ac.AcJacobianStructure;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
 import com.powsybl.openloadflow.ac.VoltageMagnitudeInitializer;
 import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreationParameters;
@@ -230,6 +231,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
 
     public static final String REACTIVE_LIMITS_MAX_SWITCH_PQ_PV_PARAM_NAME = "reactiveLimitsMaxPqPvSwitch";
 
+    public static final String REACTIVE_LIMITS_PQ_PV_SWITCH_VOLTAGE_DEADBAND_PARAM_NAME = "reactiveLimitsPqPvSwitchVoltageDeadband";
+
     public static final String PHASE_SHIFTER_CONTROL_MODE_PARAM_NAME = "phaseShifterControlMode";
 
     private static final String ALWAYS_UPDATE_NETWORK_PARAM_NAME = "alwaysUpdateNetwork";
@@ -271,6 +274,10 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
     public static final String SIMULATE_AUTOMATION_SYSTEMS_PARAM_NAME = "simulateAutomationSystems";
 
     public static final String AC_SOLVER_TYPE_PARAM_NAME = "acSolverType";
+
+    public static final String AC_JACOBIAN_STRUCTURE_PARAM_NAME = "acJacobianStructure";
+
+    public static final AcJacobianStructure AC_JACOBIAN_STRUCTURE_DEFAULT_VALUE = AcJacobianStructure.FIXED;
 
     public static final String MAX_NEWTON_KRYLOV_ITERATIONS_PARAM_NAME = "maxNewtonKrylovIterations";
 
@@ -485,6 +492,9 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
         new Parameter(REACTIVE_LIMITS_MAX_SWITCH_PQ_PV_PARAM_NAME, ParameterType.INTEGER,
             "Reactive limits maximum Pq Pv switch",
             ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE, ParameterScope.FUNCTIONAL, GENERATOR_VOLTAGE_CONTROL_CATEGORY_KEY),
+        new Parameter(REACTIVE_LIMITS_PQ_PV_SWITCH_VOLTAGE_DEADBAND_PARAM_NAME, ParameterType.DOUBLE,
+            "Reactive limits voltage deadband (in per unit) the controlled voltage must exceed to switch a bus at a reactive limit back from PQ to PV",
+            ReactiveLimitsOuterLoop.PQ_PV_SWITCH_VOLTAGE_DEADBAND_DEFAULT_VALUE, ParameterScope.FUNCTIONAL, GENERATOR_VOLTAGE_CONTROL_CATEGORY_KEY),
         new Parameter(NEWTONRAPHSON_STOPPING_CRITERIA_TYPE_PARAM_NAME, ParameterType.STRING,
             "Newton-Raphson stopping criteria type",
             NEWTONRAPHSON_STOPPING_CRITERIA_TYPE_DEFAULT_VALUE.name(), getEnumPossibleValues(NewtonRaphsonStoppingCriteriaType.class), ParameterScope.FUNCTIONAL, NEWTON_RAPHSON_CATEGORY_KEY),
@@ -573,6 +583,9 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
         new Parameter(AC_SOLVER_TYPE_PARAM_NAME, ParameterType.STRING,
             "AC solver type",
             NewtonRaphsonFactory.NAME, getAcSolverTypePossibleValues(), ParameterScope.FUNCTIONAL, SOLVER_CATEGORY_KEY),
+        new Parameter(AC_JACOBIAN_STRUCTURE_PARAM_NAME, ParameterType.STRING,
+            "Structure the AC Jacobian matrix is solved on: FIXED (pattern analysed once) or INDEXED (matrix of the equation index, built again when the equations change)",
+            AC_JACOBIAN_STRUCTURE_DEFAULT_VALUE.name(), getEnumPossibleValues(AcJacobianStructure.class), ParameterScope.TECHNICAL, SOLVER_CATEGORY_KEY),
         new Parameter(MAX_NEWTON_KRYLOV_ITERATIONS_PARAM_NAME, ParameterType.INTEGER,
             "Newton-Krylov max number of iterations",
             NewtonKrylovParameters.DEFAULT_MAX_ITERATIONS, ParameterScope.FUNCTIONAL, NEWTON_KRYLOV_CATEGORY_KEY),
@@ -760,6 +773,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
 
     private int reactiveLimitsMaxPqPvSwitch = ReactiveLimitsOuterLoop.MAX_SWITCH_PQ_PV_DEFAULT_VALUE;
 
+    private double reactiveLimitsPqPvSwitchVoltageDeadband = ReactiveLimitsOuterLoop.PQ_PV_SWITCH_VOLTAGE_DEADBAND_DEFAULT_VALUE;
+
     private PhaseShifterControlMode phaseShifterControlMode = PHASE_SHIFTER_CONTROL_MODE_DEFAULT_VALUE;
 
     private boolean alwaysUpdateNetwork = NewtonRaphsonParameters.ALWAYS_UPDATE_NETWORK_DEFAULT_VALUE;
@@ -801,6 +816,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
     private boolean simulateAutomationSystems = LfNetworkParameters.SIMULATE_AUTOMATION_SYSTEMS_DEFAULT_VALUE;
 
     private String acSolverType = NewtonRaphsonFactory.NAME;
+
+    private AcJacobianStructure acJacobianStructure = AC_JACOBIAN_STRUCTURE_DEFAULT_VALUE;
 
     private int maxNewtonKrylovIterations = NewtonKrylovParameters.DEFAULT_MAX_ITERATIONS;
 
@@ -1285,6 +1302,17 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
         return this;
     }
 
+    public double getReactiveLimitsPqPvSwitchVoltageDeadband() {
+        return reactiveLimitsPqPvSwitchVoltageDeadband;
+    }
+
+    public OpenLoadFlowParameters setReactiveLimitsPqPvSwitchVoltageDeadband(double reactiveLimitsPqPvSwitchVoltageDeadband) {
+        this.reactiveLimitsPqPvSwitchVoltageDeadband = checkParameterValue(reactiveLimitsPqPvSwitchVoltageDeadband,
+                reactiveLimitsPqPvSwitchVoltageDeadband >= 0,
+                REACTIVE_LIMITS_PQ_PV_SWITCH_VOLTAGE_DEADBAND_PARAM_NAME);
+        return this;
+    }
+
     public int getReactiveLimitsMaxPqPvSwitch() {
         return reactiveLimitsMaxPqPvSwitch;
     }
@@ -1475,6 +1503,15 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
 
     public OpenLoadFlowParameters setAcSolverType(String acSolverType) {
         this.acSolverType = AcSolverFactory.find(acSolverType).getName();
+        return this;
+    }
+
+    public AcJacobianStructure getAcJacobianStructure() {
+        return acJacobianStructure;
+    }
+
+    public OpenLoadFlowParameters setAcJacobianStructure(AcJacobianStructure acJacobianStructure) {
+        this.acJacobianStructure = Objects.requireNonNull(acJacobianStructure);
         return this;
     }
 
@@ -1784,6 +1821,7 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
             .ifPresent(this::setIncrementalTransformerRatioTapControlOuterLoopMaxTapShift);
         config.getOptionalBooleanProperty(SECONDARY_VOLTAGE_CONTROL_PARAM_NAME).ifPresent(this::setSecondaryVoltageControl);
         config.getOptionalIntProperty(REACTIVE_LIMITS_MAX_SWITCH_PQ_PV_PARAM_NAME).ifPresent(this::setReactiveLimitsMaxPqPvSwitch);
+        config.getOptionalDoubleProperty(REACTIVE_LIMITS_PQ_PV_SWITCH_VOLTAGE_DEADBAND_PARAM_NAME).ifPresent(this::setReactiveLimitsPqPvSwitchVoltageDeadband);
         config.getOptionalEnumProperty(PHASE_SHIFTER_CONTROL_MODE_PARAM_NAME, PhaseShifterControlMode.class)
             .ifPresent(this::setPhaseShifterControlMode);
         config.getOptionalBooleanProperty(ALWAYS_UPDATE_NETWORK_PARAM_NAME).ifPresent(this::setAlwaysUpdateNetwork);
@@ -1816,6 +1854,7 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
         config.getOptionalEnumProperty(DC_APPROXIMATION_TYPE_PARAM_NAME, DcApproximationType.class).ifPresent(this::setDcApproximationType);
         config.getOptionalBooleanProperty(SIMULATE_AUTOMATION_SYSTEMS_PARAM_NAME).ifPresent(this::setSimulateAutomationSystems);
         config.getOptionalStringProperty(AC_SOLVER_TYPE_PARAM_NAME).ifPresent(this::setAcSolverType);
+        config.getOptionalEnumProperty(AC_JACOBIAN_STRUCTURE_PARAM_NAME, AcJacobianStructure.class).ifPresent(this::setAcJacobianStructure);
         config.getOptionalIntProperty(MAX_NEWTON_KRYLOV_ITERATIONS_PARAM_NAME).ifPresent(this::setMaxNewtonKrylovIterations);
         config.getOptionalBooleanProperty(NEWTON_KRYLOV_LINE_SEARCH_PARAM_NAME).ifPresent(this::setNewtonKrylovLineSearch);
         config.getOptionalEnumProperty(REFERENCE_BUS_SELECTION_MODE_PARAM_NAME, ReferenceBusSelectionMode.class)
@@ -1927,6 +1966,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 .ifPresent(prop -> this.setSecondaryVoltageControl(Boolean.parseBoolean(prop)));
         Optional.ofNullable(properties.get(REACTIVE_LIMITS_MAX_SWITCH_PQ_PV_PARAM_NAME))
                 .ifPresent(prop -> this.setReactiveLimitsMaxPqPvSwitch(Integer.parseInt(prop)));
+        Optional.ofNullable(properties.get(REACTIVE_LIMITS_PQ_PV_SWITCH_VOLTAGE_DEADBAND_PARAM_NAME))
+                .ifPresent(prop -> this.setReactiveLimitsPqPvSwitchVoltageDeadband(Double.parseDouble(prop)));
         Optional.ofNullable(properties.get(PHASE_SHIFTER_CONTROL_MODE_PARAM_NAME))
                 .ifPresent(prop -> this.setPhaseShifterControlMode(PhaseShifterControlMode.valueOf(prop)));
         Optional.ofNullable(properties.get(ALWAYS_UPDATE_NETWORK_PARAM_NAME))
@@ -1978,6 +2019,8 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 .ifPresent(prop -> this.setSimulateAutomationSystems(Boolean.parseBoolean(prop)));
         Optional.ofNullable(properties.get(AC_SOLVER_TYPE_PARAM_NAME))
                 .ifPresent(this::setAcSolverType);
+        Optional.ofNullable(properties.get(AC_JACOBIAN_STRUCTURE_PARAM_NAME))
+                .ifPresent(prop -> this.setAcJacobianStructure(AcJacobianStructure.valueOf(prop)));
         Optional.ofNullable(properties.get(MAX_NEWTON_KRYLOV_ITERATIONS_PARAM_NAME))
                 .ifPresent(prop -> this.setMaxNewtonKrylovIterations(Integer.parseInt(prop)));
         Optional.ofNullable(properties.get(NEWTON_KRYLOV_LINE_SEARCH_PARAM_NAME))
@@ -2070,6 +2113,7 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
         map.put(INCREMENTAL_TRANSFORMER_RATIO_TAP_CONTROL_OUTER_LOOP_MAX_TAP_SHIFT_PARAM_NAME, incrementalTransformerRatioTapControlOuterLoopMaxTapShift);
         map.put(SECONDARY_VOLTAGE_CONTROL_PARAM_NAME, secondaryVoltageControl);
         map.put(REACTIVE_LIMITS_MAX_SWITCH_PQ_PV_PARAM_NAME, reactiveLimitsMaxPqPvSwitch);
+        map.put(REACTIVE_LIMITS_PQ_PV_SWITCH_VOLTAGE_DEADBAND_PARAM_NAME, reactiveLimitsPqPvSwitchVoltageDeadband);
         map.put(PHASE_SHIFTER_CONTROL_MODE_PARAM_NAME, phaseShifterControlMode);
         map.put(ALWAYS_UPDATE_NETWORK_PARAM_NAME, alwaysUpdateNetwork);
         map.put(MOST_MESHED_SLACK_BUS_SELECTOR_MAX_NOMINAL_VOLTAGE_PERCENTILE_PARAM_NAME, mostMeshedSlackBusSelectorMaxNominalVoltagePercentile);
@@ -2092,6 +2136,7 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
         map.put(DC_APPROXIMATION_TYPE_PARAM_NAME, dcApproximationType);
         map.put(SIMULATE_AUTOMATION_SYSTEMS_PARAM_NAME, simulateAutomationSystems);
         map.put(AC_SOLVER_TYPE_PARAM_NAME, acSolverType);
+        map.put(AC_JACOBIAN_STRUCTURE_PARAM_NAME, acJacobianStructure);
         map.put(MAX_NEWTON_KRYLOV_ITERATIONS_PARAM_NAME, maxNewtonKrylovIterations);
         map.put(NEWTON_KRYLOV_LINE_SEARCH_PARAM_NAME, newtonKrylovLineSearch);
         map.put(REFERENCE_BUS_SELECTION_MODE_PARAM_NAME, referenceBusSelectionMode);
@@ -2341,6 +2386,7 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 .setSlackDistributionFailureBehavior(parametersExt.getSlackDistributionFailureBehavior())
                 .setSolverFactory(solverFactory, parameters)
                 .setFixVoltageTargets(parametersExt.isFixVoltageTargets())
+                .setJacobianStructure(parametersExt.getAcJacobianStructure())
                 .setVoltageRemoteControlRobustMode(parametersExt.isVoltageRemoteControlRobustMode())
                 .setMinRealisticVoltage(parametersExt.minRealisticVoltage)
                 .setMaxRealisticVoltage(parametersExt.maxRealisticVoltage)
@@ -2502,6 +2548,7 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 extension1.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift() == extension2.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift() &&
                 extension1.isSecondaryVoltageControl() == extension2.isSecondaryVoltageControl() &&
                 extension1.getReactiveLimitsMaxPqPvSwitch() == extension2.getReactiveLimitsMaxPqPvSwitch() &&
+                extension1.getReactiveLimitsPqPvSwitchVoltageDeadband() == extension2.getReactiveLimitsPqPvSwitchVoltageDeadband() &&
                 extension1.getPhaseShifterControlMode() == extension2.getPhaseShifterControlMode() &&
                 extension1.isAlwaysUpdateNetwork() == extension2.isAlwaysUpdateNetwork() &&
                 extension1.getMostMeshedSlackBusSelectorMaxNominalVoltagePercentile() == extension2.getMostMeshedSlackBusSelectorMaxNominalVoltagePercentile() &&
@@ -2524,6 +2571,7 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 extension1.getDcApproximationType() == extension2.getDcApproximationType() &&
                 extension1.isSimulateAutomationSystems() == extension2.isSimulateAutomationSystems() &&
                 extension1.getAcSolverType().equals(extension2.getAcSolverType()) &&
+                extension1.getAcJacobianStructure() == extension2.getAcJacobianStructure() &&
                 extension1.getMaxNewtonKrylovIterations() == extension2.getMaxNewtonKrylovIterations() &&
                 extension1.isNewtonKrylovLineSearch() == extension2.isNewtonKrylovLineSearch() &&
                 extension1.getReferenceBusSelectionMode() == extension2.getReferenceBusSelectionMode() &&
@@ -2591,6 +2639,7 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 .setIncrementalTransformerRatioTapControlOuterLoopMaxTapShift(extension.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift())
                 .setSecondaryVoltageControl(extension.isSecondaryVoltageControl())
                 .setReactiveLimitsMaxPqPvSwitch(extension.getReactiveLimitsMaxPqPvSwitch())
+                .setReactiveLimitsPqPvSwitchVoltageDeadband(extension.getReactiveLimitsPqPvSwitchVoltageDeadband())
                 .setPhaseShifterControlMode(extension.getPhaseShifterControlMode())
                 .setAlwaysUpdateNetwork(extension.isAlwaysUpdateNetwork())
                 .setMostMeshedSlackBusSelectorMaxNominalVoltagePercentile(extension.getMostMeshedSlackBusSelectorMaxNominalVoltagePercentile())
@@ -2612,6 +2661,7 @@ public class OpenLoadFlowParameters extends AbstractExtension<LoadFlowParameters
                 .setUseLoadModel(extension.isUseLoadModel())
                 .setDcApproximationType(extension.getDcApproximationType())
                 .setAcSolverType(extension.getAcSolverType())
+                .setAcJacobianStructure(extension.getAcJacobianStructure())
                 .setMaxNewtonKrylovIterations(extension.getMaxNewtonKrylovIterations())
                 .setNewtonKrylovLineSearch(extension.isNewtonKrylovLineSearch())
                 .setSimulateAutomationSystems(extension.isSimulateAutomationSystems())

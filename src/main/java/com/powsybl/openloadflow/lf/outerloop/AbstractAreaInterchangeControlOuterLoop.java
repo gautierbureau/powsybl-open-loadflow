@@ -115,27 +115,36 @@ public abstract class AbstractAreaInterchangeControlOuterLoop<
         AreaInterchangeControlContextData contextData = (AreaInterchangeControlContextData) context.getData();
         Map<String, Double> slackDistributionFactorByAreaId = contextData.getSlackDistributionFactorByAreaId();
 
+        // The interchange of each area, read once: the state does not change during the check.
+        List<LfArea> areas = network.getAreaStream().toList();
+        double[] interchange = new double[areas.size()];
+        double[] interchangeTarget = new double[areas.size()];
+        double[] mismatchWithSlack = new double[areas.size()];
+        for (int k = 0; k < areas.size(); k++) {
+            LfArea area = areas.get(k);
+            interchange[k] = area.getInterchange();
+            interchangeTarget[k] = area.getInterchangeTarget();
+            mismatchWithSlack[k] = AreaInterchangeControlDecisions.interchangeMismatchWithSlack(interchange[k], interchangeTarget[k],
+                    slackDistributionFactorByAreaId.getOrDefault(area.getId(), 0.0), slackBusActivePowerMismatch);
+        }
+
         // First, we balance the areas that have a mismatch in their interchange power flow, and take the slack mismatch into account.
-        Map<LfArea, Double> areaInterchangeWithSlackMismatches = network.getAreaStream()
-                .collect(Collectors.toMap(area -> area, area -> getInterchangeMismatchWithSlack(area, slackBusActivePowerMismatch, slackDistributionFactorByAreaId)));
-        List<LfArea> areasToBalance = areaInterchangeWithSlackMismatches.entrySet().stream()
-                .filter(entry -> {
-                    double areaActivePowerMismatch = entry.getValue();
-                    return !lessThanInterchangeMaxMismatch(areaActivePowerMismatch);
-                })
-                .map(Map.Entry::getKey)
-                .toList();
+        List<Integer> areasToBalance = new ArrayList<>();
+        for (int k = 0; k < areas.size(); k++) {
+            if (!lessThanInterchangeMaxMismatch(mismatchWithSlack[k])) {
+                areasToBalance.add(k);
+            }
+        }
 
         if (areasToBalance.isEmpty()) {
             // Balancing takes the slack mismatch of the Areas into account. Now that the balancing is done, we check only the interchange power flow mismatch.
             // Doing this we make sure that the Areas' interchange targets have been reached and that the slack is correctly distributed.
-            Map<String, Double> areaInterchangeMismatches = network.getAreaStream()
-                    .filter(area -> {
-                        double areaInterchangeMismatch = getInterchangeMismatch(area);
-                        return !lessThanInterchangeMaxMismatch(areaInterchangeMismatch);
-                    }).collect(Collectors.toMap(LfArea::getId, this::getInterchangeMismatch));
+            boolean areaInterchangeMismatches = false;
+            for (int k = 0; k < areas.size(); k++) {
+                areaInterchangeMismatches |= !lessThanInterchangeMaxMismatch(AreaInterchangeControlDecisions.interchangeMismatch(interchange[k], interchangeTarget[k]));
+            }
 
-            if (areaInterchangeMismatches.isEmpty() && lessThanSlackBusMaxMismatch(slackBusActivePowerMismatch)) {
+            if (!areaInterchangeMismatches && lessThanSlackBusMaxMismatch(slackBusActivePowerMismatch)) {
                 logger.debug("Already balanced");
             } else {
                 // If some mismatch remains, we distribute the slack bus active power on the buses without area
@@ -161,8 +170,11 @@ public abstract class AbstractAreaInterchangeControlOuterLoop<
             }
             return new OuterLoopResult(this, OuterLoopStatus.STABLE);
         }
-        Map<String, Pair<Set<LfBus>, Double>> areasDistributionMap = areasToBalance.stream()
-                .collect(Collectors.toMap(LfArea::getId, area -> Pair.of(area.getBuses(), getInterchangeMismatchWithSlack(area, slackBusActivePowerMismatch, slackDistributionFactorByAreaId))));
+        // distributed in the order of a HashMap by area id, as before
+        Map<String, Pair<Set<LfBus>, Double>> areasDistributionMap = new HashMap<>();
+        for (int k : areasToBalance) {
+            areasDistributionMap.put(areas.get(k).getId(), Pair.of(areas.get(k).getBuses(), mismatchWithSlack[k]));
+        }
         List<AreaActivePowerDistributionResult> areasDistributionResults = distributeActivePower(areasDistributionMap);
         return buildOuterLoopResult(areasDistributionResults, reportNode, context);
     }
@@ -184,7 +196,7 @@ public abstract class AbstractAreaInterchangeControlOuterLoop<
         Map<LfArea, Double> interchangeMarginByArea = getSlackDistributionFactorByArea(mismatch, network.getAreas(), slackDistributionFactorByAreaId);
         Map<LfArea, Double> distributionFactorByArea = normalizeSlackParticipationFactors(interchangeMarginByArea);
         double remainingMismatch = mismatch;
-        while (distributionFactorByArea.values().stream().mapToDouble(f -> f).sum() > 0 && Math.abs(remainingMismatch) > ActivePowerDistribution.P_RESIDUE_EPS) {
+        while (distributionFactorByArea.values().stream().mapToDouble(f -> f).sum() > 0 && AreaInterchangeControlDecisions.isAboveResidue(remainingMismatch)) {
             remainingMismatch = distributeOnAreas(remainingMismatch, distributionFactorByArea, resultByArea);
             distributionFactorByArea = normalizeSlackParticipationFactors(distributionFactorByArea);
         }
@@ -202,27 +214,21 @@ public abstract class AbstractAreaInterchangeControlOuterLoop<
         var areaIteratorSortedByFactor = areasSortedByFactor.iterator();
 
         double remainingMismatch = mismatch;
-        while (areaIteratorSortedByFactor.hasNext() && Math.abs(remainingMismatch) > ActivePowerDistribution.P_RESIDUE_EPS) {
+        while (areaIteratorSortedByFactor.hasNext() && AreaInterchangeControlDecisions.isAboveResidue(remainingMismatch)) {
             LfArea area = areaIteratorSortedByFactor.next();
             double factor = distributionFactorByArea.get(area);
-            double areaActivePowerMismatch;
-            if (Math.abs(mismatch * factor) > ActivePowerDistribution.P_RESIDUE_EPS) {
-                areaActivePowerMismatch = mismatch * factor;
-            } else {
-                // If the mismatch is too small we make sure that all mismatch is distributed by making the areas higher on the list distribute more.
-                // Add this small 1.01 factor to make sure to be above epsilon and distribute some power
-                areaActivePowerMismatch = Math.signum(mismatch) * 1.01 * ActivePowerDistribution.P_RESIDUE_EPS;
-            }
+            // If the mismatch is too small we make sure that all mismatch is distributed by making the areas higher on the list distribute more.
+            double areaActivePowerMismatch = AreaInterchangeControlDecisions.areaShare(mismatch, factor);
             ActivePowerDistribution.Result distributionResult = activePowerDistribution.run(null, area.getBuses(), areaActivePowerMismatch);
 
-            if (Math.abs(distributionResult.remainingMismatch()) > ActivePowerDistribution.P_RESIDUE_EPS) {
+            if (AreaInterchangeControlDecisions.isAboveResidue(distributionResult.remainingMismatch())) {
                 // The area cannot distribute anymore, its factor is set to 0
                 distributionFactorByArea.put(area, 0.);
             }
             var previousResult = resultByArea.getOrDefault(area, new AreaActivePowerDistributionResult(area.getId(), ActivePowerDistributionType.SLACK, 0, 0, false, 0));
             resultByArea.put(area, updateResult(previousResult, areaActivePowerMismatch, distributionResult));
 
-            remainingMismatch = remainingMismatch - areaActivePowerMismatch + distributionResult.remainingMismatch();
+            remainingMismatch = AreaInterchangeControlDecisions.remainingAfter(remainingMismatch, areaActivePowerMismatch, distributionResult.remainingMismatch());
         }
 
         while (areaIteratorSortedByFactor.hasNext()) {
@@ -249,7 +255,8 @@ public abstract class AbstractAreaInterchangeControlOuterLoop<
         return areas.stream()
                 .collect(Collectors.toMap(
                         a -> a,
-                        a -> Math.signum(mismatch) * getInterchangeMismatchWithSlack(a, mismatch, slackDistributionFactorByAreaId) + this.areaInterchangePMaxMismatch / PerUnit.SB));
+                        a -> AreaInterchangeControlDecisions.slackMargin(mismatch, getInterchangeMismatchWithSlack(a, mismatch, slackDistributionFactorByAreaId),
+                                this.areaInterchangePMaxMismatch)));
     }
 
     private Map<LfArea, Double> normalizeSlackParticipationFactors(Map<LfArea, Double> interchangeMarginByArea) {
@@ -259,19 +266,20 @@ public abstract class AbstractAreaInterchangeControlOuterLoop<
     }
 
     protected boolean lessThanInterchangeMaxMismatch(double mismatch) {
-        return Math.abs(mismatch) <= this.areaInterchangePMaxMismatch / PerUnit.SB || Math.abs(mismatch) <= ActivePowerDistribution.P_RESIDUE_EPS;
+        return AreaInterchangeControlDecisions.isWithinMaxMismatch(mismatch, this.areaInterchangePMaxMismatch);
     }
 
     boolean lessThanSlackBusMaxMismatch(double mismatch) {
-        return Math.abs(mismatch) <= this.slackBusPMaxMismatch / PerUnit.SB || Math.abs(mismatch) <= ActivePowerDistribution.P_RESIDUE_EPS;
+        return AreaInterchangeControlDecisions.isWithinMaxMismatch(mismatch, this.slackBusPMaxMismatch);
     }
 
     protected double getInterchangeMismatch(LfArea area) {
-        return area.getInterchange() - area.getInterchangeTarget();
+        return AreaInterchangeControlDecisions.interchangeMismatch(area.getInterchange(), area.getInterchangeTarget());
     }
 
     protected double getInterchangeMismatchWithSlack(LfArea area, double slackBusActivePowerMismatch, Map<String, Double> slackDistributionFactorByAreaId) {
-        return area.getInterchange() - area.getInterchangeTarget() + getSlackInjection(area.getId(), slackBusActivePowerMismatch, slackDistributionFactorByAreaId);
+        return AreaInterchangeControlDecisions.interchangeMismatchWithSlack(area.getInterchange(), area.getInterchangeTarget(),
+                slackDistributionFactorByAreaId.getOrDefault(area.getId(), 0.0), slackBusActivePowerMismatch);
     }
 
     protected double getSlackInjection(String areaId, double slackBusActivePowerMismatch, Map<String, Double> slackDistributionFactorByAreaId) {
