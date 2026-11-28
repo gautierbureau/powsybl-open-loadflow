@@ -202,7 +202,7 @@ public class GenerationActivePowerDistributionStep implements ActivePowerDistrib
         // decide
         int iteration = 0;
         while (elementCount > 0 && Math.abs(remainingMismatch) > ActivePowerDistribution.P_RESIDUE_EPS) {
-            double factorSum = sum(factor, elements, elementCount);
+            double factorSum = ActivePowerDistribution.compensatedSum(factor, elements, elementCount);
             if (factorSum > 0.0) {
                 for (int k = 0; k < elementCount; k++) {
                     factor[elements[k]] /= factorSum;
@@ -281,30 +281,9 @@ public class GenerationActivePowerDistributionStep implements ActivePowerDistrib
             movedSum = velvel;
             simpleSum += value;
         }
-        double moved = finalSum(movedSum, compensation, simpleSum);
+        double moved = ActivePowerDistribution.finalSum(movedSum, compensation, simpleSum);
 
         return new ActivePowerDistribution.Result(iteration, remainingMismatch, moved > ActivePowerDistribution.P_RESIDUE_EPS * 0.9);
-    }
-
-    /** The compensated sum of {@code DoubleStream.sum}, term for term, of the values at the given indices. */
-    private static double sum(double[] values, int[] indices, int count) {
-        double sum = 0;
-        double compensation = 0;
-        double simpleSum = 0;
-        for (int k = 0; k < count; k++) {
-            double value = values[indices[k]];
-            double tmp = value - compensation;
-            double velvel = sum + tmp;
-            compensation = (velvel - sum) - tmp;
-            sum = velvel;
-            simpleSum += value;
-        }
-        return finalSum(sum, compensation, simpleSum);
-    }
-
-    private static double finalSum(double sum, double compensation, double simpleSum) {
-        double tmp = sum - compensation;
-        return Double.isNaN(tmp) && Double.isInfinite(simpleSum) ? simpleSum : tmp;
     }
 
     private double getParticipationFactor(LfGenerator generator, double mismatch) {

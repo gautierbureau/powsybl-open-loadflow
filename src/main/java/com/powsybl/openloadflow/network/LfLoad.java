@@ -48,6 +48,9 @@ public interface LfLoad extends PropertyBag, LfCopyable<LfLoad, LfBus> {
 
     double calculateNewTargetQ(double diffTargetP);
 
+    /** The terms {@link #calculateNewTargetQ} sums, one per original load, read from the network now. */
+    LoadPowerFactorTerms getPowerFactorTerms();
+
     List<String> getOriginalIds();
 
     int getOriginalLoadCount();
