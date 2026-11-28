@@ -569,16 +569,73 @@ public abstract class AbstractLfBus extends AbstractElement implements LfBus {
     }
 
     private double getLimitQ(ToDoubleFunction<LfGenerator> limitQ) {
-        return generators.stream()
-                .filter(g -> !g.isDisabled())
-                .mapToDouble(generator -> (generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE ||
-                        generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER) ?
-                        limitQ.applyAsDouble(generator) : generator.getTargetQ()).sum();
+        // the compensated sum of DoubleStream.sum, term for term, without the stream
+        double sum = 0;
+        double compensation = 0;
+        double simpleSum = 0;
+        for (LfGenerator generator : generators) {
+            if (generator.isDisabled()) {
+                continue;
+            }
+            double value = generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE
+                    || generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER
+                    ? limitQ.applyAsDouble(generator) : generator.getTargetQ();
+            double tmp = value - compensation;
+            double velvel = sum + tmp;
+            compensation = (velvel - sum) - tmp;
+            sum = velvel;
+            simpleSum += value;
+        }
+        double tmp = sum - compensation;
+        return Double.isNaN(tmp) && Double.isInfinite(simpleSum) ? simpleSum : tmp;
     }
 
     @Override
     public double getMinQ() {
         return getLimitQ(LfGenerator::getMinQ);
+    }
+
+    /**
+     * Both sums of {@link #getLimitQ} in one pass over the generators: the target Q of a generator that does not
+     * control is read once for both.
+     */
+    @Override
+    public void getMinMaxQ(double[] minMaxQ) {
+        double minSum = 0;
+        double minCompensation = 0;
+        double minSimpleSum = 0;
+        double maxSum = 0;
+        double maxCompensation = 0;
+        double maxSimpleSum = 0;
+        for (LfGenerator generator : generators) {
+            if (generator.isDisabled()) {
+                continue;
+            }
+            double minValue;
+            double maxValue;
+            if (generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE
+                    || generator.getGeneratorControlType() == LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER) {
+                minValue = generator.getMinQ();
+                maxValue = generator.getMaxQ();
+            } else {
+                minValue = generator.getTargetQ();
+                maxValue = minValue;
+            }
+            double minTmp = minValue - minCompensation;
+            double minVelvel = minSum + minTmp;
+            minCompensation = (minVelvel - minSum) - minTmp;
+            minSum = minVelvel;
+            minSimpleSum += minValue;
+            double maxTmp = maxValue - maxCompensation;
+            double maxVelvel = maxSum + maxTmp;
+            maxCompensation = (maxVelvel - maxSum) - maxTmp;
+            maxSum = maxVelvel;
+            maxSimpleSum += maxValue;
+        }
+        double minTmp = minSum - minCompensation;
+        minMaxQ[0] = Double.isNaN(minTmp) && Double.isInfinite(minSimpleSum) ? minSimpleSum : minTmp;
+        double maxTmp = maxSum - maxCompensation;
+        minMaxQ[1] = Double.isNaN(maxTmp) && Double.isInfinite(maxSimpleSum) ? maxSimpleSum : maxTmp;
     }
 
     @Override

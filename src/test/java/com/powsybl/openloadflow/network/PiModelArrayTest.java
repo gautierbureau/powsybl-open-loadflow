@@ -7,7 +7,6 @@
  */
 package com.powsybl.openloadflow.network;
 
-import com.powsybl.openloadflow.network.PiModelArray.FirstTapPositionAboveFinder;
 import org.apache.commons.lang3.Range;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -16,7 +15,6 @@ import org.mockito.Mockito;
 import java.util.Collections;
 import java.util.List;
 
-import static com.powsybl.openloadflow.network.PiModelArray.FirstTapPositionAboveFinder.nextTapPositionIndex;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -111,45 +109,61 @@ class PiModelArrayTest {
 
     @Test
     void nextTapPositionIndexTest() {
-        assertEquals(0, nextTapPositionIndex(1, -0.01, piModelArray.getModels(), PiModel::getA1));
-        assertEquals(2, nextTapPositionIndex(1, 0.01, piModelArray.getModels(), PiModel::getA1));
-        assertEquals(0, nextTapPositionIndex(1, -0.5, piModelArray.getModels(), PiModel::getA1));
-        assertEquals(2, nextTapPositionIndex(1, 0.5, piModelArray.getModels(), PiModel::getA1));
-        assertEquals(-1, nextTapPositionIndex(0, -0.01, piModelArray.getModels(), PiModel::getA1));
-        assertEquals(1, nextTapPositionIndex(0, 0.01, piModelArray.getModels(), PiModel::getA1));
-        assertEquals(1, nextTapPositionIndex(0, 1, piModelArray.getModels(), PiModel::getA1));
-        assertEquals(-1, nextTapPositionIndex(2, 0.01, piModelArray.getModels(), PiModel::getA1));
-        assertEquals(1, nextTapPositionIndex(2, -0.01, piModelArray.getModels(), PiModel::getA1));
-        assertEquals(1, nextTapPositionIndex(2, -1, piModelArray.getModels(), PiModel::getA1));
+        assertEquals(0, DiscretePositionDecisions.nextPosition(piModelArray.getTapA1s(), 1, -0.01));
+        assertEquals(2, DiscretePositionDecisions.nextPosition(piModelArray.getTapA1s(), 1, 0.01));
+        assertEquals(0, DiscretePositionDecisions.nextPosition(piModelArray.getTapA1s(), 1, -0.5));
+        assertEquals(2, DiscretePositionDecisions.nextPosition(piModelArray.getTapA1s(), 1, 0.5));
+        assertEquals(-1, DiscretePositionDecisions.nextPosition(piModelArray.getTapA1s(), 0, -0.01));
+        assertEquals(1, DiscretePositionDecisions.nextPosition(piModelArray.getTapA1s(), 0, 0.01));
+        assertEquals(1, DiscretePositionDecisions.nextPosition(piModelArray.getTapA1s(), 0, 1));
+        assertEquals(-1, DiscretePositionDecisions.nextPosition(piModelArray.getTapA1s(), 2, 0.01));
+        assertEquals(1, DiscretePositionDecisions.nextPosition(piModelArray.getTapA1s(), 2, -0.01));
+        assertEquals(1, DiscretePositionDecisions.nextPosition(piModelArray.getTapA1s(), 2, -1));
     }
 
     @Test
     void nextTapPositionIndexOnReversePiModelArrayTest() {
         PiModelArray reversedPiModelArray = new PiModelArray(List.of(piModel3, piModel2, piModel1), 1, 2);
         reversedPiModelArray.setBranch(branch);
-        assertEquals(-1, nextTapPositionIndex(1, 0, reversedPiModelArray.getModels(), PiModel::getA1));
-        assertEquals(2, nextTapPositionIndex(1, -0.01, reversedPiModelArray.getModels(), PiModel::getA1));
-        assertEquals(0, nextTapPositionIndex(1, 0.01, reversedPiModelArray.getModels(), PiModel::getA1));
-        assertEquals(2, nextTapPositionIndex(1, -0.5, reversedPiModelArray.getModels(), PiModel::getA1));
-        assertEquals(0, nextTapPositionIndex(1, 0.5, reversedPiModelArray.getModels(), PiModel::getA1));
-        assertEquals(1, nextTapPositionIndex(0, -0.01, reversedPiModelArray.getModels(), PiModel::getA1));
-        assertEquals(-1, nextTapPositionIndex(0, 0.01, reversedPiModelArray.getModels(), PiModel::getA1));
-        assertEquals(-1, nextTapPositionIndex(0, 1, reversedPiModelArray.getModels(), PiModel::getA1));
-        assertEquals(1, nextTapPositionIndex(2, 0.01, reversedPiModelArray.getModels(), PiModel::getA1));
-        assertEquals(-1, nextTapPositionIndex(2, -0.01, reversedPiModelArray.getModels(), PiModel::getA1));
-        assertEquals(-1, nextTapPositionIndex(2, -1, reversedPiModelArray.getModels(), PiModel::getA1));
+        assertEquals(-1, DiscretePositionDecisions.nextPosition(reversedPiModelArray.getTapA1s(), 1, 0));
+        assertEquals(2, DiscretePositionDecisions.nextPosition(reversedPiModelArray.getTapA1s(), 1, -0.01));
+        assertEquals(0, DiscretePositionDecisions.nextPosition(reversedPiModelArray.getTapA1s(), 1, 0.01));
+        assertEquals(2, DiscretePositionDecisions.nextPosition(reversedPiModelArray.getTapA1s(), 1, -0.5));
+        assertEquals(0, DiscretePositionDecisions.nextPosition(reversedPiModelArray.getTapA1s(), 1, 0.5));
+        assertEquals(1, DiscretePositionDecisions.nextPosition(reversedPiModelArray.getTapA1s(), 0, -0.01));
+        assertEquals(-1, DiscretePositionDecisions.nextPosition(reversedPiModelArray.getTapA1s(), 0, 0.01));
+        assertEquals(-1, DiscretePositionDecisions.nextPosition(reversedPiModelArray.getTapA1s(), 0, 1));
+        assertEquals(1, DiscretePositionDecisions.nextPosition(reversedPiModelArray.getTapA1s(), 2, 0.01));
+        assertEquals(-1, DiscretePositionDecisions.nextPosition(reversedPiModelArray.getTapA1s(), 2, -0.01));
+        assertEquals(-1, DiscretePositionDecisions.nextPosition(reversedPiModelArray.getTapA1s(), 2, -1));
     }
 
     @Test
     void findFirstTapPositionAboveTest() {
-        assertEquals(0, new FirstTapPositionAboveFinder(-0.01).find(piModelArray.getModels(), 1, PiModel::getA1, Range.of(0, 2), Integer.MAX_VALUE));
-        assertEquals(1, new FirstTapPositionAboveFinder(-0.01).find(piModelArray.getModels(), 2, PiModel::getA1, Range.of(0, 2), Integer.MAX_VALUE));
-        assertEquals(0, new FirstTapPositionAboveFinder(-0.11).find(piModelArray.getModels(), 2, PiModel::getA1, Range.of(0, 2), Integer.MAX_VALUE));
-        assertEquals(0, new FirstTapPositionAboveFinder(-100).find(piModelArray.getModels(), 2, PiModel::getA1, Range.of(0, 2), Integer.MAX_VALUE));
-        assertEquals(1, new FirstTapPositionAboveFinder(0.01).find(piModelArray.getModels(), 0, PiModel::getA1, Range.of(0, 2), Integer.MAX_VALUE));
-        assertEquals(2, new FirstTapPositionAboveFinder(0.12).find(piModelArray.getModels(), 0, PiModel::getA1, Range.of(0, 2), Integer.MAX_VALUE));
-        assertEquals(2, new FirstTapPositionAboveFinder(5).find(piModelArray.getModels(), 0, PiModel::getA1, Range.of(0, 2), Integer.MAX_VALUE));
-        assertEquals(1, new FirstTapPositionAboveFinder(5).find(piModelArray.getModels(), 0, PiModel::getA1, Range.of(0, 1), Integer.MAX_VALUE));
-        assertEquals(1, new FirstTapPositionAboveFinder(5).find(piModelArray.getModels(), 0, PiModel::getA1, Range.of(0, 2), 1));
+        assertEquals(0, DiscretePositionDecisions.firstPositionAbove(piModelArray.getTapA1s(), 1, 0, 2, Integer.MAX_VALUE, -0.01));
+        assertEquals(1, DiscretePositionDecisions.firstPositionAbove(piModelArray.getTapA1s(), 2, 0, 2, Integer.MAX_VALUE, -0.01));
+        assertEquals(0, DiscretePositionDecisions.firstPositionAbove(piModelArray.getTapA1s(), 2, 0, 2, Integer.MAX_VALUE, -0.11));
+        assertEquals(0, DiscretePositionDecisions.firstPositionAbove(piModelArray.getTapA1s(), 2, 0, 2, Integer.MAX_VALUE, -100));
+        assertEquals(1, DiscretePositionDecisions.firstPositionAbove(piModelArray.getTapA1s(), 0, 0, 2, Integer.MAX_VALUE, 0.01));
+        assertEquals(2, DiscretePositionDecisions.firstPositionAbove(piModelArray.getTapA1s(), 0, 0, 2, Integer.MAX_VALUE, 0.12));
+        assertEquals(2, DiscretePositionDecisions.firstPositionAbove(piModelArray.getTapA1s(), 0, 0, 2, Integer.MAX_VALUE, 5));
+        assertEquals(1, DiscretePositionDecisions.firstPositionAbove(piModelArray.getTapA1s(), 0, 0, 1, Integer.MAX_VALUE, 5));
+        assertEquals(1, DiscretePositionDecisions.firstPositionAbove(piModelArray.getTapA1s(), 0, 0, 2, 1, 5));
+    }
+
+    @Test
+    void tapModels() {
+        TapPiModels taps = piModelArray.getTapModels();
+        assertEquals(3, taps.getTapCount());
+        assertArrayEquals(new double[] {1, 1.01, 1.05}, taps.r());
+        assertArrayEquals(new double[] {2.4, 2.41, 2.43}, taps.x());
+        assertArrayEquals(new double[] {1, 1.1, 1.2}, taps.r1());
+        assertArrayEquals(new double[] {0, 0.1, 0.2}, taps.a1());
+        assertEquals(piModel2.getY(), taps.y()[1]);
+        assertEquals(piModel3.getKsi(), taps.ksi()[2]);
+        // read now: a minimum impedance change is in the next table
+        piModelArray.setMinZ(10, LoadFlowModel.AC);
+        assertEquals(piModel1.getY(), piModelArray.getTapModels().y()[0]);
+        assertNotEquals(taps.y()[0], piModelArray.getTapModels().y()[0]);
     }
 }

@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.network;
 
 import com.powsybl.openloadflow.util.PerUnit;
 
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -56,6 +57,27 @@ public class Control {
             }
         }
         return qKeys;
+    }
+
+    /**
+     * The share of each controller in a distribution of reactive power: its key over the sum of the keys of the active
+     * controllers, 0 for an inactive one. The sum is the one of {@link Arrays#stream(double[])}, a compensated sum in
+     * member order, so that the shares are the same to the last bit wherever they are computed.
+     *
+     * @param keys the raw keys of the controllers, in member order; the inactive ones are set to 0
+     * @param active whether each controller takes part
+     * @param shares where the shares are written
+     */
+    static void distribute(double[] keys, boolean[] active, double[] shares) {
+        for (int i = 0; i < keys.length; i++) {
+            if (!active[i]) {
+                keys[i] = 0d;
+            }
+        }
+        double sum = Arrays.stream(keys).sum();
+        for (int i = 0; i < keys.length; i++) {
+            shares[i] = sum == 0 ? 0 : keys[i] / sum;
+        }
     }
 
     static double[] createReactiveKeys(List<LfBus> controllerBuses, LfGenerator.GeneratorControlType generatorControlType) {

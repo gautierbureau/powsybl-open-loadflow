@@ -27,7 +27,7 @@ public class TransformerRatioManager {
         }
 
         public SharedControl(double maxR1, double minR1, double a, double b, int count) {
-            this(maxR1, minR1, (minR1 * a + maxR1 * b) / count);
+            this(maxR1, minR1, TransformerRatioDecisions.groupInitialR1(maxR1, minR1, a, b, count));
         }
     }
 
@@ -63,10 +63,8 @@ public class TransformerRatioManager {
             double minR1 = sharedControl.minR1();
             double initialR1 = sharedControl.initialR1();
             double computedR1 = branch.getPiModel().getR1(); // equations provide the same R1 for all branches
-            double updatedR1 = computedR1 >= initialR1 ?
-                    individualInitialR1 + (computedR1 - initialR1) * (branch.getPiModel().getMaxR1() - individualInitialR1) / (maxR1 - initialR1)
-                    :
-                    individualInitialR1 - (initialR1 - computedR1) * (individualInitialR1 - branch.getPiModel().getMinR1()) / (initialR1 - minR1);
+            double updatedR1 = TransformerRatioDecisions.updatedR1(computedR1, individualInitialR1, branch.getPiModel().getMinR1(),
+                    branch.getPiModel().getMaxR1(), minR1, maxR1, initialR1);
             branch.getPiModel().setR1(updatedR1);
         }
     }
@@ -84,8 +82,8 @@ public class TransformerRatioManager {
             SharedControl sharedControl = sharedControlByBranchId.get(branch.getId()).getRight();
             double minR1 = sharedControl.minR1();
             double maxR1 = sharedControl.maxR1();
-            if (r1 < minR1 || r1 > maxR1) {
-                piModel.setR1(r1 > maxR1 ? maxR1 : minR1);
+            if (TransformerRatioDecisions.isOutOfRange(r1, minR1, maxR1)) {
+                piModel.setR1(TransformerRatioDecisions.extremeR1(r1, minR1, maxR1));
                 piModel.roundR1ToClosestTap();
                 branch.setVoltageControlEnabled(false);
                 return true;
@@ -109,13 +107,8 @@ public class TransformerRatioManager {
                     double r1 = piModel.getR1();
                     double maxR1 = piModel.getMaxR1();
                     double minR1 = piModel.getMinR1();
-                    if (maxR1 != minR1) {
-                        a += (maxR1 - r1) / (maxR1 - minR1);
-                        b += (r1 - minR1) / (maxR1 - minR1);
-                    } else {
-                        a += 1;
-                        b += 1;
-                    }
+                    a += TransformerRatioDecisions.shareFromMax(r1, minR1, maxR1);
+                    b += TransformerRatioDecisions.shareFromMin(r1, minR1, maxR1);
                 }
                 SharedControl sharedControl = new SharedControl(
                     controllerBranches.stream().mapToDouble(branch -> branch.getPiModel().getMaxR1()).average().orElseThrow(),

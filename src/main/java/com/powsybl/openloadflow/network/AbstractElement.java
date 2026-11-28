@@ -57,6 +57,7 @@ public abstract class AbstractElement extends AbstractPropertyBag implements LfE
     }
 
     protected void notifyDisable() {
+        network.invalidateControllerElements();
         for (LfNetworkListener listener : network.getListeners()) {
             listener.onDisableChange(this, disabled);
         }

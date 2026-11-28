@@ -1317,7 +1317,30 @@ public class LfNetwork extends AbstractPropertyBag implements PropertyBag, LfEle
     }
 
     @SuppressWarnings("unchecked")
+    /**
+     * The controller elements of each voltage control type, kept from one call to the next. They are computed again
+     * after any change they depend on: an element disabled or enabled, a zero impedance network created (merge status),
+     * or a voltage control disabled or enabled.
+     */
+    private final EnumMap<VoltageControl.Type, List<? extends LfElement>> controllerElementsByType = new EnumMap<>(VoltageControl.Type.class);
+
+    public void invalidateControllerElements() {
+        controllerElementsByType.clear();
+    }
+
+    @SuppressWarnings("unchecked")
     public <E extends LfElement> List<E> getControllerElements(VoltageControl.Type type) {
+        List<E> controllerElements = (List<E>) controllerElementsByType.get(type);
+        if (controllerElements == null) {
+            controllerElements = computeControllerElements(type);
+            controllerElementsByType.put(type, controllerElements);
+        } else {
+            assert controllerElements.equals(computeControllerElements(type)) : "Stale controller elements of type " + type;
+        }
+        return controllerElements;
+    }
+
+    private <E extends LfElement> List<E> computeControllerElements(VoltageControl.Type type) {
         return busesByIndex.stream()
                 .filter(bus -> bus.isVoltageControlled(type))
                 .filter(bus -> bus.getVoltageControl(type).orElseThrow().getMergeStatus() == VoltageControl.MergeStatus.MAIN)

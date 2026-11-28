@@ -49,11 +49,27 @@ public class AcDcConverterPowerLimitsOuterLoop implements AcOuterLoop {
             List<LfAcDcConverter> converters = LfDcComponentValidator.getAcDcConverters(context.getNetwork(), numDcc);
 
             // Get the converter to change in P_PCC mode, if any needs to.
-            LfAcDcConverter selectedConverter = selectConverterToSwitchInPpccMode(converters);
+            int count = converters.size();
+            boolean[] controlsDcVoltage = new boolean[count];
+            double[] pac = new double[count];
+            double[] minP = new double[count];
+            double[] maxP = new double[count];
+            for (int i = 0; i < count; i++) {
+                LfAcDcConverter converter = converters.get(i);
+                AcDcConverter.ControlMode mode = converter.getControlMode();
+                controlsDcVoltage[i] = mode == AcDcConverter.ControlMode.V_DC || mode == AcDcConverter.ControlMode.DC_DROOP;
+                if (controlsDcVoltage[i]) {
+                    pac[i] = converter.getPac();
+                    minP[i] = converter.getMinP();
+                    maxP[i] = converter.getMaxP();
+                }
+            }
+            int selected = AcDcConverterPowerLimitsDecisions.selectConverter(count, controlsDcVoltage, pac, minP, maxP, maxActivePowerMismatch);
 
-            if (selectedConverter == null) {  // No converters violate its limit
+            if (selected < 0) {  // No converters violate its limit
                 continue;
             }
+            LfAcDcConverter selectedConverter = converters.get(selected);
 
             // However, in a first place, we must ensure that this control mode change does not prevent the control of DC buses voltage.
             if (!LfDcComponentValidator.isValidAfterConverterChangesToPpccMode(context.getNetwork(), numDcc, selectedConverter)) {
@@ -62,46 +78,12 @@ public class AcDcConverterPowerLimitsOuterLoop implements AcOuterLoop {
             }
 
             // Set the converter's targetP to the exceeded limit.
-            double newTargetP;
-            if (selectedConverter.getPac() < selectedConverter.getMinP()) {
-                newTargetP = selectedConverter.getMinP();
-            } else {
-                newTargetP = selectedConverter.getMaxP();
-            }
+            double newTargetP = AcDcConverterPowerLimitsDecisions.newTargetP(pac[selected], minP[selected], maxP[selected]);
             selectedConverter.setTargetP(newTargetP);
             selectedConverter.setControlMode(AcDcConverter.ControlMode.P_PCC);
             globalStatus = OuterLoopStatus.UNSTABLE;
         }
         return new OuterLoopResult(this, globalStatus);
-    }
-
-    /**
-     * Get the converter with the largest distance to its power limit : this is the one we want to change in P_PCC mode
-     * This is a very simple heuristic, that may be challenged in the future.
-     *
-     * @param converters The list of converters in the same DC network.
-     * @return The converter the furthest to its active power limits, to be switched in P_PCC mode, or null if all converters are within their active power limits.
-     */
-    private LfAcDcConverter selectConverterToSwitchInPpccMode(List<LfAcDcConverter> converters) {
-        double maxDistanceToAnyLimit = maxActivePowerMismatch;  // This initialisation allows to ignore violation under maxActivePowerMismatch that are simply Newton-Raphson error
-        LfAcDcConverter selectedConverter = null;
-        for (LfAcDcConverter converter : converters) {
-            if (converter.getControlMode() == AcDcConverter.ControlMode.V_DC || converter.getControlMode() == AcDcConverter.ControlMode.DC_DROOP) {
-                double distanceToLowerLimit = converter.getMinP() - converter.getPac();
-                if (distanceToLowerLimit > maxDistanceToAnyLimit) {
-                    // Converter is below its lower limit
-                    maxDistanceToAnyLimit = distanceToLowerLimit;
-                    selectedConverter = converter;
-                }
-                double distanceToHigherLimit = converter.getPac() - converter.getMaxP();
-                if (distanceToHigherLimit > maxDistanceToAnyLimit) {
-                    // Converter is above its higher limit
-                    maxDistanceToAnyLimit = distanceToHigherLimit;
-                    selectedConverter = converter;
-                }
-            }
-        }
-        return selectedConverter;
     }
 
     @Override

@@ -8,7 +8,6 @@
 package com.powsybl.openloadflow.ac.outerloop;
 
 import com.powsybl.commons.report.ReportNode;
-import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.openloadflow.ac.AcOuterLoopContext;
 import com.powsybl.openloadflow.graph.GraphConnectivity;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopResult;
@@ -16,7 +15,7 @@ import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
-import com.powsybl.openloadflow.network.LfOverloadManagementSystem;
+import com.powsybl.openloadflow.network.OverloadManagementSystems;
 import com.powsybl.openloadflow.network.action.AbstractLfBranchAction;
 import com.powsybl.openloadflow.util.PerUnit;
 import org.slf4j.Logger;
@@ -51,27 +50,35 @@ public class AutomationSystemOuterLoop implements AcOuterLoop {
         LfNetwork network = context.getNetwork();
         Set<LfBranch> branchesToOpen = new HashSet<>();
         Set<LfBranch> branchesToClose = new HashSet<>();
-        for (LfOverloadManagementSystem system : network.getOverloadManagementSystems()) {
-            LfBranch branchToMonitor = system.getMonitoredBranch();
+        OverloadManagementSystems systems = OverloadManagementSystems.of(network);
+        int trippingCount = systems.firstTripping[systems.count];
+        boolean[] disabled = new boolean[trippingCount];
+        boolean[] inService = new boolean[trippingCount];
+        for (int s = 0; s < systems.count; s++) {
+            LfBranch branchToMonitor = network.getBranch(systems.monitoredBranchNum[s]);
             if (branchToMonitor.isConnectedAtBothSides()) {
-                double i = system.getMonitoredSide() == TwoSides.ONE ? branchToMonitor.getI1().eval() : branchToMonitor.getI2().eval();
-                for (LfOverloadManagementSystem.LfBranchTripping branchTripping : system.getBranchTrippingList()) {
-                    double threshold = branchTripping.threshold();
-                    LfBranch branchToOperate = branchTripping.branchToOperate();
-                    if (i > threshold && branchTripping.branchOpen() != branchToOperate.isDisabled()) {
-                        double ib = PerUnit.ib((system.getMonitoredSide() == TwoSides.ONE ?
-                                branchToMonitor.getBus1() : branchToMonitor.getBus2()).getNominalV());
-                        if (branchTripping.branchOpen() && isInService(branchToOperate)) {
-                            LOGGER.debug("Branch '{}' is overloaded ({} A > {} A), open branch at both side '{}'",
-                                    branchToMonitor.getId(), i * ib, threshold * ib, branchToOperate.getId());
-                            branchesToOpen.add(branchToOperate);
-                            break;
-                        } else if (!branchTripping.branchOpen() && !isInService(branchToOperate)) {
-                            LOGGER.debug("Branch '{}' is overloaded ({} A > {} A), close branch at both side '{}'",
-                                    branchToMonitor.getId(), i * ib, threshold * ib, branchToOperate.getId());
-                            branchesToClose.add(branchToOperate);
-                            break;
-                        }
+                boolean sideOne = systems.monitoredSide[s] == 1;
+                double i = sideOne ? branchToMonitor.getI1().eval() : branchToMonitor.getI2().eval();
+                for (int t = systems.firstTripping[s]; t < systems.firstTripping[s + 1]; t++) {
+                    LfBranch branchToOperate = network.getBranch(systems.branchToOperateNum[t]);
+                    disabled[t] = branchToOperate.isDisabled();
+                    inService[t] = isInService(branchToOperate);
+                }
+                int selected = AutomationSystemDecisions.selectTripping(i, systems.firstTripping[s], systems.firstTripping[s + 1],
+                        systems.threshold, systems.branchOpen, disabled, inService);
+                if (selected >= 0) {
+                    LfBranch branchToOperate = network.getBranch(systems.branchToOperateNum[selected]);
+                    double threshold = systems.threshold[selected];
+                    double ib = PerUnit.ib((sideOne ? branchToMonitor.getBus1() : branchToMonitor.getBus2()).getNominalV());
+                    if (AutomationSystemDecisions.trippingDecision(i, threshold, systems.branchOpen[selected], disabled[selected],
+                            inService[selected]) == AutomationSystemDecisions.DECISION_OPEN) {
+                        LOGGER.debug("Branch '{}' is overloaded ({} A > {} A), open branch at both side '{}'",
+                                branchToMonitor.getId(), i * ib, threshold * ib, branchToOperate.getId());
+                        branchesToOpen.add(branchToOperate);
+                    } else {
+                        LOGGER.debug("Branch '{}' is overloaded ({} A > {} A), close branch at both side '{}'",
+                                branchToMonitor.getId(), i * ib, threshold * ib, branchToOperate.getId());
+                        branchesToClose.add(branchToOperate);
                     }
                 }
             }

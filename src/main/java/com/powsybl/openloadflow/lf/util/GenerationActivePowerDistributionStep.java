@@ -134,10 +134,166 @@ public class GenerationActivePowerDistributionStep implements ActivePowerDistrib
         return done;
     }
 
+    /**
+     * The distribution on arrays, with the arithmetic of {@link ActivePowerDistribution.Step#distribute} and of
+     * {@link #resetToInitialState}, {@link #getParticipatingElements} and {@link #run}, step by step, so that the
+     * targets are the same to the last bit.
+     *
+     * <p>Gather: the participating generators of the participating buses, in their order, with their target before
+     * the reset and their initial target. Decide: the factors, normalised over the generators still taking power at
+     * each iteration, each generator moved and clamped at its limits, removed when it overshoots one. Apply: each
+     * generator is given its final target once, instead of its initial target and then each move.
+     *
+     * <p>Whether the injections moved sums their moves in the order of the generators, the reference generator first,
+     * where the default distribution sums them in the order of a hash map.
+     */
+    @Override
+    public ActivePowerDistribution.Result distribute(LfGenerator referenceGenerator, Collection<LfBus> participatingBuses, double activePowerMismatch) {
+        // the reference generator is reset first, as ActivePowerDistribution.Step.resetToInitialState does
+        double referenceMismatch = 0.;
+        double referencePreviousTargetP = Double.NaN;
+        if (referenceGenerator != null) {
+            referenceMismatch -= referenceGenerator.getInitialTargetP() - referenceGenerator.getTargetP();
+            referencePreviousTargetP = referenceGenerator.getTargetP();
+            referenceGenerator.setTargetP(referenceGenerator.getInitialTargetP());
+        }
+
+        // gather
+        int capacity = 0;
+        for (LfBus bus : participatingBuses) {
+            capacity += bus.getGenerators().size();
+        }
+        LfGenerator[] generators = new LfGenerator[capacity];
+        double[] previousTargetP = new double[capacity];
+        double[] targetP = new double[capacity];
+        int count = 0;
+        double previousMismatch = 0;
+        boolean referenceGathered = false;
+        for (LfBus bus : participatingBuses) {
+            for (LfGenerator generator : bus.getGenerators()) {
+                if (generator.isParticipating()) {
+                    previousMismatch -= generator.getInitialTargetP() - generator.getTargetP();
+                    generators[count] = generator;
+                    if (generator == referenceGenerator) {
+                        previousTargetP[count] = referencePreviousTargetP;
+                        referenceGathered = true;
+                    } else {
+                        previousTargetP[count] = generator.getTargetP();
+                    }
+                    targetP[count] = generator.getInitialTargetP();
+                    count++;
+                }
+            }
+        }
+        double remainingMismatch = activePowerMismatch + (previousMismatch + referenceMismatch);
+
+        // the elements that take power, as getParticipatingElements lists them
+        double[] factor = new double[count];
+        int[] elements = new int[count];
+        int elementCount = 0;
+        for (int i = 0; i < count; i++) {
+            double f = getParticipationFactor(generators[i], targetP[i], remainingMismatch);
+            if (isParticipating(generators[i]) && f != 0) {
+                factor[i] = f;
+                elements[elementCount++] = i;
+            }
+        }
+
+        // decide
+        int iteration = 0;
+        while (elementCount > 0 && Math.abs(remainingMismatch) > ActivePowerDistribution.P_RESIDUE_EPS) {
+            double factorSum = ActivePowerDistribution.compensatedSum(factor, elements, elementCount);
+            if (factorSum > 0.0) {
+                for (int k = 0; k < elementCount; k++) {
+                    factor[elements[k]] /= factorSum;
+                }
+                double done = 0d;
+                int modifiedBuses = 0;
+                int generatorsAtMax = 0;
+                int generatorsAtMin = 0;
+                int kept = 0;
+                for (int k = 0; k < elementCount; k++) {
+                    int i = elements[k];
+                    LfGenerator generator = generators[i];
+                    double minTargetP = useActiveLimits ? generator.getMinTargetP() : -Double.MAX_VALUE;
+                    double maxTargetP = useActiveLimits ? generator.getMaxTargetP() : Double.MAX_VALUE;
+                    double t = targetP[i];
+
+                    // we don't want to change the generation sign
+                    if (t < 0) {
+                        maxTargetP = Math.min(maxTargetP, 0);
+                    } else {
+                        minTargetP = Math.max(minTargetP, 0);
+                    }
+
+                    double newTargetP = t + remainingMismatch * factor[i];
+                    boolean removed = false;
+                    if (remainingMismatch > 0 && newTargetP > maxTargetP) {
+                        newTargetP = maxTargetP;
+                        generatorsAtMax++;
+                        removed = true;
+                    } else if (remainingMismatch < 0 && newTargetP < minTargetP) {
+                        newTargetP = minTargetP;
+                        generatorsAtMin++;
+                        removed = true;
+                    }
+                    if (!removed) {
+                        elements[kept++] = i;
+                    }
+
+                    if (newTargetP != t) {
+                        LOGGER.trace("Rescale '{}' active power target: {} -> {}",
+                                generator.getId(), t * PerUnit.SB, newTargetP * PerUnit.SB);
+                        targetP[i] = newTargetP;
+                        done += newTargetP - t;
+                        modifiedBuses++;
+                    }
+                }
+                elementCount = kept;
+
+                LOGGER.debug("{} MW / {} MW distributed at iteration {} to {} generators ({} at max power, {} at min power)",
+                        done * PerUnit.SB, remainingMismatch * PerUnit.SB, iteration, modifiedBuses,
+                        generatorsAtMax, generatorsAtMin);
+
+                remainingMismatch -= done;
+            } else {
+                break;
+            }
+            iteration++;
+        }
+
+        // apply
+        for (int i = 0; i < count; i++) {
+            generators[i].setTargetP(targetP[i]);
+        }
+
+        // whether the injections moved, as PreviousStateInfo.moved computes it
+        double movedSum = 0;
+        double compensation = 0;
+        double simpleSum = 0;
+        int first = referenceGenerator != null && !referenceGathered ? -1 : 0;
+        for (int i = first; i < count; i++) {
+            double value = i < 0 ? Math.abs(referenceGenerator.getTargetP() - referencePreviousTargetP)
+                                 : Math.abs(targetP[i] - previousTargetP[i]);
+            double tmp = value - compensation;
+            double velvel = movedSum + tmp;
+            compensation = (velvel - movedSum) - tmp;
+            movedSum = velvel;
+            simpleSum += value;
+        }
+        double moved = ActivePowerDistribution.finalSum(movedSum, compensation, simpleSum);
+
+        return new ActivePowerDistribution.Result(iteration, remainingMismatch, moved > ActivePowerDistribution.P_RESIDUE_EPS * 0.9);
+    }
+
     private double getParticipationFactor(LfGenerator generator, double mismatch) {
+        return getParticipationFactor(generator, generator.getTargetP(), mismatch);
+    }
+
+    private double getParticipationFactor(LfGenerator generator, double generatorTargetP, double mismatch) {
         return switch (participationType) {
             case MAX -> generator.getMaxP() / generator.getDroop();
-            case TARGET -> Math.abs(generator.getTargetP());
+            case TARGET -> Math.abs(generatorTargetP);
             case PARTICIPATION_FACTOR -> generator.getParticipationFactor();
             case REMAINING_MARGIN -> {
                 if (Double.isNaN(mismatch)) {
@@ -146,7 +302,7 @@ public class GenerationActivePowerDistributionStep implements ActivePowerDistrib
                 // Distribution does not change sign of targetP, we take this into account in remaining margin calculation.
                 // All participating generators should hit their limit together, depending on the direction and initial targetP,
                 // their limit may be not only minP/maxP, but also the forbidden zero crossing.
-                double targetP = generator.getTargetP();
+                double targetP = generatorTargetP;
                 double minP = generator.getMinP();
                 double maxP = generator.getMaxP();
                 if (targetP < 0) {

@@ -8,7 +8,6 @@
 package com.powsybl.openloadflow.lf.outerloop;
 
 import com.powsybl.openloadflow.network.*;
-import org.apache.commons.lang3.mutable.MutableInt;
 
 import java.util.Collections;
 import java.util.HashMap;
@@ -21,6 +20,10 @@ import java.util.function.Predicate;
  */
 public class IncrementalContextData {
 
+    /**
+     * The ratchet state of one controller ({@link IncrementalControlDecisions}): the direction changes so far, the
+     * direction of the last move, the allowed direction, and whether it was found too insensitive to act.
+     */
     public static final class ControllerContext {
 
         private final int maxDirectionChange;
@@ -29,27 +32,46 @@ public class IncrementalContextData {
             this.maxDirectionChange = maxDirectionChange;
         }
 
-        private final MutableInt directionChangeCount = new MutableInt();
+        private int directionChangeCount = 0;
 
-        private AllowedDirection allowedDirection = AllowedDirection.BOTH;
+        private int allowedDirection = DiscretePositionDecisions.ALLOWED_BOTH;
 
-        private Direction currentDirection;
+        private int currentDirection = IncrementalControlDecisions.DIRECTION_NONE;
 
         public AllowedDirection getAllowedDirection() {
+            return switch (allowedDirection) {
+                case DiscretePositionDecisions.ALLOWED_INCREASE -> AllowedDirection.INCREASE;
+                case DiscretePositionDecisions.ALLOWED_DECREASE -> AllowedDirection.DECREASE;
+                default -> AllowedDirection.BOTH;
+            };
+        }
+
+        /** The allowed direction, a {@code DiscretePositionDecisions.ALLOWED_*}. */
+        public int getAllowedDirectionCode() {
             return allowedDirection;
+        }
+
+        public int getMaxDirectionChange() {
+            return maxDirectionChange;
+        }
+
+        public int getDirectionChangeCount() {
+            return directionChangeCount;
+        }
+
+        /** The direction of the last move, an {@code IncrementalControlDecisions.DIRECTION_*}. */
+        public int getCurrentDirectionCode() {
+            return currentDirection;
         }
 
         private boolean insensitive = false;
 
         public void updateAllowedDirection(Direction direction) {
-            if (directionChangeCount.intValue() < maxDirectionChange) {
-                if (currentDirection != null && currentDirection != direction) {
-                    directionChangeCount.increment();
-                }
-                currentDirection = direction;
-            } else {
-                allowedDirection = direction.getAllowedDirection();
-            }
+            int move = direction == Direction.INCREASE ? IncrementalControlDecisions.DIRECTION_INCREASE : IncrementalControlDecisions.DIRECTION_DECREASE;
+            int count = directionChangeCount;
+            directionChangeCount = IncrementalControlDecisions.directionChangeCountAfter(count, maxDirectionChange, currentDirection, move);
+            currentDirection = IncrementalControlDecisions.currentDirectionAfter(count, maxDirectionChange, currentDirection, move);
+            allowedDirection = IncrementalControlDecisions.allowedDirectionAfter(count, maxDirectionChange, allowedDirection, move);
         }
 
         public void setInsensitive() {

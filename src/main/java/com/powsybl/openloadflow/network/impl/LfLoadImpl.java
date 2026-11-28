@@ -254,13 +254,24 @@ public class LfLoadImpl extends AbstractLfInjection implements LfLoad {
 
     @Override
     public double calculateNewTargetQ(double diffTargetP) {
-        double newLoadTargetQ = 0;
+        return getPowerFactorTerms().newTargetQ(diffTargetP);
+    }
+
+    @Override
+    public LoadPowerFactorTerms getPowerFactorTerms() {
+        int n = loadsRefs.size();
+        double[] q0 = new double[n];
+        double[] powerFactor = new double[n];
+        double[] participationFactor = new double[n];
+        int i = 0;
         for (Ref<Load> refLoad : loadsRefs.values()) {
             Load load = refLoad.get();
-            double updatedQ0 = load.getQ0() / PerUnit.SB + getPowerFactor(load) * diffTargetP * getParticipationFactor(load.getId());
-            newLoadTargetQ += updatedQ0;
+            q0[i] = load.getQ0() / PerUnit.SB;
+            powerFactor[i] = getPowerFactor(load);
+            participationFactor[i] = getParticipationFactor(load.getId());
+            i++;
         }
-        return newLoadTargetQ;
+        return new LoadPowerFactorTerms(q0, powerFactor, participationFactor);
     }
 
     @Override
