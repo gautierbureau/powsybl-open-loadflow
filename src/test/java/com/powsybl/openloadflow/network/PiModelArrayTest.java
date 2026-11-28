@@ -150,4 +150,20 @@ class PiModelArrayTest {
         assertEquals(1, DiscretePositionDecisions.firstPositionAbove(piModelArray.getTapA1s(), 0, 0, 1, Integer.MAX_VALUE, 5));
         assertEquals(1, DiscretePositionDecisions.firstPositionAbove(piModelArray.getTapA1s(), 0, 0, 2, 1, 5));
     }
+
+    @Test
+    void tapModels() {
+        TapPiModels taps = piModelArray.getTapModels();
+        assertEquals(3, taps.getTapCount());
+        assertArrayEquals(new double[] {1, 1.01, 1.05}, taps.r());
+        assertArrayEquals(new double[] {2.4, 2.41, 2.43}, taps.x());
+        assertArrayEquals(new double[] {1, 1.1, 1.2}, taps.r1());
+        assertArrayEquals(new double[] {0, 0.1, 0.2}, taps.a1());
+        assertEquals(piModel2.getY(), taps.y()[1]);
+        assertEquals(piModel3.getKsi(), taps.ksi()[2]);
+        // read now: a minimum impedance change is in the next table
+        piModelArray.setMinZ(10, LoadFlowModel.AC);
+        assertEquals(piModel1.getY(), piModelArray.getTapModels().y()[0]);
+        assertNotEquals(taps.y()[0], piModelArray.getTapModels().y()[0]);
+    }
 }

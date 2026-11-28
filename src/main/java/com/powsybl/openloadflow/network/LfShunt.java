@@ -36,22 +36,27 @@ public interface LfShunt extends LfElement, LfCopyable<LfShunt, LfBus> {
 
         private final double bMagnitude;
 
-        // the susceptance of each section, as an array: read once, the sections do not change
+        // the susceptance and the conductance of each section, as arrays: read once, the sections do not change
         private final double[] sectionBs;
 
+        private final double[] sectionGs;
+
         public Controller(String id, List<Double> sectionsB, List<Double> sectionsG, int position, int minPosition) {
-            this(id, sectionsB, sectionsB.stream().mapToDouble(Double::doubleValue).toArray(), sectionsG, position, minPosition);
+            this(id, sectionsB, sectionsB.stream().mapToDouble(Double::doubleValue).toArray(), sectionsG,
+                    sectionsG.stream().mapToDouble(Double::doubleValue).toArray(), position, minPosition);
         }
 
         /** A controller over the sections of another one: the array of their susceptances is shared. */
         protected Controller(String id, Controller sections, int position) {
-            this(id, sections.sectionsB, sections.sectionBs, sections.sectionsG, position, sections.minPosition);
+            this(id, sections.sectionsB, sections.sectionBs, sections.sectionsG, sections.sectionGs, position, sections.minPosition);
         }
 
-        private Controller(String id, List<Double> sectionsB, double[] sectionBs, List<Double> sectionsG, int position, int minPosition) {
+        private Controller(String id, List<Double> sectionsB, double[] sectionBs, List<Double> sectionsG, double[] sectionGs,
+                           int position, int minPosition) {
             this.id = Objects.requireNonNull(id);
             this.sectionsB = Objects.requireNonNull(sectionsB);
             this.sectionBs = sectionBs;
+            this.sectionGs = sectionGs;
             this.sectionsG = Objects.requireNonNull(sectionsG);
             this.position = position;
             this.minPosition = minPosition;
@@ -71,6 +76,11 @@ public interface LfShunt extends LfElement, LfCopyable<LfShunt, LfBus> {
         /** The susceptance of each section, by position. Not to be modified. */
         public double[] getSectionBs() {
             return sectionBs;
+        }
+
+        /** The conductance of each section, by position. Not to be modified. */
+        public double[] getSectionGs() {
+            return sectionGs;
         }
 
         public List<Double> getSectionsG() {

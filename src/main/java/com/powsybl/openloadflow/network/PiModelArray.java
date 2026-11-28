@@ -77,6 +77,31 @@ public class PiModelArray implements PiModel {
         return tapA1s;
     }
 
+    /** Every tap's pi model as columns, read from the taps' models now. */
+    public TapPiModels getTapModels() {
+        int n = models.size();
+        double[] r = new double[n];
+        double[] x = new double[n];
+        double[] y = new double[n];
+        double[] ksi = new double[n];
+        double[] g1 = new double[n];
+        double[] b1 = new double[n];
+        double[] g2 = new double[n];
+        double[] b2 = new double[n];
+        for (int i = 0; i < n; i++) {
+            PiModel model = models.get(i);
+            r[i] = model.getR();
+            x[i] = model.getX();
+            y[i] = model.getY();
+            ksi[i] = model.getKsi();
+            g1[i] = model.getG1();
+            b1[i] = model.getB1();
+            g2[i] = model.getG2();
+            b2[i] = model.getB2();
+        }
+        return new TapPiModels(r, x, y, ksi, g1, b1, g2, b2, tapR1s.clone(), tapA1s.clone());
+    }
+
     public int getLowTapPosition() {
         return lowTapPosition;
     }

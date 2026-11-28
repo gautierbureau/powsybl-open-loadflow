@@ -238,6 +238,17 @@ public abstract class AbstractLfGenerator extends AbstractLfInjection implements
 
     protected abstract Optional<ReactiveLimits> getReactiveLimits();
 
+    @Override
+    public Optional<ReactiveCapabilityCurvePoints> getReactiveCapabilityCurvePoints() {
+        LimitsKind kind = limitsKind == LimitsKind.NOT_READ_YET ? readLimitsKind() : limitsKind;
+        return kind == LimitsKind.CURVE ? Optional.of(curvePoints) : Optional.empty();
+    }
+
+    @Override
+    public boolean isExtrapolateReactiveLimits() {
+        return extrapolateReactiveLimits;
+    }
+
     /**
      * Whether the reactive limits are fixed once the network is built, so that they can be read once.
      */

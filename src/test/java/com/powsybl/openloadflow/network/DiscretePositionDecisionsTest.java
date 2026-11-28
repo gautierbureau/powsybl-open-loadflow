@@ -92,5 +92,6 @@ class DiscretePositionDecisionsTest {
         assertEquals(Optional.empty(), c.updateSectionB(-0.15, 3, AllowedDirection.INCREASE));
         assertEquals(Optional.of(Direction.DECREASE), c.updateSectionB(-0.2, 1, AllowedDirection.DECREASE));
         assertEquals(1, c.getPosition());
+        assertArrayEquals(new double[] {0.0, 0.1, 0.2, 0.3}, c.getSectionGs());
     }
 }
