@@ -228,6 +228,7 @@ public class IncrementalShuntVoltageControlOuterLoop extends AbstractShuntVoltag
             ShuntVoltageControl voltageControl = controlledBus.getShuntVoltageControl().orElseThrow();
             v.busNum[b] = controlledBus.getNum();
             v.diffV[b] = getDiffV(voltageControl);
+            v.target[b] = controlledBus.getHighestPriorityTargetV().orElseThrow();
             v.halfTargetDeadband[b] = getHalfTargetDeadband(voltageControl);
             v.firstShunt[b] = s;
             for (LfShunt shunt : shuntsPerBus.get(b)) {

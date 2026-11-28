@@ -30,6 +30,10 @@ public final class TransformerControlVector {
     public int[] controlledNum = new int[0];
     /** Target minus value of the controlled quantity (pu): voltage of a bus, reactive power of a branch. */
     public double[] diff = new double[0];
+    /** The target of the controlled quantity (pu): the bus's target voltage, the branch's target reactive power. */
+    public double[] target = new double[0];
+    /** The side of a controlled branch whose reactive power is controlled, 1 or 2; 0 for a controlled bus. */
+    public int[] controlledSide = new int[0];
     public double[] halfTargetDeadband = new double[0];
     /** The controllers of element {@code b} are {@code firstController[b]} to {@code firstController[b + 1] - 1}. */
     public int[] firstController = new int[1];
@@ -74,6 +78,8 @@ public final class TransformerControlVector {
             controlledNum = new int[newControlledCount];
             diff = new double[newControlledCount];
             halfTargetDeadband = new double[newControlledCount];
+            target = new double[newControlledCount];
+            controlledSide = new int[newControlledCount];
             firstController = new int[newControlledCount + 1];
             allControllersAtLimit = new boolean[newControlledCount];
         }

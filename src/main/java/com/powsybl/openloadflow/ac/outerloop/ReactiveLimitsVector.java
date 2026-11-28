@@ -38,8 +38,10 @@ public final class ReactiveLimitsVector {
     public int[] qLimitType = new int[0];
     /** The switches from PV to PQ the bus already made in this run. */
     public int[] pvPqSwitchCount = new int[0];
-    /** Reactive power generated at the bus (pu). */
+    /** Reactive power generated at the bus (pu): the bus's reactive power plus {@link #loadTargetQ}. */
     public double[] q = new double[0];
+    /** The reactive power target of the bus's loads (pu), for a controlling bus; an engine computing q itself adds it. */
+    public double[] loadTargetQ = new double[0];
     public double[] minQ = new double[0];
     public double[] maxQ = new double[0];
     /** The bus's own voltage (pu). */
@@ -80,6 +82,7 @@ public final class ReactiveLimitsVector {
             qLimitType = new int[newCount];
             pvPqSwitchCount = new int[newCount];
             q = new double[newCount];
+            loadTargetQ = new double[newCount];
             minQ = new double[newCount];
             maxQ = new double[newCount];
             v = new double[newCount];

@@ -30,6 +30,9 @@ public final class MonitoringVoltageVector {
     /** The automaton's thresholds (pu). */
     public double[] lowThreshold = new double[0];
     public double[] highThreshold = new double[0];
+    /** The automaton's targets (pu): the target voltage a switch at the low or the high threshold sets. */
+    public double[] lowTargetV = new double[0];
+    public double[] highTargetV = new double[0];
 
     // ---- outputs ----
 
@@ -43,6 +46,8 @@ public final class MonitoringVoltageVector {
             controlledV = new double[newCount];
             lowThreshold = new double[newCount];
             highThreshold = new double[newCount];
+            lowTargetV = new double[newCount];
+            highTargetV = new double[newCount];
             decision = new int[newCount];
         }
         count = newCount;

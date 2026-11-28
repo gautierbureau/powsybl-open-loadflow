@@ -220,6 +220,8 @@ public class IncrementalTransformerReactivePowerControlOuterLoop extends Abstrac
             IncrementalContextData.ControllerContext controllerContext = contextData.getControllersContexts().get(controllerBranch.getId());
             v.controlledNum[b] = controlledBranch.getNum();
             v.diff[b] = getDiffQ(reactivePowerControl);
+            v.target[b] = getHighestPriorityReactivePowerTarget(controlledBranch);
+            v.controlledSide[b] = reactivePowerControl.getControlledSide() == TwoSides.ONE ? 1 : 2;
             v.halfTargetDeadband[b] = getHalfTargetDeadband(reactivePowerControl);
             v.firstController[b] = b;
             v.branchNum[b] = controllerBranch.getNum();

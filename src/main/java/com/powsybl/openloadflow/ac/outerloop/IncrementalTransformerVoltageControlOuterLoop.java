@@ -243,6 +243,8 @@ public class IncrementalTransformerVoltageControlOuterLoop extends AbstractTrans
             TransformerVoltageControl voltageControl = controlledBus.getTransformerVoltageControl().orElseThrow();
             v.controlledNum[b] = controlledBus.getNum();
             v.diff[b] = getDiffV(voltageControl);
+            v.target[b] = controlledBus.getHighestPriorityTargetV().orElseThrow();
+            v.controlledSide[b] = 0;
             v.halfTargetDeadband[b] = getHalfTargetDeadband(voltageControl);
             v.firstController[b] = c;
             for (LfBranch controllerBranch : controllersPerBus.get(b)) {

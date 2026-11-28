@@ -105,6 +105,8 @@ public class PhaseControlOuterLoop
             // only local control supported: controlled branch is controller branch.
             v.branchNum[k] = controllerBranch.getNum();
             v.limiter[k] = true;
+            v.controlledBranchNum[k] = controllerBranch.getNum();
+            v.controlledSide[k] = side == TwoSides.ONE ? 1 : 2;
             v.target[k] = phaseControl.getTargetValue();
             v.value[k] = side == TwoSides.ONE ? controllerBranch.getI1().eval() : controllerBranch.getI2().eval();
             boolean sensitivityPositive = PhaseControlDecisions.isAboveLimit(v.value[k], v.target[k])

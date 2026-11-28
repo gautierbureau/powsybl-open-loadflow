@@ -26,6 +26,10 @@ public final class PhaseControlVector {
 
     /** The controller branch. */
     public int[] branchNum = new int[0];
+    /** The branch whose flow is controlled (the controller branch itself for a current limiter). */
+    public int[] controlledBranchNum = new int[0];
+    /** The side of the controlled branch whose flow is controlled, 1 or 2. */
+    public int[] controlledSide = new int[0];
     /** A current limiter; otherwise an active power controller. */
     public boolean[] limiter = new boolean[0];
     /** The controlled current (limiter) or active power (controller), on the controlled side (pu). */
@@ -52,6 +56,8 @@ public final class PhaseControlVector {
         if (newCount > branchNum.length) {
             branchNum = new int[newCount];
             limiter = new boolean[newCount];
+            controlledBranchNum = new int[newCount];
+            controlledSide = new int[newCount];
             value = new double[newCount];
             target = new double[newCount];
             halfTargetDeadband = new double[newCount];

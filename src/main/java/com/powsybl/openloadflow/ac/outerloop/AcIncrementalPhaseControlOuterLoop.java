@@ -109,6 +109,8 @@ public class AcIncrementalPhaseControlOuterLoop
             LfBranch controlledBranch = phaseControl.getControlledBranch();
             v.branchNum[k] = controllerBranch.getNum();
             v.limiter[k] = true;
+            v.controlledBranchNum[k] = controlledBranch.getNum();
+            v.controlledSide[k] = phaseControl.getControlledSide() == TwoSides.ONE ? 1 : 2;
             v.value[k] = computeI(phaseControl);
             v.target[k] = phaseControl.getTargetValue();
             if (PhaseControlDecisions.needsSensitivity(true, v.value[k], v.target[k], Double.NaN)) {

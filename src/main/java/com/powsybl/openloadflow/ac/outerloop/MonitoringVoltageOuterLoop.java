@@ -146,7 +146,7 @@ public class MonitoringVoltageOuterLoop implements AcOuterLoop {
     }
 
     /** The buses the check looks at: monitored controller buses with their voltage control off and a stand-by automaton. */
-    static MonitoringVoltageVector gather(LfNetwork network) {
+    public static MonitoringVoltageVector gather(LfNetwork network) {
         MonitoringVoltageVector m = new MonitoringVoltageVector();
         boolean[] monitoredBuses = getMonitoredBuses(network);
         if (monitoredBuses == null) {
@@ -170,6 +170,9 @@ public class MonitoringVoltageOuterLoop implements AcOuterLoop {
             m.controlledV[i] = getBusV(bus);
             m.lowThreshold[i] = limits.get(i).getMinimum();
             m.highThreshold[i] = limits.get(i).getMaximum();
+            LfStaticVarCompensator.StandByAutomaton automaton = findMonitoringSvc(bus).flatMap(LfStaticVarCompensator::getStandByAutomaton).orElseThrow();
+            m.lowTargetV[i] = automaton.getLowTargetV();
+            m.highTargetV[i] = automaton.getHighTargetV();
         }
         return m;
     }
