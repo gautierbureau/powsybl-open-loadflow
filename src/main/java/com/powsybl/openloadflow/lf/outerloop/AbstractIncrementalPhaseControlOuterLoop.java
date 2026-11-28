@@ -35,8 +35,8 @@ public abstract class AbstractIncrementalPhaseControlOuterLoop<V extends Enum<V>
 
     public static final int MAX_DIRECTION_CHANGE = 3;
     public static final int MAX_TAP_SHIFT = Integer.MAX_VALUE;
-    public static final double MIN_TARGET_DEADBAND = 1 / PerUnit.SB; // 1 MW
-    public static final double SENSI_EPS = 1e-6;
+    public static final double MIN_TARGET_DEADBAND = PhaseControlDecisions.MIN_TARGET_DEADBAND; // 1 MW
+    public static final double SENSI_EPS = PhaseControlDecisions.SENSI_EPS;
     public static final double PHASE_SHIFT_CROSS_IMPACT_MARGIN = 0.75;
     public static final String NAME = "IncrementalPhaseControl";
     protected final Logger logger;
@@ -59,7 +59,7 @@ public abstract class AbstractIncrementalPhaseControlOuterLoop<V extends Enum<V>
     }
 
     public static double getHalfTargetDeadband(TransformerPhaseControl phaseControl) {
-        return Math.max(phaseControl.getTargetDeadband(), MIN_TARGET_DEADBAND) / 2;
+        return PhaseControlDecisions.halfTargetDeadband(phaseControl.getTargetDeadband());
     }
 
     @Override
@@ -113,41 +113,55 @@ public abstract class AbstractIncrementalPhaseControlOuterLoop<V extends Enum<V>
         }
     }
 
+    /**
+     * The active power controllers out of their target deadband move to the tap closest to the phase shift the
+     * sensitivity asks for ({@link PhaseControlDecisions#incrementalDecision}). A controller is read, decided and moved
+     * before the next one is read.
+     */
     protected void checkActivePowerControlPhaseControls(AbstractSensitivityContext<V, E> sensitivityContext, IncrementalContextData contextData,
                                                            List<TransformerPhaseControl> activePowerControlPhaseControls,
                                                            List<DiscreteControllerChange> activePowerControlPstsThatChangedTap) {
-
-        for (TransformerPhaseControl phaseControl : activePowerControlPhaseControls) {
+        PhaseControlVector v = new PhaseControlVector();
+        v.reset(activePowerControlPhaseControls.size());
+        for (int k = 0; k < v.count; k++) {
+            TransformerPhaseControl phaseControl = activePowerControlPhaseControls.get(k);
             LfBranch controllerBranch = phaseControl.getControllerBranch();
             LfBranch controlledBranch = phaseControl.getControlledBranch();
-            var p = phaseControl.getControlledSide() == TwoSides.ONE
-                    ? controlledBranch.getP1() : controlledBranch.getP2();
-            double pValue = p.eval();
-            double halfTargetDeadband = getHalfTargetDeadband(phaseControl);
-            if (Math.abs(pValue - phaseControl.getTargetValue()) > halfTargetDeadband) {
+            gatherActivePowerControl(v, k, phaseControl);
+            if (PhaseControlDecisions.needsSensitivity(false, v.value[k], v.target[k], v.halfTargetDeadband[k])) {
+                v.sensitivity[k] = sensitivityContext.calculateSensitivityFromA2P(controllerBranch, controlledBranch, phaseControl.getControlledSide());
+            }
+            PhaseControlDecisions.decideIncrementalEntry(v, k);
+            if (v.decision[k] == PhaseControlDecisions.DECISION_REACH_PHASE_SHIFT) {
+                double da = v.phaseShift[k];
+                logger.trace("Controlled branch '{}' active power is {} MW and out of target value {} MW (half deadband={} MW), a phase shift of {}° is required",
+                        controlledBranch.getId(), v.value[k] * PerUnit.SB, v.target[k] * PerUnit.SB, v.halfTargetDeadband[k] * PerUnit.SB, Math.toDegrees(da));
                 var controllerContext = contextData.getControllersContexts().get(controllerBranch.getId());
-                double dp = phaseControl.getTargetValue() - pValue;
-                double a2p = sensitivityContext.calculateSensitivityFromA2P(controllerBranch, controlledBranch, phaseControl.getControlledSide());
-                if (Math.abs(a2p) > SENSI_EPS) {
-                    double da = Math.toRadians(dp / a2p);
-                    logger.trace("Controlled branch '{}' active power is {} MW and out of target value {} MW (half deadband={} MW), a phase shift of {}° is required",
-                            controlledBranch.getId(), pValue * PerUnit.SB, phaseControl.getTargetValue() * PerUnit.SB, halfTargetDeadband * PerUnit.SB, Math.toDegrees(da));
-                    PiModel piModel = controllerBranch.getPiModel();
+                PiModel piModel = controllerBranch.getPiModel();
 
-                    int oldTapPosition = piModel.getTapPosition();
-                    Range<Integer> tapPositionRange = piModel.getTapPositionRange();
-                    piModel.updateTapPositionToReachNewA1(da, MAX_TAP_SHIFT, controllerContext.getAllowedDirection())
-                            .ifPresent(controllerContext::updateAllowedDirection);
+                int oldTapPosition = piModel.getTapPosition();
+                Range<Integer> tapPositionRange = piModel.getTapPositionRange();
+                piModel.updateTapPositionToReachNewA1(da, MAX_TAP_SHIFT, controllerContext.getAllowedDirection())
+                        .ifPresent(controllerContext::updateAllowedDirection);
 
-                    if (piModel.getTapPosition() != oldTapPosition) {
-                        logger.debug("Controller branch '{}' change tap from {} to {} to reach active power target (full range: {})", controllerBranch.getId(),
-                                oldTapPosition, piModel.getTapPosition(), tapPositionRange);
-                        DiscreteControllerChange change = DiscreteControllerChange.ofTransformer(controllerBranch, oldTapPosition, piModel.getTapPosition());
-                        activePowerControlPstsThatChangedTap.add(change);
-                    }
+                if (piModel.getTapPosition() != oldTapPosition) {
+                    logger.debug("Controller branch '{}' change tap from {} to {} to reach active power target (full range: {})", controllerBranch.getId(),
+                            oldTapPosition, piModel.getTapPosition(), tapPositionRange);
+                    DiscreteControllerChange change = DiscreteControllerChange.ofTransformer(controllerBranch, oldTapPosition, piModel.getTapPosition());
+                    activePowerControlPstsThatChangedTap.add(change);
                 }
             }
         }
+    }
+
+    /** Entry {@code k}: an active power controller, its controlled active power, target and half deadband. */
+    protected static void gatherActivePowerControl(PhaseControlVector v, int k, TransformerPhaseControl phaseControl) {
+        LfBranch controlledBranch = phaseControl.getControlledBranch();
+        v.branchNum[k] = phaseControl.getControllerBranch().getNum();
+        v.limiter[k] = false;
+        v.value[k] = (phaseControl.getControlledSide() == TwoSides.ONE ? controlledBranch.getP1() : controlledBranch.getP2()).eval();
+        v.target[k] = phaseControl.getTargetValue();
+        v.halfTargetDeadband[k] = getHalfTargetDeadband(phaseControl);
     }
 
 }

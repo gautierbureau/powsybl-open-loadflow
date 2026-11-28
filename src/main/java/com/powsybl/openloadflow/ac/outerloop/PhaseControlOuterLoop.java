@@ -18,6 +18,8 @@ import com.powsybl.openloadflow.equations.EquationTerm;
 import com.powsybl.openloadflow.lf.outerloop.AbstractPhaseControlOuterLoop;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopResult;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
+import com.powsybl.openloadflow.lf.outerloop.PhaseControlDecisions;
+import com.powsybl.openloadflow.lf.outerloop.PhaseControlVector;
 import com.powsybl.openloadflow.network.Direction;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.PiModel;
@@ -82,17 +84,38 @@ public class PhaseControlOuterLoop
         return controllerBranches.isEmpty() ? OuterLoopStatus.STABLE : OuterLoopStatus.UNSTABLE;
     }
 
+    /**
+     * At the second outer loop iteration and after, the phase controls in limiter mode whose current is above the limit
+     * move one tap against the sensitivity of the current to the phase shift ({@link
+     * PhaseControlDecisions#discreteLimiterDecision}). A limiter is read, decided and moved before the next one is
+     * read, as before: a tap move can change the current another limiter reads.
+     */
     private OuterLoopStatus nextIteration(AcOuterLoopContext context) {
-        // at second outer loop iteration we switch on phase control for branches that are in limiter mode
-        // and a current greater than the limit
-        // phase control consists in increasing or decreasing tap position to limit the current
-        List<TransformerPhaseControl> unstablePhaseControls = getControllerBranches(context.getNetwork()).stream()
+        List<TransformerPhaseControl> limiters = getControllerBranches(context.getNetwork()).stream()
                 .flatMap(branch -> branch.getPhaseControl().stream())
                 .filter(phaseControl -> phaseControl.getMode() == TransformerPhaseControl.Mode.LIMITER)
-                .filter(this::changeTapPositions)
-                .collect(Collectors.toList());
-
-        return unstablePhaseControls.isEmpty() ? OuterLoopStatus.STABLE : OuterLoopStatus.UNSTABLE;
+                .toList();
+        PhaseControlVector v = new PhaseControlVector();
+        v.reset(limiters.size());
+        boolean changed = false;
+        for (int k = 0; k < v.count; k++) {
+            TransformerPhaseControl phaseControl = limiters.get(k);
+            LfBranch controllerBranch = phaseControl.getControllerBranch();
+            TwoSides side = phaseControl.getControlledSide();
+            // only local control supported: controlled branch is controller branch.
+            v.branchNum[k] = controllerBranch.getNum();
+            v.limiter[k] = true;
+            v.target[k] = phaseControl.getTargetValue();
+            v.value[k] = side == TwoSides.ONE ? controllerBranch.getI1().eval() : controllerBranch.getI2().eval();
+            boolean sensitivityPositive = PhaseControlDecisions.isAboveLimit(v.value[k], v.target[k])
+                    && isSensitivityCurrentPerA1Positive(controllerBranch, side);
+            v.decision[k] = PhaseControlDecisions.discreteLimiterDecision(v.value[k], v.target[k], sensitivityPositive);
+            if (v.decision[k] != PhaseControlDecisions.DECISION_NONE) {
+                Direction direction = v.decision[k] == PhaseControlDecisions.DECISION_SHIFT_ONE_TAP_UP ? Direction.INCREASE : Direction.DECREASE;
+                changed |= controllerBranch.getPiModel().shiftOneTapPositionToChangeA1(direction);
+            }
+        }
+        return changed ? OuterLoopStatus.UNSTABLE : OuterLoopStatus.STABLE;
     }
 
     private void switchOffPhaseControl(TransformerPhaseControl phaseControl) {
@@ -106,21 +129,6 @@ public class PhaseControlOuterLoop
         piModel.roundA1ToClosestTap();
         double roundedA1Value = piModel.getA1();
         LOGGER.info("Round phase shift of '{}': {} -> {}", controllerBranch.getId(), a1Value, roundedA1Value);
-    }
-
-    private boolean changeTapPositions(TransformerPhaseControl phaseControl) {
-        // only local control supported: controlled branch is controller branch.
-        double currentLimit = phaseControl.getTargetValue();
-        LfBranch controllerBranch = phaseControl.getControllerBranch();
-        PiModel piModel = controllerBranch.getPiModel();
-        if (phaseControl.getControlledSide() == TwoSides.ONE && currentLimit < controllerBranch.getI1().eval()) {
-            boolean isSensibilityPositive = isSensitivityCurrentPerA1Positive(controllerBranch, TwoSides.ONE);
-            return isSensibilityPositive ? piModel.shiftOneTapPositionToChangeA1(Direction.DECREASE) : piModel.shiftOneTapPositionToChangeA1(Direction.INCREASE);
-        } else if (phaseControl.getControlledSide() == TwoSides.TWO && currentLimit < controllerBranch.getI2().eval()) {
-            boolean isSensibilityPositive = isSensitivityCurrentPerA1Positive(controllerBranch, TwoSides.TWO);
-            return isSensibilityPositive ? piModel.shiftOneTapPositionToChangeA1(Direction.DECREASE) : piModel.shiftOneTapPositionToChangeA1(Direction.INCREASE);
-        }
-        return false;
     }
 
     @SuppressWarnings("unchecked")
