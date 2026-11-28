@@ -16,7 +16,6 @@ import com.powsybl.openloadflow.network.LfHvdc;
 import com.powsybl.openloadflow.util.PerUnit;
 import org.slf4j.Logger;
 
-
 /**
  * @author Sylvestre Prabakaran {@literal <sylvestre.prabakaran at rte-france.com>}
  * @author Hadrien Godard {@literal <hadrien.godard at artelys.com>}
