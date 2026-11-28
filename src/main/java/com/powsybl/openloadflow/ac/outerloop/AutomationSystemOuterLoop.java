@@ -23,6 +23,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -55,23 +56,33 @@ public class AutomationSystemOuterLoop implements AcOuterLoop {
             LfBranch branchToMonitor = system.getMonitoredBranch();
             if (branchToMonitor.isConnectedAtBothSides()) {
                 double i = system.getMonitoredSide() == TwoSides.ONE ? branchToMonitor.getI1().eval() : branchToMonitor.getI2().eval();
-                for (LfOverloadManagementSystem.LfBranchTripping branchTripping : system.getBranchTrippingList()) {
-                    double threshold = branchTripping.threshold();
-                    LfBranch branchToOperate = branchTripping.branchToOperate();
-                    if (i > threshold && branchTripping.branchOpen() != branchToOperate.isDisabled()) {
-                        double ib = PerUnit.ib((system.getMonitoredSide() == TwoSides.ONE ?
-                                branchToMonitor.getBus1() : branchToMonitor.getBus2()).getNominalV());
-                        if (branchTripping.branchOpen() && isInService(branchToOperate)) {
-                            LOGGER.debug("Branch '{}' is overloaded ({} A > {} A), open branch at both side '{}'",
-                                    branchToMonitor.getId(), i * ib, threshold * ib, branchToOperate.getId());
-                            branchesToOpen.add(branchToOperate);
-                            break;
-                        } else if (!branchTripping.branchOpen() && !isInService(branchToOperate)) {
-                            LOGGER.debug("Branch '{}' is overloaded ({} A > {} A), close branch at both side '{}'",
-                                    branchToMonitor.getId(), i * ib, threshold * ib, branchToOperate.getId());
-                            branchesToClose.add(branchToOperate);
-                            break;
-                        }
+                List<LfOverloadManagementSystem.LfBranchTripping> trippings = system.getBranchTrippingList();
+                int count = trippings.size();
+                double[] threshold = new double[count];
+                boolean[] branchOpen = new boolean[count];
+                boolean[] disabled = new boolean[count];
+                boolean[] inService = new boolean[count];
+                for (int t = 0; t < count; t++) {
+                    LfOverloadManagementSystem.LfBranchTripping branchTripping = trippings.get(t);
+                    threshold[t] = branchTripping.threshold();
+                    branchOpen[t] = branchTripping.branchOpen();
+                    disabled[t] = branchTripping.branchToOperate().isDisabled();
+                    inService[t] = isInService(branchTripping.branchToOperate());
+                }
+                int selected = AutomationSystemDecisions.selectTripping(i, 0, count, threshold, branchOpen, disabled, inService);
+                if (selected >= 0) {
+                    LfBranch branchToOperate = trippings.get(selected).branchToOperate();
+                    double ib = PerUnit.ib((system.getMonitoredSide() == TwoSides.ONE ?
+                            branchToMonitor.getBus1() : branchToMonitor.getBus2()).getNominalV());
+                    if (AutomationSystemDecisions.trippingDecision(i, threshold[selected], branchOpen[selected], disabled[selected],
+                            inService[selected]) == AutomationSystemDecisions.DECISION_OPEN) {
+                        LOGGER.debug("Branch '{}' is overloaded ({} A > {} A), open branch at both side '{}'",
+                                branchToMonitor.getId(), i * ib, threshold[selected] * ib, branchToOperate.getId());
+                        branchesToOpen.add(branchToOperate);
+                    } else {
+                        LOGGER.debug("Branch '{}' is overloaded ({} A > {} A), close branch at both side '{}'",
+                                branchToMonitor.getId(), i * ib, threshold[selected] * ib, branchToOperate.getId());
+                        branchesToClose.add(branchToOperate);
                     }
                 }
             }
